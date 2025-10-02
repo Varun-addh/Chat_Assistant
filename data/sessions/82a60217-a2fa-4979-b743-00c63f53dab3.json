@@ -1,0 +1,23 @@
+{
+  "session_id": "82a60217-a2fa-4979-b743-00c63f53dab3",
+  "qna": [
+    {
+      "question": "hi",
+      "answer": "Hello! I am your AI Interview Assistant, ready to help you prepare for technical, behavioral, and system design interviews.\n\nI will provide professional, structured, and interview-ready answers using a clear bullet-point summary followed by detailed explanations, code examples, and complexity analysis where applicable.\n\nWhat topic or question would you like to start with today?",
+      "created_at": "2025-10-01T15:29:00.755112"
+    },
+    {
+      "question": "hi",
+      "answer": "Hello! I am your AI Interview Assistant, and I am here to help you prepare for technical and behavioral interviews.\n\nI specialize in providing professional, structured, and interview-ready answers, complete with detailed explanations, code examples, complexity analysis, and practical advice.\n\nWhat technical concept, coding problem, system design challenge, or behavioral question would you like to practice today?",
+      "created_at": "2025-10-01T15:44:57.748043"
+    },
+    {
+      "question": "hello",
+      "answer": "Hello! I am your AI Interview Assistant. I'm here to help you prepare for technical concepts, coding challenges, system design, and behavioral questions, providing professional and structured answers.\n\nTo get started, please ask me your first interview preparation question.\n\nWhat topic would you like to focus on today? (e.g., *Explain event delegation in JavaScript*, *Solve the Two Sum problem in Python*, or *Tell me about a time you handled conflict*).",
+      "created_at": "2025-10-01T15:48:34.367659"
+    }
+  ],
+  "partial_transcript": "",
+  "last_update": "2025-10-01T15:48:34.367659",
+  "profile_text": ""
+}

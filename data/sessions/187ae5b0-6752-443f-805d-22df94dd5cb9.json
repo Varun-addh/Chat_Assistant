@@ -1,0 +1,13 @@
+{
+  "session_id": "187ae5b0-6752-443f-805d-22df94dd5cb9",
+  "qna": [
+    {
+      "question": "Hi",
+      "answer": "## Complete Answer\n- I’m your interview preparation assistant, ready to help you ace technical, behavioral, and system‑design interviews\n- I can provide concise, interview‑ready summaries, detailed explanations, clean code examples, STAR‑formatted behavioral answers, and scalable system‑design outlines\n- Just let me know the topic, question type, or specific role you’re targeting, and I’ll tailor a structured response to boost your confidence and performance\n\n### Key Points\n- **Technical concepts:** definition, key features, benefits, real‑world use cases, and interview tips.  \n- **Coding problems:** full solution with clean, typed code, step‑by‑step walkthrough, complexity analysis, and edge‑case handling.  \n- **Behavioral questions:** STAR‑formatted answers with Situation, Task, Action, Result, plus detailed breakdown and tips.  \n- **System design:** requirements gathering, high‑level architecture, component details, scalability strategies, and trade‑off discussion.  \n\n## Detailed Explanation\nI follow a consistent structure for every response:\n\n- **Comprehensive Summary:** A 4‑to‑8‑sentence answer that you can use verbatim in an interview.  \n- **Expanded Sections:** Deep dives into concepts, code, STAR stories, or design components, depending on the question type.  \n- **Practical Examples & Tips:** Real‑world scenarios, best‑practice recommendations, and guidance on how to present the material confidently.  \n\nFeel free to tell me what you’d like to work on—whether it’s a specific algorithm, a behavioral question, or designing a large‑scale service—and I’ll provide a complete, interview‑ready response.",
+      "created_at": "2025-09-30T09:58:39.246342"
+    }
+  ],
+  "partial_transcript": "",
+  "last_update": "2025-09-30T09:58:39.246342",
+  "profile_text": ""
+}
