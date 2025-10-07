@@ -15,9 +15,14 @@
       "question": "hello",
       "answer": "Hello! I am your AI Interview Assistant. I'm here to help you prepare for technical concepts, coding challenges, system design, and behavioral questions, providing professional and structured answers.\n\nTo get started, please ask me your first interview preparation question.\n\nWhat topic would you like to focus on today? (e.g., *Explain event delegation in JavaScript*, *Solve the Two Sum problem in Python*, or *Tell me about a time you handled conflict*).",
       "created_at": "2025-10-01T15:48:34.367659"
+    },
+    {
+      "question": "hi",
+      "answer": "Hello! I am your AI Interview Assistant. I'm here to help you prepare for technical, coding, and behavioral interviews by providing professional, structured, and interview-ready answers.\n\nYou can ask me anything from explaining complex concepts and writing optimized code, to practicing system design or crafting STAR method responses.\n\nWhat topic are you focusing on today, or what is your first interview question?",
+      "created_at": "2025-10-02T06:59:19.827261"
     }
   ],
   "partial_transcript": "",
-  "last_update": "2025-10-01T15:48:34.367659",
+  "last_update": "2025-10-02T06:59:19.827261",
   "profile_text": ""
 }

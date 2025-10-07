@@ -36,7 +36,17 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 			collected: list[str] = []
 			# Provide recent QnA as context for follow-ups
 			previous_qna = state.qna
-			async for chunk in llm_service.stream_answer(payload.question, payload.system_prompt, profile_text=profile_text, previous_qna=previous_qna):
+			async for chunk in llm_service.stream_answer(
+				payload.question,
+				payload.system_prompt,
+				profile_text=profile_text,
+				previous_qna=previous_qna,
+				style_mode=payload.style_mode,
+				tone=payload.tone,
+				layout=payload.layout,
+				variability=payload.variability,
+				seed=payload.seed,
+			):
 				collected.append(chunk)
 				yield f"data: {chunk}\n\n"
 			# On stream end, persist the full answer
@@ -54,7 +64,17 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 
 	# Provide recent QnA as context for follow-ups
 	previous_qna = state.qna
-	answer = await llm_service.generate_answer(payload.question, payload.system_prompt, profile_text=profile_text, previous_qna=previous_qna)
+	answer = await llm_service.generate_answer(
+		payload.question,
+		payload.system_prompt,
+		profile_text=profile_text,
+		previous_qna=previous_qna,
+		style_mode=payload.style_mode,
+		tone=payload.tone,
+		layout=payload.layout,
+		variability=payload.variability,
+		seed=payload.seed,
+	)
 	await session_manager.append_qna(state.session_id, payload.question, answer)
 	await auditor.log({
 		"type": "qna",

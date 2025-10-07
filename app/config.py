@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from pydantic import field_validator
 from typing import List
 import secrets
+import os
 from dotenv import load_dotenv
 
 
@@ -13,7 +14,14 @@ class Settings(BaseSettings):
 	# Server
 	host: str = "0.0.0.0"
 	port: int = 8000
-	cors_allow_origins: List[str] = ["*"]
+	cors_allow_origins: List[str] = [
+		"https://inverviewast.web.app",
+		"https://inverviewast.firebaseapp.com", 
+		"http://localhost:3000",
+		"http://localhost:5173",
+		"http://127.0.0.1:3000",
+		"http://127.0.0.1:5173"
+	]
 
 	# Auth
 	api_key: str | None = None  # simple bearer key if provided
@@ -49,6 +57,14 @@ class Settings(BaseSettings):
 	@classmethod
 	def clamp_temperature(cls, v: float) -> float:
 		return max(0.0, min(1.0, v))
+
+	@field_validator("cors_allow_origins", mode="before")
+	@classmethod
+	def parse_cors_origins(cls, v):
+		# Allow environment variable override
+		if isinstance(v, str):
+			return [origin.strip() for origin in v.split(",")]
+		return v
 
 	class Config:
 		env_file = ".env"

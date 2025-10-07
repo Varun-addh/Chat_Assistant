@@ -941,7 +941,67 @@ class LLMService:
 		# Cap at complex token limit to prevent excessive token usage
 		return min(estimated, settings.groq_max_tokens_complex * 2)
 
-	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None) -> str:
+	def _style_overrides(self, style_mode: Optional[str], tone: Optional[str], layout: Optional[str], variability: Optional[float], seed: Optional[int]) -> str:
+		"""Construct style and tone overrides for varied, professional outputs."""
+		import random
+		rng = random.Random(seed)
+		v = 0.0 if variability is None else max(0.0, min(1.0, variability))
+
+		# Presets
+		presets: dict[str, str] = {
+			"concise": "Keep it tight. 4–6 bullets max. Avoid subheadings unless necessary.",
+			"deep-dive": "Provide rich sections with 'Why it matters', 'Trade-offs', and a short example.",
+			"mentor": "Use a coaching voice. Add 'Pitfalls' and 'What to practice' sections when helpful.",
+			"executive": "Lead with outcomes and business impact. Use short paragraphs and a 'Bottom line' section.",
+			"faq": "Answer as an FAQ: 4–6 Q→A pairs covering the topic succinctly.",
+			"qa": "Use a Q→A dialogue style for key points, then a brief summary.",
+			"checklist": "Present an actionable checklist with clear steps and acceptance criteria.",
+			"narrative": "Explain as a narrative walkthrough with sections 'Context → Decision → Result'.",
+			"varied": "Choose any of: concise, deep-dive, mentor, executive, faq, qa, checklist, narrative based on question type.",
+		}
+
+		chosen_mode = (style_mode or "auto").lower()
+		if chosen_mode in ("auto", "varied"):
+			# Soft randomization by question type
+			candidates = ["concise", "deep-dive", "mentor", "executive", "faq", "qa", "checklist", "narrative"]
+			if v > 0:
+				chosen_mode = rng.choice(candidates)
+			else:
+				chosen_mode = "executive"  # sensible default
+
+		tone_map: dict[str, str] = {
+			"neutral": "Neutral, precise, professional.",
+			"friendly": "Warm, approachable, but still professional.",
+			"mentor": "Supportive, coaching tone with practical tips.",
+			"executive": "Crisp, outcome-focused, confident.",
+			"academic": "Formal, rigorous definitions and citations where appropriate.",
+			"coaching": "Encouraging, step-by-step guidance.",
+		}
+		tone_rule = tone_map.get((tone or "").lower(), "Neutral, precise, professional.")
+
+		layout_map: dict[str, str] = {
+			"bullets": "Prefer bullets with minimal headings.",
+			"narrative": "Short paragraphs, minimal headings.",
+			"qa": "Q→A pairs.",
+			"faq": "FAQ format.",
+			"checklist": "Checklist of steps.",
+			"pros-cons": "Pros/Cons section included.",
+			"steps": "Numbered steps first, details later.",
+		}
+		layout_rule = layout_map.get((layout or "").lower(), "Use judgement for best readability.")
+
+		preset_rule = presets.get(chosen_mode, "")
+
+		return (
+			"\n\nStyle & Tone Overrides:"
+			f"\n- Tone: {tone_rule}"
+			f"\n- Layout preference: {layout_rule}"
+			f"\n- Style preset: {chosen_mode} — {preset_rule}"
+			"\n- Vary headings and bullet density to avoid repetitive structure; choose the lightest structure that conveys clarity."
+			"\n- Do not force the earlier template sections if brevity or narrative works better for this question."
+		)
+
+	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None) -> str:
 		client = self._ensure_client()
 		if client is None:
 			return question  # mock: echo when no key
@@ -967,6 +1027,9 @@ class LLMService:
 		# If this is a technical strategy question, add strategy overrides
 		if self._is_technical_strategy_question(question):
 			prompt = prompt + self._technical_strategy_overrides()
+
+		# Style & tone overrides for variety
+		prompt = prompt + self._style_overrides(style_mode, tone, layout, variability, seed)
 
 		import anyio
 
@@ -1041,7 +1104,7 @@ class LLMService:
 
 		return await anyio.to_thread.run_sync(_call)
 
-	async def stream_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None) -> AsyncIterator[str]:
+	async def stream_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None) -> AsyncIterator[str]:
 		client = self._ensure_client()
 		provider = (settings.llm_provider or "groq").lower()
 		prompt = system_prompt or CODE_FORWARD_PROMPT
@@ -1061,6 +1124,9 @@ class LLMService:
 		# Technical strategy overrides for streaming as well
 		if self._is_technical_strategy_question(question):
 			prompt = prompt + self._technical_strategy_overrides()
+
+		# Style & tone overrides
+		prompt = prompt + self._style_overrides(style_mode, tone, layout, variability, seed)
 
 		if client is None:
 			yield ""
