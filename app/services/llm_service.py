@@ -46,7 +46,6 @@ CODE_FORWARD_PROMPT = (
 
 "3. **Technical Concepts & Theory Questions:**\n"
 "   Structure:\n"
-"   ## Complete Answer\n"
 "   - 4–8 bullets covering: definition, key aspects, why it matters, examples\n\n"
 "   ## Detailed Explanation\n"
 "   ### What It Is\n"
