@@ -529,6 +529,11 @@ class LLMService:
 		if self._looks_like_pipe_table(text):
 			text = self._format_tables(text)
 		
+		# Normalize leading bold labels across all bullets/paragraph list items
+		text = self._strip_leading_bold_labels_globally(text)
+		# Remove all remaining bold emphasis outside code blocks (keep headings intact)
+		text = self._strip_all_bold_outside_code(text)
+		
 		return text
 
 	def _strip_labeled_bullets_in_complete_answer(self, text: str) -> str:
@@ -558,6 +563,61 @@ class LLMService:
 				out.append(bullet)
 			else:
 				out.append(line)
+		return '\n'.join(out)
+
+	def _strip_leading_bold_labels_globally(self, text: str) -> str:
+		"""Remove leading bold label patterns at the start of list items anywhere in the document.
+		Patterns handled:
+		- '- **Label:** rest' -> '- rest'
+		- '- **Label**: rest' -> '- rest'
+		- '- **Phrase** rest' (short phrase up to ~6 words) -> '- Phrase rest' (drop bold only)
+		Does not touch code blocks.
+		"""
+		import re
+		lines = text.split('\n')
+		out: list[str] = []
+		in_code = False
+		for line in lines:
+			if line.strip().startswith('```'):
+				in_code = not in_code
+				out.append(line)
+				continue
+			if in_code:
+				out.append(line)
+				continue
+			m1 = re.match(r'^(\s*[\-\*]\s+)\*\*([^*]{1,80})\*\*\s*:\s*(.*)$', line)
+			if m1:
+				prefix, label, rest = m1.groups()
+				out.append(f"{prefix}{rest}".rstrip())
+				continue
+			m2 = re.match(r'^(\s*[\-\*]\s+)\*\*([^*]{1,80})\*\*\s+(.*)$', line)
+			if m2:
+				prefix, label, rest = m2.groups()
+				# Keep label plain, drop bold
+				out.append(f"{prefix}{label} {rest}".rstrip())
+				continue
+			out.append(line)
+		return '\n'.join(out)
+
+	def _strip_all_bold_outside_code(self, text: str) -> str:
+		"""Remove all bold (**...**) outside code blocks to keep regular typography for headings, bullets, and inline keywords.
+		Headings are not bolded markdown and remain unaffected. Code blocks are preserved.
+		"""
+		import re
+		lines = text.split('\n')
+		out: list[str] = []
+		in_code = False
+		for line in lines:
+			if line.strip().startswith('```'):
+				in_code = not in_code
+				out.append(line)
+				continue
+			if in_code:
+				out.append(line)
+				continue
+			# Replace any **text** with plain text
+			cleaned = re.sub(r'\*\*([^*]+)\*\*', r'\1', line)
+			out.append(cleaned)
 		return '\n'.join(out)
 	
 	def _format_summary_sections(self, text: str) -> str:
