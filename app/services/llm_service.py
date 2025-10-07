@@ -46,7 +46,7 @@ CODE_FORWARD_PROMPT = (
 "   - Start every response with '## Complete Answer' as 4–8 BULLET POINTS (no separate 'Summary')\n"
 "   - Each bullet must be crisp, very accurate, and a standalone point (one line)\n"
 "   - Do NOT prefix bullets with side headings or labels (e.g., 'Mission Alignment:' or bold labels). Write direct statements only.\n"
-"   - Avoid colon after the first few words of a bullet; no 'Label: ...' formats.\n"
+"   - Side headings and keywords may be bold elsewhere in the document, but not inside Complete Answer bullets.\n"
 "   - Bullets must be derived by compressing the COMPLETE ANSWER you would otherwise write; do NOT invent new points\n"
 "   - Each bullet should correspond to a section that appears in the detailed explanation below\n"
 "   - Ensure bullets cover: direct answer/definition, key aspects, why it matters, and a practical tip/example\n"
@@ -529,10 +529,8 @@ class LLMService:
 		if self._looks_like_pipe_table(text):
 			text = self._format_tables(text)
 		
-		# Normalize leading bold labels across all bullets/paragraph list items
-		text = self._strip_leading_bold_labels_globally(text)
-		# Remove all remaining bold emphasis outside code blocks (keep headings intact)
-		text = self._strip_all_bold_outside_code(text)
+		# Only enforce unlabeled bullets within the Complete Answer; elsewhere allow bold
+		text = self._strip_labeled_bullets_in_complete_answer(text)
 		
 		return text
 
@@ -599,26 +597,7 @@ class LLMService:
 			out.append(line)
 		return '\n'.join(out)
 
-	def _strip_all_bold_outside_code(self, text: str) -> str:
-		"""Remove all bold (**...**) outside code blocks to keep regular typography for headings, bullets, and inline keywords.
-		Headings are not bolded markdown and remain unaffected. Code blocks are preserved.
-		"""
-		import re
-		lines = text.split('\n')
-		out: list[str] = []
-		in_code = False
-		for line in lines:
-			if line.strip().startswith('```'):
-				in_code = not in_code
-				out.append(line)
-				continue
-			if in_code:
-				out.append(line)
-				continue
-			# Replace any **text** with plain text
-			cleaned = re.sub(r'\*\*([^*]+)\*\*', r'\1', line)
-			out.append(cleaned)
-		return '\n'.join(out)
+	# Note: We intentionally removed global bold stripping to allow bold for headings, side headings, and keywords.
 	
 	def _format_summary_sections(self, text: str) -> str:
 		"""Format comprehensive summary sections for interview scenarios - ensure they are prominent and complete"""
