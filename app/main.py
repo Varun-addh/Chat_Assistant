@@ -18,7 +18,8 @@ app = FastAPI(title="Interview Assistant Backend", version="0.1.0")
 app.add_middleware(
 	CORSMiddleware,
 	allow_origins=settings.cors_allow_origins,
-	allow_credentials=True,
+	# Wildcard origins require credentials to be False per CORS spec
+	allow_credentials=False if settings.cors_allow_origins == ["*"] else True,
 	allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
 	allow_headers=[
 		"Accept",

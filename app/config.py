@@ -14,14 +14,7 @@ class Settings(BaseSettings):
 	# Server
 	host: str = "0.0.0.0"
 	port: int = 8000
-	cors_allow_origins: List[str] = [
-		"https://inverviewast.web.app",
-		"https://inverviewast.firebaseapp.com", 
-		"http://localhost:3000",
-		"http://localhost:5173",
-		"http://127.0.0.1:3000",
-		"http://127.0.0.1:5173"
-	]
+	cors_allow_origins: List[str] = ["*"]
 
 	# Auth
 	api_key: str | None = None  # simple bearer key if provided
