@@ -45,6 +45,8 @@ CODE_FORWARD_PROMPT = (
 "0. **COMPLETE ANSWER AS BULLET POINTS (CRITICAL):**\n"
 "   - Start every response with '## Complete Answer' as 4–8 BULLET POINTS (no separate 'Summary')\n"
 "   - Each bullet must be crisp, very accurate, and a standalone point (one line)\n"
+"   - Do NOT prefix bullets with side headings or labels (e.g., 'Mission Alignment:' or bold labels). Write direct statements only.\n"
+"   - Avoid colon after the first few words of a bullet; no 'Label: ...' formats.\n"
 "   - Bullets must be derived by compressing the COMPLETE ANSWER you would otherwise write; do NOT invent new points\n"
 "   - Each bullet should correspond to a section that appears in the detailed explanation below\n"
 "   - Ensure bullets cover: direct answer/definition, key aspects, why it matters, and a practical tip/example\n"
@@ -505,6 +507,8 @@ class LLMService:
 		
 		# Ensure summary sections are properly formatted (remove bullet conversion logic)
 		text = self._format_summary_sections(text)
+		# Enforce unlabeled bullets inside Complete Answer
+		text = self._strip_labeled_bullets_in_complete_answer(text)
 		
 		# First, check if this is code content that should not be formatted as tables
 		if self._is_code_content(text):
@@ -526,6 +530,35 @@ class LLMService:
 			text = self._format_tables(text)
 		
 		return text
+
+	def _strip_labeled_bullets_in_complete_answer(self, text: str) -> str:
+		"""Within the '## Complete Answer' section, remove leading label patterns like '**Label:** ' or 'Label:' from each bullet.
+		This keeps bullets as direct statements without side headings.
+		"""
+		import re
+		lines = text.split('\n')
+		out: list[str] = []
+		in_complete = False
+		for i, line in enumerate(lines):
+			header = line.strip().lower()
+			if header.startswith('## ') and 'complete answer' in header:
+				in_complete = True
+				out.append(line)
+				continue
+			# Exit when next top-level header begins
+			if in_complete and line.strip().startswith('## ') and 'complete answer' not in header:
+				in_complete = False
+				out.append(line)
+				continue
+			if in_complete and line.lstrip().startswith(('-', '*')):
+				bullet = line
+				# Remove patterns like '- **Label:** text' or '- Label: text'
+				bullet = re.sub(r"^([\-\*]\s+)(\*\*[^*:]{1,40}\*\*:\s*)", r"\1", bullet)
+				bullet = re.sub(r"^([\-\*]\s+)([^*:]{1,40}:\s*)", r"\1", bullet)
+				out.append(bullet)
+			else:
+				out.append(line)
+		return '\n'.join(out)
 	
 	def _format_summary_sections(self, text: str) -> str:
 		"""Format comprehensive summary sections for interview scenarios - ensure they are prominent and complete"""
