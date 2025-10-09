@@ -371,6 +371,40 @@ class LLMService:
 		]
 		return any(k in q for k in keywords)
 
+	def _is_greeting(self, question: str) -> bool:
+		q = (question or "").strip().lower()
+		if not q:
+			return False
+		# Normalize common punctuation
+		for ch in ["!", ".", ","]:
+			q = q.replace(ch, "")
+		# Single/two-word salutations and courtesies
+		greetings = {
+			"hi", "hello", "hey", "yo", "hiya", "heya",
+			"good morning", "good afternoon", "good evening", "gm", "gn",
+			"thank you", "thanks", "thx", "ty",
+			"bye", "goodbye", "see you", "see ya", "cya", "take care",
+		}
+		# Quick exact match
+		if q in greetings:
+			return True
+		# Startswith match for polite variants
+		prefixes = [
+			"hi ", "hello ", "hey ",
+			"thank you", "thanks", "thx", "ty ",
+			"good morning", "good afternoon", "good evening",
+			"bye", "goodbye", "see you", "see ya",
+		]
+		return any(q.startswith(p) for p in prefixes)
+
+	def _greeting_overrides(self) -> str:
+		return (
+			"\n\nGreeting Overrides (apply only to salutations/thanks/parting):\n"
+			"- Do NOT start with any 'Complete Answer' bullets or a Summary.\n"
+			"- No headings. Respond briefly (one or two sentences) in a friendly tone.\n"
+			"- Acknowledge the greeting/thanks and offer help if appropriate.\n"
+		)
+
 	def _comparison_overrides(self, question: str) -> str:
 		return (
 			"\n\nComparison Format Overrides (apply only to comparison questions):\n"
@@ -1208,6 +1242,10 @@ class LLMService:
 		# If the user is asking to compare, add comparison formatting rules
 		if self._needs_comparison(question):
 			prompt = prompt + self._comparison_overrides(question)
+
+		# If this is a brief greeting/thanks/parting, suppress summary/bullets
+		if self._is_greeting(question):
+			prompt = prompt + self._greeting_overrides()
 		
 		# If this is a technical strategy question, add strategy overrides
 		if self._is_technical_strategy_question(question):
