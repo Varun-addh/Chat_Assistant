@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import AsyncIterator, Optional, List, Dict
 from groq import Groq
 try:
-    import google.generativeai as genai  # type: ignore
+    import google.generativeai as genai
 except Exception:
-    genai = None  # optional
+    genai = None
 
 from app.config import settings
 
@@ -40,10 +40,15 @@ CODE_FORWARD_PROMPT = (
     "- Depth = { Quick | Standard | Deep }. Detect from phrasing like 'briefly', 'in depth', 'summary only'.\n"
     "- Scale section count and length accordingly while keeping clarity.\n\n"
 
+    # 5a) Placeholder Policy
+    "PLACEHOLDER POLICY:\n"
+    "- Do NOT emit bracketed placeholders like [SPECIFIC FEATURE] or [PROJECT GOAL].\n"
+    "- When details are missing, choose reasonable, neutral specifics (e.g., 'the API rollout', 'the search service') or rewrite the sentence generically without brackets.\n\n"
+
     "## CORE RESPONSE STRUCTURE (MANDATORY)\n\n"
 
 "0. **COMPLETE ANSWER AS BULLET POINTS (CRITICAL):**\n"
-"   - Start every response with '## Complete Answer' as 4–8 BULLET POINTS (no separate 'Summary')\n"
+"   - Start every response with 4–8 BULLET POINTS (no heading, no separate 'Summary')\n"
 "   - Each bullet must be crisp, very accurate, and a standalone point (one line)\n"
 "   - Do NOT prefix bullets with side headings or labels (e.g., 'Mission Alignment:' or bold labels). Write direct statements only.\n"
 "   - Side headings and keywords may be bold elsewhere in the document, but not inside Complete Answer bullets.\n"
@@ -224,6 +229,7 @@ CODE_FORWARD_PROMPT = (
 
 "8. **Formatting Standards:**\n"
 "   - Use markdown headings (##, ###) for clear structure\n"
+"   - ALL headings must be bold formatted: **Heading Text**\n"
 "   - Bullet points for lists and key points\n"
 "   - Code blocks with language specification (```python, ```java)\n"
 "   - **Bold** for critical terms or emphasis\n"
@@ -513,16 +519,19 @@ class LLMService:
 		# First, check if this is code content that should not be formatted as tables
 		if self._is_code_content(text):
 			# For code content, just clean up basic formatting issues
-			return self._clean_code_formatting(text)
+			text = self._clean_code_formatting(text)
+			# Ensure headings are still bolded
+			text = self._format_headings_bold(text)
+			return text
 		
 		# Check if this is explanation content that should use text formatting, not tables
 		if self._is_explanation_content(text):
 			# For explanation content, convert table-like markdown artifacts conservatively
-			cleaned = self._clean_explanation_formatting(text)
-			# Soften excessive bold markers outside code to reduce visual noise
-			import re as _re
-			cleaned = _re.sub(r"\*\*([^\n*][^*]{0,200}?)\*\*", r"\1", cleaned)
-			return cleaned
+			text = self._clean_explanation_formatting(text)
+			# Preserve bold emphasis for headings, side headings, and keywords
+			# Ensure headings are still bolded
+			text = self._format_headings_bold(text)
+			return text
 		
 		# Only touch pipe tables; do not try to infer tables from text
 		text = self._clean_table_markdown_artifacts(text)
@@ -531,8 +540,42 @@ class LLMService:
 		
 		# Only enforce unlabeled bullets within the Complete Answer; elsewhere allow bold
 		text = self._strip_labeled_bullets_in_complete_answer(text)
+		# Remove bracketed placeholders by converting them to neutral phrasing
+		text = self._deplaceholderize(text)
+		
+		# Ensure headings are properly bolded
+		text = self._format_headings_bold(text)
 		
 		return text
+
+	def _format_headings_bold(self, text: str) -> str:
+		"""Ensure all headings are properly bolded"""
+		import re
+		
+		lines = text.split('\n')
+		formatted_lines = []
+		
+		for line in lines:
+			# Check if this is a heading line
+			if line.strip().startswith(('##', '###', '####')):
+				# Extract the heading text (remove the ##, ###, etc.)
+				heading_match = re.match(r'^(#{2,4})\s*(.+)$', line.strip())
+				if heading_match:
+					hashes, heading_text = heading_match.groups()
+					# Check if already bolded
+					if not heading_text.strip().startswith('**') or not heading_text.strip().endswith('**'):
+						# Bold the heading text
+						formatted_line = f"{hashes} **{heading_text.strip()}**"
+						formatted_lines.append(formatted_line)
+					else:
+						# Already bolded, keep as is
+						formatted_lines.append(line)
+				else:
+					formatted_lines.append(line)
+			else:
+				formatted_lines.append(line)
+		
+		return '\n'.join(formatted_lines)
 
 	def _strip_labeled_bullets_in_complete_answer(self, text: str) -> str:
 		"""Within the '## Complete Answer' section, remove leading label patterns like '**Label:** ' or 'Label:' from each bullet.
@@ -596,6 +639,41 @@ class LLMService:
 				continue
 			out.append(line)
 		return '\n'.join(out)
+
+	def _deplaceholderize(self, text: str) -> str:
+		"""Convert bracketed placeholders like [SPECIFIC FEATURE/PROJECT TASK] into neutral, readable text.
+		Rules:
+		- Known mappings to concise phrases
+		- Otherwise, drop brackets and lower-case the phrase in a generic way
+		- Never introduce brackets [] in the output
+		"""
+		import re
+		mappings = {
+			"SPECIFIC FEATURE": "the feature",
+			"SPECIFIC PRODUCT": "the product",
+			"PROJECT GOAL": "the project goal",
+			"SPECIFIC COMPROMISE DETAIL": "a balanced compromise",
+			"FEATURE/PROJECT TASK": "the task",
+			"SITUATION": "the situation",
+			"TASK": "the task",
+			"ACTION": "the action",
+			"RESULT": "the result",
+		}
+		def repl(match: re.Match[str]) -> str:
+			inside = match.group(1).strip()
+			key = inside.upper()
+			if key in mappings:
+				return mappings[key]
+			# Simplify multi-part tokens like 'SPECIFIC FEATURE/PROJECT' → 'the feature'
+			parts = re.split(r"[\s/_-]+", inside)
+			for part in parts:
+				candidate = part.upper()
+				if candidate in mappings:
+					return mappings[candidate]
+			# Fallback: plain, lower-cased phrase without brackets
+			return inside.lower()
+		# Replace all [ ... ] occurrences
+		return re.sub(r"\[([^\]]{1,80})\]", repl, text)
 
 	# Note: We intentionally removed global bold stripping to allow bold for headings, side headings, and keywords.
 	
@@ -690,7 +768,12 @@ class LLMService:
 		"""Clean up markdown artifacts in a single table line"""
 		import re
 		
-		# Remove all markdown bold formatting (**text**)
+		# Check if this is a heading line - preserve bold formatting for headings
+		if line.strip().startswith(('##', '###', '####')):
+			# For headings, preserve bold formatting
+			return line
+		
+		# Remove all markdown bold formatting (**text**) for non-heading lines
 		line = re.sub(r'\*\*([^*]+)\*\*', r'\1', line)
 		
 		# Remove all markdown italic formatting (*text*)
