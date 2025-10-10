@@ -846,6 +846,8 @@ class LLMService:
 			c = re.sub(r"(\]|[a-zA-Z0-9_])\s+([a-zA-Z0-9_\)\]]\s*(?:-->|-\.->|==>))", r"\1\n\2", c)
 			# New line before a new node like XYZ[Label] when crammed onto one line
 			c = re.sub(r"(\]|[a-zA-Z0-9_])\s+([A-Za-z0-9_]+\[)", r"\1\n\2", c)
+			# New line before a bare node id starting the next edge: "... A --> B B --> C" => line break before 2nd "B -->"
+			c = re.sub(r"(?m)(?<!^)\s+([A-Za-z0-9_]+)\s+(-->|-\.->|==>)", r"\n\1 \2", c)
 			# Keep spaces around arrows for Mermaid readability
 			c = re.sub(r"\)\s*(-->|-\.->|==>)\s*", r") \1 ", c)
 			# Add newline before classDef/class if they appear mid-line
