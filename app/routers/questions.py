@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from datetime import datetime
 
 from app.schemas import CreateSessionResponse, QuestionIn, AnswerOut, SessionHistory, QnA, SessionList, SessionSummary
@@ -7,6 +7,7 @@ from app.services.session_manager import session_manager
 from app.services.llm_service import llm_service
 from app.utils.security import verify_api_key
 from app.utils.audit import auditor
+import httpx
 
 
 router = APIRouter()
@@ -87,6 +88,34 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 		"answer": answer,
 	})
 	return AnswerOut(answer=answer, created_at=datetime.utcnow())
+
+
+@router.post("/render_mermaid")
+async def render_mermaid(diagram: str, _: None = Depends(verify_api_key)):
+	# Normalize, fence, and send to Kroki for SVG rendering
+	if not diagram or not diagram.strip():
+		raise HTTPException(status_code=400, detail="Empty Mermaid diagram")
+	normalized = llm_service._normalize_mermaid_blocks(diagram)
+	code = normalized
+	if code.strip().startswith("```mermaid"):
+		code = code.strip()
+		if code.endswith("```"):
+			code = code[len("```mermaid"): -3]
+		else:
+			code = code[len("```mermaid"):]
+	code = code.strip()
+	try:
+		async with httpx.AsyncClient(timeout=10) as client:
+			resp = await client.post(
+				"https://kroki.io/mermaid/svg",
+				content=code.encode("utf-8"),
+				headers={"Content-Type": "text/plain; charset=utf-8"},
+			)
+			if resp.status_code != 200:
+				raise HTTPException(status_code=502, detail=f"Kroki render failed: {resp.status_code}")
+			return Response(content=resp.text, media_type="image/svg+xml")
+	except httpx.RequestError as exc:
+		raise HTTPException(status_code=502, detail=f"Kroki unreachable: {exc}")
 
 
 @router.post("/upload_profile")
