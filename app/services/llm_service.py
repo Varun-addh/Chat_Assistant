@@ -632,6 +632,41 @@ class LLMService:
 		# If it has strategy indicators and question patterns, but NOT personal indicators, it's a strategy question
 		return has_strategy_indicator and has_question_pattern and not has_personal_indicator
 
+	def _is_system_design_question(self, question: str) -> bool:
+		"""Detect explicit System Design / Architecture questions"""
+		q = (question or "").lower()
+		keywords = [
+			"system design", "design a", "design an", "how would you design",
+			"architecture", "architect", "high-level design", "hld", "low-level design",
+			"scale to", "million users", "billions", "throughput", "latency",
+			"load balancer", "cache", "queue", "kafka", "replication",
+		]
+		return any(k in q for k in keywords)
+
+	def _system_design_overrides(self) -> str:
+		"""Enforce the System Design response structure requested by the user."""
+		return (
+			"\n\nSystem Design Overrides (apply only to system/architecture questions):\n"
+			"- Follow this exact markdown structure:\n"
+			"\n### **Key Highlights**\n"
+			"- 4–6 crisp bullets on core data structures, pipelines, algorithms, scalability ideas, trade-offs.\n"
+			"\n### **Detailed Explanation**\n"
+			"\n#### **1. Requirements Analysis**\n"
+			"- **Functional Requirements:** Core outcomes.\n"
+			"- **Non-Functional Requirements:** Latency/availability/scalability/freshness.\n"
+			"\n#### **2. High-Level Architecture**\n"
+			"- Provide a table with Component | Purpose | Technology/Layer.\n"
+			"\n#### **3. Component Design**\n"
+			"- Cover ingestion, serving, ranking, caching with data structures, algorithms, storage, optimizations.\n"
+			"\n#### **4. Example Implementation**\n"
+			"- Include at least one concise Python (or pseudocode) snippet showing a critical concept.\n"
+			"\n#### **5. Scalability & Trade-offs**\n"
+			"- Analyze memory vs latency, freshness vs stability, complexity vs maintainability, sharding and load balancing.\n"
+			"\n#### **6. Interview Takeaways**\n"
+			"- 3–5 bullets candidates should emphasize.\n"
+			"\n- Style: Senior, precise, 600–1200 words, no filler. Always include at least one code block.\n"
+		)
+
 	def _technical_strategy_overrides(self) -> str:
 		return (
 			"\n\nTechnical Strategy Overrides (apply only to technical strategy questions):\n"
@@ -1413,6 +1448,10 @@ class LLMService:
 		# If context is insufficient, provide fallback handling
 		if not self._has_sufficient_context(question, previous_qna):
 			prompt = prompt + self._context_fallback_overrides()
+		
+		# If this is a system design question, enforce the SD structure
+		if self._is_system_design_question(question):
+			prompt = prompt + self._system_design_overrides()
 		
 		# If this is a technical strategy question, add strategy overrides
 		if self._is_technical_strategy_question(question):
