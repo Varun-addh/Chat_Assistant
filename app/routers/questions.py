@@ -1,7 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
-from fastapi import Body
-from fastapi import Request
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse
 from datetime import datetime
 
 from app.schemas import CreateSessionResponse, QuestionIn, AnswerOut, SessionHistory, QnA, SessionList, SessionSummary
@@ -9,7 +7,6 @@ from app.services.session_manager import session_manager
 from app.services.llm_service import llm_service
 from app.utils.security import verify_api_key
 from app.utils.audit import auditor
-import httpx
 
 
 router = APIRouter()
@@ -54,17 +51,13 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 				yield f"data: {chunk}\n\n"
 			# On stream end, persist the full answer
 			full_answer = "".join(collected)
-			# IMPORTANT: normalize/clean markdown (esp. mermaid blocks) to avoid Kroki 400s
-			formatted_answer = llm_service._format_response(full_answer)
-			await session_manager.append_qna(state.session_id, payload.question, formatted_answer)
+			await session_manager.append_qna(state.session_id, payload.question, full_answer)
 			await auditor.log({
 				"type": "qna",
 				"session_id": state.session_id,
 				"question": payload.question,
-				"answer": formatted_answer,
+				"answer": full_answer,
 			})
-			# Send a final replacement payload so clients can re-render with sanitized text
-			yield f"event: final\nData: {formatted_answer}\n\n"
 			yield "event: end\n\n"
 
 		return StreamingResponse(event_gen(), media_type="text/event-stream")
@@ -90,52 +83,6 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 		"answer": answer,
 	})
 	return AnswerOut(answer=answer, created_at=datetime.utcnow())
-
-
-@router.post("/render_mermaid")
-async def render_mermaid(req: Request, _: None = Depends(verify_api_key)):
-	"""Render Mermaid to SVG via Kroki.
-
-	Accepts ANY Content-Type:
-	- text/plain: raw Mermaid in body
-	- application/json: { "diagram": "..." }
-	- text/markdown or others: raw body is used
-	"""
-	# Read raw body first
-	body_bytes = await req.body()
-	text = (body_bytes.decode("utf-8", errors="ignore")).strip()
-	if not text:
-		# Try JSON with {diagram}
-		try:
-			payload = await req.json()
-			text = (payload.get("diagram") or "").strip()
-		except Exception:
-			text = ""
-	if not text:
-		raise HTTPException(status_code=400, detail="Empty Mermaid diagram")
-
-	# Normalize and fence to improve success rate
-	normalized = llm_service._normalize_mermaid_blocks(text)
-	code = normalized
-	if code.strip().startswith("```mermaid"):
-		code = code.strip()
-		if code.endswith("```"):
-			code = code[len("```mermaid"): -3]
-		else:
-			code = code[len("```mermaid"):]
-	code = code.strip()
-	try:
-		async with httpx.AsyncClient(timeout=10) as client:
-			resp = await client.post(
-				"https://kroki.io/mermaid/svg",
-				content=code.encode("utf-8"),
-				headers={"Content-Type": "text/plain; charset=utf-8"},
-			)
-			if resp.status_code != 200:
-				raise HTTPException(status_code=502, detail=f"Kroki render failed: {resp.status_code}")
-			return Response(content=resp.text, media_type="image/svg+xml")
-	except httpx.RequestError as exc:
-		raise HTTPException(status_code=502, detail=f"Kroki unreachable: {exc}")
 
 
 @router.post("/upload_profile")

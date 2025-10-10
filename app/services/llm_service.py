@@ -879,25 +879,13 @@ class LLMService:
 			else:
 				out.append(line)
 		
-		# Join what we have so far
+		# If there was orphan flowchart text without fences, try to wrap it
 		joined = "\n".join(out)
 		import re as _re
-		# 1) If entire content is just a bare diagram, wrap it fully
 		if _re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", joined, _re.MULTILINE) and "```mermaid" not in joined:
 			code = normalize_block(joined)
 			return "```mermaid\n" + code + "```"
-		# 2) Otherwise, detect inline segments beginning with 'flowchart' and wrap each
-		def wrap_inline_segments(s: str) -> str:
-			if "```mermaid" in s:
-				return s
-			pattern = _re.compile(r"(^|\n)(flowchart\s+[LRBT]{1,2}[\s\S]*?)(?=(\n\n|\n##|\n###|\Z))", _re.IGNORECASE)
-			def repl(m: _re.Match[str]) -> str:
-				prefix = m.group(1) or "\n"
-				code = m.group(2)
-				norm = normalize_block(code)
-				return f"{prefix}```mermaid\n{norm}```"
-			return pattern.sub(repl, s)
-		return wrap_inline_segments(joined)
+		return joined
 
 	def _contains_mermaid(self, text: str) -> bool:
 		import re
@@ -1703,58 +1691,10 @@ class LLMService:
 		import anyio
 		stream = await anyio.to_thread.run_sync(_call_stream)
 		if provider == "groq" and stream is not None:
-			# Stream chunks, but buffer mermaid fenced blocks to avoid emitting partial diagrams
-			in_mermaid = False
-			mermaid_buffer: list[str] = []
-			pending_text: list[str] = []
-			def flush_pending():
-				if pending_text:
-					text = "".join(pending_text)
-					pending_text.clear()
-					return text
-				return ""
 			for chunk in stream:
 				piece = getattr(chunk.choices[0].delta, "content", None) or ""
-				if not piece:
-					continue
-				# Detect mermaid fences within streamed content
-				if not in_mermaid:
-					if "```mermaid" in piece:
-						in_mermaid = True
-						# Emit any pending non-mermaid text first
-						text_to_emit = flush_pending()
-						if text_to_emit:
-							yield text_to_emit
-						# Start buffer after the opening fence line
-						mermaid_buffer.append(piece.split("```mermaid", 1)[1])
-						continue
-					else:
-						pending_text.append(piece)
-						# Emit opportunistically to keep UI responsive
-						text_to_emit = flush_pending()
-						if text_to_emit:
-							yield text_to_emit
-				else:
-					# We are inside a mermaid block, buffer until closing fence
-					if "```" in piece:
-						# Close block: normalize and emit
-						before_close, _after = piece.split("```", 1)
-						mermaid_buffer.append(before_close)
-						code = "".join(mermaid_buffer)
-						normalized = self._normalize_mermaid_blocks("```mermaid\n" + code + "\n```")
-						yield normalized
-						# Reset state
-						in_mermaid = False
-						mermaid_buffer = []
-						# Emit any remainder text after closing fence, if present
-						remainder = _after
-						if remainder:
-							pending_text.append(remainder)
-							text_to_emit = flush_pending()
-							if text_to_emit:
-								yield text_to_emit
-					else:
-						mermaid_buffer.append(piece)
+				if piece:
+					yield piece
 		elif provider == "gemini":
 			# Non-streaming fallback: yield once
 			def _one_shot():
