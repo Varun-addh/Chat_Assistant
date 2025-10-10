@@ -751,12 +751,18 @@ class LLMService:
 		# Enforce unlabeled bullets inside Complete Answer
 		text = self._strip_labeled_bullets_in_complete_answer(text)
 		
+		# If content includes a Mermaid diagram, normalize and return as-is (don't treat as code)
+		if self._contains_mermaid(text):
+			return self._normalize_mermaid_blocks(text)
+		
 		# First, check if this is code content that should not be formatted as tables
 		if self._is_code_content(text):
 			# For code content, just clean up basic formatting issues
 			text = self._clean_code_formatting(text)
 			# Ensure headings are still bolded
 			text = self._format_headings_bold(text)
+			# Normalize Mermaid blocks even inside mixed content
+			text = self._normalize_mermaid_blocks(text)
 			return text
 		
 		# Check if this is explanation content that should use text formatting, not tables
@@ -825,6 +831,8 @@ class LLMService:
 		
 		def normalize_block(code: str) -> str:
 			c = code.strip()
+			# Remove stray backtick artifacts sometimes injected by models
+			c = c.replace("`mermaid", "").replace("`", "")
 			# Insert newline before structural tokens if missing
 			c = re.sub(r"\s+(subgraph\s+)", r"\n\1", c)
 			c = re.sub(r"\s+(end)(?!\w)", r"\n\1", c)
@@ -868,10 +876,17 @@ class LLMService:
 		
 		# If there was orphan flowchart text without fences, try to wrap it
 		joined = "\n".join(out)
-		if "flowchart" in joined and "```mermaid" not in joined:
+		import re as _re
+		if _re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", joined, _re.MULTILINE) and "```mermaid" not in joined:
 			code = normalize_block(joined)
-			return "```mermaid\n" + code + "```\n"
+			return "```mermaid\n" + code + "```"
 		return joined
+
+	def _contains_mermaid(self, text: str) -> bool:
+		import re
+		if "```mermaid" in text:
+			return True
+		return bool(re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", text, re.MULTILINE))
 
 	def _strip_labeled_bullets_in_complete_answer(self, text: str) -> str:
 		"""Within the '## Complete Answer' section, remove leading label patterns like '**Label:** ' or 'Label:' from each bullet.
