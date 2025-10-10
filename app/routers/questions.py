@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from fastapi import Body
+from fastapi import Request
 from fastapi.responses import StreamingResponse, Response
 from datetime import datetime
 
@@ -92,11 +93,29 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 
 
 @router.post("/render_mermaid")
-async def render_mermaid(diagram: str = Body(..., media_type="text/plain"), _: None = Depends(verify_api_key)):
-	# Normalize, fence, and send to Kroki for SVG rendering
-	if not diagram or not diagram.strip():
+async def render_mermaid(req: Request, _: None = Depends(verify_api_key)):
+	"""Render Mermaid to SVG via Kroki.
+
+	Accepts ANY Content-Type:
+	- text/plain: raw Mermaid in body
+	- application/json: { "diagram": "..." }
+	- text/markdown or others: raw body is used
+	"""
+	# Read raw body first
+	body_bytes = await req.body()
+	text = (body_bytes.decode("utf-8", errors="ignore")).strip()
+	if not text:
+		# Try JSON with {diagram}
+		try:
+			payload = await req.json()
+			text = (payload.get("diagram") or "").strip()
+		except Exception:
+			text = ""
+	if not text:
 		raise HTTPException(status_code=400, detail="Empty Mermaid diagram")
-	normalized = llm_service._normalize_mermaid_blocks(diagram)
+
+	# Normalize and fence to improve success rate
+	normalized = llm_service._normalize_mermaid_blocks(text)
 	code = normalized
 	if code.strip().startswith("```mermaid"):
 		code = code.strip()
