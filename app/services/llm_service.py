@@ -780,6 +780,8 @@ class LLMService:
 		
 		# Ensure headings are properly bolded
 		text = self._format_headings_bold(text)
+		# Normalize any Mermaid code blocks so each statement is on its own line
+		text = self._normalize_mermaid_blocks(text)
 		
 		return text
 
@@ -811,6 +813,65 @@ class LLMService:
 				formatted_lines.append(line)
 		
 		return '\n'.join(formatted_lines)
+
+	def _normalize_mermaid_blocks(self, text: str) -> str:
+		"""Normalize Mermaid blocks without changing their content semantics.
+		Rules (conservative):
+		- Do NOT change letters, brackets, or punctuation inside labels.
+		- Only insert newlines around structural tokens: subgraph, end, classDef, class, flowchart, and edge statements.
+		- Ensure blocks are fenced with ```mermaid.
+		"""
+		import re
+		
+		def normalize_block(code: str) -> str:
+			c = code.strip()
+			# Insert newline before structural tokens if missing
+			c = re.sub(r"\s+(subgraph\s+)", r"\n\1", c)
+			c = re.sub(r"\s+(end)(?!\w)", r"\n\1", c)
+			c = re.sub(r"\s+(classDef\s+)", r"\n\1", c)
+			c = re.sub(r"\s+(class\s+)", r"\n\1", c)
+			# Ensure flowchart header at start of a line
+			c = re.sub(r"\s+(flowchart\s+[A-Z]{2})", r"\n\1", c)
+			# Add newline after 'end' when followed by another token
+			c = re.sub(r"end\s+(?=\w|subgraph|classDef|class|flowchart)", "end\n", c)
+			# Put each edge statement on its own line by splitting on arrows when crowded
+			c = re.sub(r"\)\s*(-->|-\.->|==>)\s*", r") \1 ", c)  # keep spaces around arrows
+			c = re.sub(r"\s{2,}", " ", c)  # collapse excessive spaces only (not newlines)
+			# Add newline before classDef/class if they appear mid-line
+			c = re.sub(r"([^\n])\s+(classDef\s+)", r"\1\n\2", c)
+			c = re.sub(r"([^\n])\s+(class\s+)", r"\1\n\2", c)
+			# Ensure trailing newline
+			return (c.strip() + "\n").replace("\r\n", "\n")
+		
+		lines = text.split('\n')
+		out: list[str] = []
+		in_mermaid = False
+		buffer: list[str] = []
+		for line in lines:
+			if line.strip().startswith("```mermaid"):
+				in_mermaid = True
+				buffer = []
+				out.append(line)
+				continue
+			if in_mermaid and line.strip().startswith("```"):
+				# close block
+				normalized = normalize_block("\n".join(buffer))
+				out.append(normalized)
+				out.append(line)
+				in_mermaid = False
+				buffer = []
+				continue
+			if in_mermaid:
+				buffer.append(line)
+			else:
+				out.append(line)
+		
+		# If there was orphan flowchart text without fences, try to wrap it
+		joined = "\n".join(out)
+		if "flowchart" in joined and "```mermaid" not in joined:
+			code = normalize_block(joined)
+			return "```mermaid\n" + code + "```\n"
+		return joined
 
 	def _strip_labeled_bullets_in_complete_answer(self, text: str) -> str:
 		"""Within the '## Complete Answer' section, remove leading label patterns like '**Label:** ' or 'Label:' from each bullet.
