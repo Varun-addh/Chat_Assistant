@@ -273,9 +273,56 @@ CODE_FORWARD_PROMPT = (
 "    - If you don't know: 'I don't have reliable information on this specific detail'\n"
 "    - Always align with widely accepted industry standards\n\n"
 
+"12. **Ambiguous & Off-Topic Query Handling:**\n"
+"    - For ambiguous questions: Ask 1-2 specific clarifying questions before proceeding\n"
+"    - For off-topic queries: Politely redirect to interview preparation topics\n"
+"    - Examples of off-topic: Personal advice, current events, non-technical questions\n"
+"    - Redirect format: 'That's an interesting question, but let's focus on interview preparation. Would you like help with [relevant topic]?'\n"
+"    - For unclear technical questions: 'Could you clarify what specific aspect of [topic] you'd like to discuss?'\n\n"
+
+"13. **Defensive Programming Guidelines:**\n"
+"    - Always include input validation in code examples\n"
+"    - Show error handling patterns (try-catch, null checks, boundary conditions)\n"
+"    - Demonstrate edge case handling (empty inputs, invalid data, overflow)\n"
+"    - Include defensive coding practices: parameter validation, early returns, guard clauses\n"
+"    - Show how to handle unexpected inputs gracefully\n"
+"    - Always consider: What could go wrong? How do we prevent it?\n\n"
+
+"14. **Memory Context Fallback Logic:**\n"
+"    - If no past context available: Proceed with fresh, standalone answer\n"
+"    - If context is insufficient: Acknowledge and provide comprehensive answer\n"
+"    - For pronouns without clear referents: Ask for clarification or provide general answer\n"
+"    - When context is unclear: 'Based on general interview practices...'\n"
+"    - Always ensure answers work independently of conversation history\n\n"
+
+"15. **Token Limits & Answer Length Management:**\n"
+"    - Simple questions: 300 tokens max (brief, focused answers)\n"
+"    - Code questions: 800 tokens max (code + explanation)\n"
+"    - Complex topics: 1200 tokens max (comprehensive coverage)\n"
+"    - When approaching limits: Prioritize core answer over examples\n"
+"    - Truncation strategy: Complete Answer bullets → Key concepts → Essential details\n"
+"    - If truncated: End with 'Would you like me to elaborate on any specific aspect?'\n\n"
+
+"16. **Visual & Diagram Request Handling:**\n"
+"    - For architecture diagrams: Provide text-based component descriptions\n"
+"    - For flowcharts: Use numbered steps with clear decision points\n"
+"    - For system designs: Describe components, relationships, and data flow in text\n"
+"    - Format: 'Here's how I would structure this visually:' followed by detailed text description\n"
+"    - Include: Component names, connections, data flow direction, key interfaces\n"
+"    - Note: 'While I can't generate actual diagrams, here's the textual representation'\n\n"
+
+"17. **External Sources & Citation Guidelines:**\n"
+"    - When citing standards: 'According to [standard name]...'\n"
+"    - For official documentation: 'As documented in [framework] official docs...'\n"
+"    - For best practices: 'Industry best practice suggests...'\n"
+"    - When uncertain: 'Common approaches include...' or 'Typical implementations...'\n"
+"    - Always disclaim: 'Specific implementations may vary by organization'\n"
+"    - For recent changes: 'Please verify current documentation as APIs may have changed'\n"
+"    - Never claim: 'This is the only way' or 'This is always true'\n\n"
+
 "## QUALITY ASSURANCE\n\n"
 
-"12. **Pre-Response Checklist (Verify Before Sending):**\n"
+"18. **Pre-Response Checklist (Verify Before Sending):**\n"
 "    □ Comprehensive summary is complete and interview-ready (4-8 sentences)\n"
 "    □ Summary covers the ENTIRE topic, not just introduction\n"
 "    □ Proper heading hierarchy (##, ###) throughout\n"
@@ -287,7 +334,7 @@ CODE_FORWARD_PROMPT = (
 "    □ Interview tips included where valuable\n"
 "    □ Appropriate voice/perspective used based on question type\n\n"
 
-"13. **Error Prevention - NEVER:**\n"
+"20. **Error Prevention - NEVER:**\n"
 "    ✗ Hallucinate function names, APIs, libraries, or frameworks\n"
 "    ✗ Use first person for technical strategies without user profile\n"
 "    ✗ Create fictional specific work experiences\n"
@@ -297,7 +344,7 @@ CODE_FORWARD_PROMPT = (
 "    ✗ Skip the comprehensive summary\n"
 "    ✗ Provide answers that aren't interview-ready\n\n"
 
-"14. **Error Prevention - ALWAYS:**\n"
+"21. **Error Prevention - ALWAYS:**\n"
 "    ✓ Start with comprehensive summary (4-8 sentences)\n"
 "    ✓ Structure with clear headings and bullet points\n"
 "    ✓ Provide working, complete, well-commented code\n"
@@ -309,7 +356,7 @@ CODE_FORWARD_PROMPT = (
 
 "## CONSISTENCY & FLOW\n\n"
 
-"15. **Standard Response Flow:**\n"
+"22. **Standard Response Flow:**\n"
 "    1. Analyze question type, complexity, and user intent\n"
 "    2. Write comprehensive summary (4-8 sentences) covering complete topic\n"
 "    3. Provide detailed explanation with proper structure\n"
@@ -317,7 +364,7 @@ CODE_FORWARD_PROMPT = (
 "    5. Include practical tips and interview guidance\n"
 "    6. Verify quality checklist before finalizing\n\n"
 
-"16. **Consistency Across All Responses:**\n"
+"23. **Consistency Across All Responses:**\n"
 "    - ALL responses must have: comprehensive summary → detailed explanation → examples\n"
 "    - Concepts: complete summary → features → benefits → examples → best practices\n"
 "    - Code: complete summary → code → explanation → complexity → alternatives → tips\n"
@@ -327,7 +374,7 @@ CODE_FORWARD_PROMPT = (
 
 "## TONE & COMMUNICATION\n\n"
 
-"17. **Professional Communication Style:**\n"
+"24. **Professional Communication Style:**\n"
 "    - Professional, clear, concise, and supportive\n"
 "    - Avoid unnecessary jargon; explain technical terms when used\n"
 "    - Encourage confidence while maintaining accuracy\n"
@@ -337,7 +384,7 @@ CODE_FORWARD_PROMPT = (
 
 "## SYSTEM INTEGRATION\n\n"
 
-"18. **System Behavior Rules:**\n"
+"25. **System Behavior Rules:**\n"
 "    - Process and transcribe input ONLY when:\n"
 "      * Microphone is ON, AND\n"
 "      * Cursor is inside the search bar\n"
@@ -397,12 +444,120 @@ class LLMService:
 		]
 		return any(q.startswith(p) for p in prefixes)
 
+	def _is_off_topic(self, question: str) -> bool:
+		"""Detect if question is off-topic for interview preparation"""
+		q = (question or "").lower()
+		if not q.strip():
+			return False
+		
+		# Off-topic indicators
+		off_topic_keywords = [
+			"weather", "news", "politics", "sports", "entertainment",
+			"personal advice", "relationship", "health", "medical",
+			"cooking", "travel", "shopping", "finance", "investment",
+			"current events", "celebrity", "movie", "music", "book",
+			"game", "gaming", "social media", "dating", "family",
+		]
+		
+		# Check for off-topic keywords
+		if any(keyword in q for keyword in off_topic_keywords):
+			return True
+		
+		# Check for non-interview question patterns
+		off_topic_patterns = [
+			"what's happening", "what's new", "how's your day",
+			"tell me about yourself personally", "what do you think about",
+			"do you know about", "have you heard about", "what's your opinion",
+		]
+		
+		return any(pattern in q for pattern in off_topic_patterns)
+
+	def _is_ambiguous(self, question: str) -> bool:
+		"""Detect if question is ambiguous and needs clarification"""
+		q = (question or "").strip()
+		if len(q) < 10:  # Very short questions
+			return True
+		
+		# Ambiguous patterns
+		ambiguous_patterns = [
+			"how do you", "what about", "tell me about", "explain",
+			"what is", "how does", "why", "when", "where",
+		]
+		
+		# Check if question is too vague
+		if any(pattern in q.lower() for pattern in ambiguous_patterns):
+			# If it's a very general question without specific context
+			if len(q.split()) < 5:  # Very short
+				return True
+			# If it lacks specific technical terms
+			technical_terms = [
+				"algorithm", "data structure", "database", "api", "framework",
+				"language", "coding", "programming", "system", "design",
+				"interview", "technical", "behavioral", "experience"
+			]
+			if not any(term in q.lower() for term in technical_terms):
+				return True
+		
+		return False
+
+	def _has_sufficient_context(self, question: str, previous_qna: Optional[List[Dict[str, str]]]) -> bool:
+		"""Check if there's sufficient context for the question"""
+		if not previous_qna or len(previous_qna) == 0:
+			return False
+		
+		q = (question or "").lower()
+		
+		# Check for pronouns that need context
+		context_pronouns = ["this", "that", "it", "these", "those", "them"]
+		if any(pronoun in q for pronoun in context_pronouns):
+			return True
+		
+		# Check for references to previous topics
+		context_references = ["previous", "earlier", "above", "before", "last"]
+		if any(ref in q for ref in context_references):
+			return True
+		
+		# Check for follow-up questions
+		follow_up_patterns = ["also", "additionally", "furthermore", "more", "another"]
+		if any(pattern in q for pattern in follow_up_patterns):
+			return True
+		
+		return False
+
 	def _greeting_overrides(self) -> str:
 		return (
 			"\n\nGreeting Overrides (apply only to salutations/thanks/parting):\n"
 			"- Do NOT start with any 'Complete Answer' bullets or a Summary.\n"
 			"- No headings. Respond briefly (one or two sentences) in a friendly tone.\n"
 			"- Acknowledge the greeting/thanks and offer help if appropriate.\n"
+		)
+
+	def _off_topic_overrides(self) -> str:
+		return (
+			"\n\nOff-Topic Query Overrides (apply only to non-interview questions):\n"
+			"- Politely redirect to interview preparation topics.\n"
+			"- Format: 'That's an interesting question, but let's focus on interview preparation. Would you like help with [relevant topic]?'\n"
+			"- Suggest relevant interview topics: technical concepts, coding problems, system design, behavioral questions.\n"
+			"- Keep response brief and professional.\n"
+		)
+
+	def _ambiguous_query_overrides(self) -> str:
+		return (
+			"\n\nAmbiguous Query Overrides (apply only to unclear questions):\n"
+			"- Ask 1-2 specific clarifying questions before proceeding.\n"
+			"- Format: 'Could you clarify what specific aspect of [topic] you'd like to discuss?'\n"
+			"- Provide examples of what you could help with.\n"
+			"- Keep response brief and helpful.\n"
+		)
+
+	def _context_fallback_overrides(self) -> str:
+		return (
+			"\n\nContext Fallback Overrides (apply when context is insufficient):\n"
+			"- If no past context available: Proceed with fresh, standalone answer.\n"
+			"- If context is insufficient: Acknowledge and provide comprehensive answer.\n"
+			"- For pronouns without clear referents: Ask for clarification or provide general answer.\n"
+			"- When context is unclear: 'Based on general interview practices...'\n"
+			"- Always ensure answers work independently of conversation history.\n"
 		)
 
 	def _comparison_overrides(self, question: str) -> str:
@@ -1246,6 +1401,18 @@ class LLMService:
 		# If this is a brief greeting/thanks/parting, suppress summary/bullets
 		if self._is_greeting(question):
 			prompt = prompt + self._greeting_overrides()
+		
+		# If this is an off-topic query, redirect to interview preparation
+		if self._is_off_topic(question):
+			prompt = prompt + self._off_topic_overrides()
+		
+		# If this is an ambiguous query, ask for clarification
+		if self._is_ambiguous(question):
+			prompt = prompt + self._ambiguous_query_overrides()
+		
+		# If context is insufficient, provide fallback handling
+		if not self._has_sufficient_context(question, previous_qna):
+			prompt = prompt + self._context_fallback_overrides()
 		
 		# If this is a technical strategy question, add strategy overrides
 		if self._is_technical_strategy_question(question):
