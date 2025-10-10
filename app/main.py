@@ -21,19 +21,10 @@ app.add_middleware(
 	allow_origins=settings.cors_allow_origins,
 	# Wildcard origins require credentials to be False per CORS spec
 	allow_credentials=False if settings.cors_allow_origins == ["*"] else True,
-	allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-	allow_headers=[
-		"Accept",
-		"Accept-Language",
-		"Content-Language",
-		"Content-Type",
-		"Authorization",
-		"X-Requested-With",
-		"Origin",
-		"Access-Control-Request-Method",
-		"Access-Control-Request-Headers",
-	],
+    allow_methods=["*"],
+    allow_headers=["*"],
 	expose_headers=["*"],
+    max_age=3600,
 )
 
 
