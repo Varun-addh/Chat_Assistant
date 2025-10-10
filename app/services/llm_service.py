@@ -879,13 +879,25 @@ class LLMService:
 			else:
 				out.append(line)
 		
-		# If there was orphan flowchart text without fences, try to wrap it
+		# Join what we have so far
 		joined = "\n".join(out)
 		import re as _re
+		# 1) If entire content is just a bare diagram, wrap it fully
 		if _re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", joined, _re.MULTILINE) and "```mermaid" not in joined:
 			code = normalize_block(joined)
 			return "```mermaid\n" + code + "```"
-		return joined
+		# 2) Otherwise, detect inline segments beginning with 'flowchart' and wrap each
+		def wrap_inline_segments(s: str) -> str:
+			if "```mermaid" in s:
+				return s
+			pattern = _re.compile(r"(^|\n)(flowchart\s+[LRBT]{1,2}[\s\S]*?)(?=(\n\n|\n##|\n###|\Z))", _re.IGNORECASE)
+			def repl(m: _re.Match[str]) -> str:
+				prefix = m.group(1) or "\n"
+				code = m.group(2)
+				norm = normalize_block(code)
+				return f"{prefix}```mermaid\n{norm}```"
+			return pattern.sub(repl, s)
+		return wrap_inline_segments(joined)
 
 	def _contains_mermaid(self, text: str) -> bool:
 		import re
