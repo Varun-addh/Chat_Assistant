@@ -51,13 +51,17 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 				yield f"data: {chunk}\n\n"
 			# On stream end, persist the full answer
 			full_answer = "".join(collected)
-			await session_manager.append_qna(state.session_id, payload.question, full_answer)
+			# IMPORTANT: normalize/clean markdown (esp. mermaid blocks) to avoid Kroki 400s
+			formatted_answer = llm_service._format_response(full_answer)
+			await session_manager.append_qna(state.session_id, payload.question, formatted_answer)
 			await auditor.log({
 				"type": "qna",
 				"session_id": state.session_id,
 				"question": payload.question,
-				"answer": full_answer,
+				"answer": formatted_answer,
 			})
+			# Send a final replacement payload so clients can re-render with sanitized text
+			yield f"event: final\nData: {formatted_answer}\n\n"
 			yield "event: end\n\n"
 
 		return StreamingResponse(event_gen(), media_type="text/event-stream")
