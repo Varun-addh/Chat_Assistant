@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import Body
 from fastapi.responses import StreamingResponse, Response
 from datetime import datetime
 
@@ -91,7 +92,7 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 
 
 @router.post("/render_mermaid")
-async def render_mermaid(diagram: str, _: None = Depends(verify_api_key)):
+async def render_mermaid(diagram: str = Body(..., media_type="text/plain"), _: None = Depends(verify_api_key)):
 	# Normalize, fence, and send to Kroki for SVG rendering
 	if not diagram or not diagram.strip():
 		raise HTTPException(status_code=400, detail="Empty Mermaid diagram")
