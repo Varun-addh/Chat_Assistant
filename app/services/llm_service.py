@@ -870,6 +870,10 @@ class LLMService:
 				if not line:
 					continue
 					
+				# Skip flowchart declaration as it's already added
+				if re.match(r'^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s+', line):
+					continue
+					
 				# Check if this line starts a subgraph
 				subgraph_match = re.match(r'subgraph\s+(.+)', line)
 				if subgraph_match:
