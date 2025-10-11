@@ -832,78 +832,101 @@ class LLMService:
 		import re
 		
 		def normalize_block(code: str) -> str:
-			"""Comprehensive Mermaid syntax normalizer that ensures proper formatting."""
+			"""Bulletproof Mermaid normalizer that completely rebuilds valid syntax."""
 			c = code.strip()
 			
 			# Remove stray backtick artifacts
 			c = c.replace("`mermaid", "").replace("```", "").replace("`", "")
 			
-			# First, split by major structural elements
-			# Split by subgraph boundaries
-			parts = re.split(r'(\bsubgraph\s+[^}]+?\bend\b)', c, flags=re.DOTALL)
+			# Extract flowchart type
+			flowchart_match = re.match(r'^(flowchart\s+[A-Z]{2})', c)
+			flowchart_type = flowchart_match.group(1) if flowchart_match else "flowchart LR"
 			
-			formatted_lines = []
-			in_subgraph = False
+			# Remove flowchart declaration
+			remaining = re.sub(r'^flowchart\s+[A-Z]{2}\s*', '', c).strip()
 			
-			for part in parts:
-				part = part.strip()
-				if not part:
-					continue
+			formatted_lines = [flowchart_type]
+			
+			# Completely rebuild the Mermaid by parsing it properly
+			# Split by 'subgraph' and 'end' to find all subgraph blocks
+			parts = re.split(r'\bsubgraph\s+', remaining)
+			
+			if len(parts) > 1:
+				# Process first part (before any subgraphs)
+				first_part = parts[0].strip()
+				if first_part:
+					statements = [s.strip() for s in first_part.split(';') if s.strip()]
+					for stmt in statements:
+						if stmt and not stmt.startswith(('classDef', 'class')):
+							formatted_lines.append(f"  {stmt}")
+				
+				# Process each subgraph part
+				for part in parts[1:]:
+					# Find the matching 'end' for this subgraph
+					end_pos = part.find(' end')
+					if end_pos == -1:
+						end_pos = part.find('end')
 					
-				# Check if this is a subgraph block
-				if part.startswith('subgraph '):
-					# Extract subgraph name and content
-					subgraph_match = re.match(r'subgraph\s+([^}]+?)\s+(.*?)\s+end', part, re.DOTALL)
-					if subgraph_match:
-						subgraph_name = subgraph_match.group(1).strip()
-						subgraph_content = subgraph_match.group(2).strip()
+					if end_pos != -1:
+						# Extract subgraph name and content
+						# The name is everything before the first space that's not inside brackets
+						name_end = 0
+						bracket_depth = 0
+						while name_end < len(part) and name_end < end_pos:
+							char = part[name_end]
+							if char == '[':
+								bracket_depth += 1
+							elif char == ']':
+								bracket_depth -= 1
+							elif char == ' ' and bracket_depth == 0:
+								break
+							name_end += 1
+						
+						subgraph_name = part[:name_end].strip()
+						content = part[name_end:end_pos].strip()
 						
 						formatted_lines.append(f"subgraph {subgraph_name}")
 						
 						# Process subgraph content
-						subgraph_lines = subgraph_content.split('\n')
-						for line in subgraph_lines:
-							line = line.strip()
-							if line:
-								# Split by semicolons and arrows
-								statements = re.split(r'[;]', line)
-								for stmt in statements:
-									stmt = stmt.strip()
-									if stmt:
-										formatted_lines.append(f"  {stmt}")
+						if content:
+							statements = [s.strip() for s in content.split(';') if s.strip()]
+							for stmt in statements:
+								if stmt:
+									formatted_lines.append(f"  {stmt}")
 						
 						formatted_lines.append("end")
-					else:
-						# Fallback for malformed subgraph
-						formatted_lines.append(f"subgraph {part}")
-						formatted_lines.append("end")
-				else:
-					# Regular content - check for flowchart declaration
-					if re.match(r'^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s+', part):
-						formatted_lines.append(part)
-					else:
-						# Process regular lines
-						lines = part.split('\n')
-						for line in lines:
-							line = line.strip()
-							if line:
-								# Split by semicolons
-								statements = re.split(r'[;]', line)
-								for stmt in statements:
-									stmt = stmt.strip()
-									if stmt:
-										# Check if it's a classDef or class statement
-										if stmt.startswith('classDef ') or stmt.startswith('class '):
-											formatted_lines.append(stmt)
-										else:
-											formatted_lines.append(f"  {stmt}")
+						
+						# Process any remaining content after this subgraph
+						remaining_after = part[end_pos + 3:].strip()
+						if remaining_after:
+							statements = [s.strip() for s in remaining_after.split(';') if s.strip()]
+							for stmt in statements:
+								if stmt and not stmt.startswith(('classDef', 'class')):
+									formatted_lines.append(f"  {stmt}")
+			else:
+				# No subgraphs, just process the content
+				statements = [s.strip() for s in remaining.split(';') if s.strip()]
+				for stmt in statements:
+					if stmt and not stmt.startswith(('classDef', 'class')):
+						formatted_lines.append(f"  {stmt}")
+			
+			# Add classDef and class statements at the end
+			classdef_pattern = r'classDef\s+([^;]+)'
+			classdef_matches = re.findall(classdef_pattern, c)
+			for classdef in classdef_matches:
+				formatted_lines.append(f"classDef {classdef.strip()}")
+			
+			class_pattern = r'class\s+([^;]+)'
+			class_matches = re.findall(class_pattern, c)
+			for class_stmt in class_matches:
+				formatted_lines.append(f"class {class_stmt.strip()}")
 			
 			# Join lines and clean up
 			result = '\n'.join(formatted_lines)
 			
 			# Final cleanup
-			result = re.sub(r'\n\s*\n', '\n', result)  # Remove empty lines
-			result = re.sub(r'^\s*\n', '', result)     # Remove leading empty lines
+			result = re.sub(r'\n\s*\n', '\n', result)
+			result = re.sub(r'^\s*\n', '', result)
 			result = result.strip()
 			
 			return result
