@@ -636,6 +636,13 @@ class LLMService:
 			"architecture", "architect", "high-level design", "hld", "low-level design",
 			"scale to", "million users", "billions", "throughput", "latency",
 			"load balancer", "cache", "queue", "kafka", "replication",
+			"microservices", "distributed system", "scalable", "scalability",
+			"database design", "api design", "service design", "component design",
+			"how to build", "how to create", "how to implement", "build a",
+			"create a", "implement a", "develop a", "construct a",
+			"url shortener", "chat system", "social media", "e-commerce",
+			"video streaming", "file storage", "search engine", "recommendation system",
+			"notification system", "payment system", "booking system", "messaging system"
 		]
 		return any(k in q for k in keywords)
 
@@ -652,10 +659,14 @@ class LLMService:
 			"- **Non-Functional Requirements:** Latency/availability/scalability/freshness.\n"
 			"\n#### **2. High-Level Architecture**\n"
 			"- Provide a table with Component | Purpose | Technology/Layer.\n"
-			"- Include a 'Visual Architecture Diagram' section rendered as a Mermaid flowchart code block.\n"
-			"  Use solid arrows (-->), subgraphs for layers (User, Backend, Services, Cache), and colorful classDefs.\n"
-			"  Example style guide to follow (adapt names to the problem):\n"
-			"  ```mermaid\nflowchart LR\n  subgraph User[User]\n    UI[User Interface]:::ui\n  end\n  subgraph Backend[Backend]\n    SvcA[Search Service]:::svc --> DB[(Song DB)]:::db\n    SvcB[Playlist Service]:::svc --> PDB[(Playlist DB)]:::db\n  end\n  subgraph Services[Services]\n    Storage[Object Storage]:::store\n  end\n  subgraph Cache[Cache]\n    L1[Redis L1 Cache]:::cache\n    L2[In‑process LFU]:::cache\n  end\n  UI -->|Search| SvcA\n  UI -->|Create Playlist| SvcB\n  L1 --> SvcA\n  classDef ui fill:#f6f7c4,stroke:#6c6c00,color:#2b2b00;\n  classDef svc fill:#e8e0ff,stroke:#5b53a5,color:#2d2461;\n  classDef db fill:#d1f0ff,stroke:#0c7ea3,color:#064e66;\n  classDef cache fill:#ffe3c7,stroke:#b66a00,color:#6b3b00;\n  classDef store fill:#d6f5d6,stroke:#2b8a3e,color:#1e5d2a;\n  ```\n"
+			"- **MANDATORY: Include a 'Visual Architecture Diagram' section with a Mermaid flowchart code block.**\n"
+			"- **ALWAYS generate a Mermaid diagram for system design questions - this is required, not optional.**\n"
+			"- Use solid arrows (-->), subgraphs for layers (User, Backend, Services, Cache, Database), and colorful classDefs.\n"
+			"- Choose appropriate flowchart direction: TD (top-down) for layered architectures, LR (left-right) for data flow.\n"
+			"- Include all major components: clients, load balancers, API gateways, microservices, databases, caches, message queues.\n"
+			"- Use descriptive node names and proper styling with classDef statements.\n"
+			"- Example style guide to follow (adapt names to the problem):\n"
+			"  ```mermaid\nflowchart TD\n  subgraph Client[Client Layer]\n    Web[Web App]:::client\n    Mobile[Mobile App]:::client\n  end\n  subgraph CDN[Content Delivery Network]\n    CloudFlare[CloudFlare]:::cdn\n  end\n  subgraph Load_Balancer[Load Balancer Layer]\n    ALB[Application Load Balancer]:::lb\n  end\n  subgraph API_Gateway[API Gateway Layer]\n    Kong[Kong Gateway]:::gateway\n    Auth[Authentication]:::gateway\n  end\n  subgraph Microservices[Microservices Layer]\n    User_Service[User Service]:::service\n    Order_Service[Order Service]:::service\n  end\n  subgraph Database[Database Layer]\n    Postgres[(PostgreSQL)]:::db\n    Redis[(Redis Cache)]:::cache\n  end\n  Web --> CloudFlare\n  CloudFlare --> ALB\n  ALB --> Kong\n  Kong --> Auth\n  Auth --> User_Service\n  Auth --> Order_Service\n  User_Service --> Postgres\n  Order_Service --> Postgres\n  User_Service --> Redis\n  classDef client fill:#e1f5fe,stroke:#01579b,color:#000\n  classDef cdn fill:#f3e5f5,stroke:#4a148c,color:#000\n  classDef lb fill:#fff3e0,stroke:#e65100,color:#000\n  classDef gateway fill:#e8f5e8,stroke:#1b5e20,color:#000\n  classDef service fill:#fff8e1,stroke:#f57f17,color:#000\n  classDef db fill:#e3f2fd,stroke:#0d47a1,color:#000\n  classDef cache fill:#fff3e0,stroke:#f57c00,color:#000\n  ```\n"
 			"\n#### **3. Component Design**\n"
 			"- Cover ingestion, serving, ranking, caching with data structures, algorithms, storage, optimizations.\n"
 			"\n#### **4. Example Implementation**\n"
@@ -838,7 +849,10 @@ class LLMService:
 			# Remove stray backtick artifacts
 			c = c.replace("`mermaid", "").replace("```", "").replace("`", "")
 			
-			# Extract flowchart type
+			# Clean up any leading/trailing whitespace and newlines
+			c = c.strip()
+			
+			# Extract flowchart type - preserve the original direction
 			flowchart_match = re.match(r'^(flowchart\s+[A-Z]{2})', c)
 			flowchart_type = flowchart_match.group(1) if flowchart_match else "flowchart LR"
 			
@@ -871,7 +885,7 @@ class LLMService:
 					continue
 					
 				# Skip flowchart declaration as it's already added
-				if re.match(r'^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s+', line):
+				if re.match(r'^(flowchart\s+[A-Z]{2}|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s*', line):
 					continue
 					
 				# Check if this line starts a subgraph
@@ -903,9 +917,11 @@ class LLMService:
 					# Regular content outside subgraphs
 					formatted_lines.append(f"  {line}")
 			
-			# Add classDef and class statements at the end
-			formatted_lines.extend(classdef_statements)
-			formatted_lines.extend(class_statements)
+			# Add classDef and class statements at the end with proper formatting
+			for classdef in classdef_statements:
+				formatted_lines.append(classdef)
+			for class_stmt in class_statements:
+				formatted_lines.append(class_stmt)
 			
 			# Join lines and clean up
 			result = '\n'.join(formatted_lines)
