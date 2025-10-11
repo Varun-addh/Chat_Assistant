@@ -11,7 +11,6 @@ def extract_text_from_pdf(data: bytes) -> str:
 	2) Fallback to pdfminer.six (more robust)
 	Returns empty string on failure.
 	"""
-	# Try PyPDF2 first
 	try:
 		from PyPDF2 import PdfReader  # type: ignore
 		reader = PdfReader(BytesIO(data))
