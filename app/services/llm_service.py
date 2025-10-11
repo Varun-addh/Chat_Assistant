@@ -631,20 +631,122 @@ class LLMService:
 	def _is_system_design_question(self, question: str) -> bool:
 		"""Detect explicit System Design / Architecture questions"""
 		q = (question or "").lower()
+		
+		# Exclude questions that should generate other types of diagrams
+		exclude_keywords = [
+			"front page", "user interface", "ui design", "mobile app interface",
+			"database schema", "er diagram", "entity relationship",
+			"algorithm", "data structure", "sorting", "searching",
+			"frontend", "ui/ux", "user experience", "wireframe",
+			"mockup", "prototype", "visual design", "layout design"
+		]
+		
+		# If it contains exclude keywords, it's not a system design question
+		if any(k in q for k in exclude_keywords):
+			return False
+		
+		# System design specific keywords
 		keywords = [
-			"system design", "design a", "design an", "how would you design",
-			"architecture", "architect", "high-level design", "hld", "low-level design",
-			"scale to", "million users", "billions", "throughput", "latency",
+			"system design", "how would you design", "architecture", "architect",
+			"high-level design", "hld", "low-level design", "scale to", 
+			"million users", "billions", "throughput", "latency",
 			"load balancer", "cache", "queue", "kafka", "replication",
 			"microservices", "distributed system", "scalable", "scalability",
-			"database design", "api design", "service design", "component design",
-			"how to build", "how to create", "how to implement", "build a",
-			"create a", "implement a", "develop a", "construct a",
+			"api design", "service design", "component design",
 			"url shortener", "chat system", "social media", "e-commerce",
 			"video streaming", "file storage", "search engine", "recommendation system",
-			"notification system", "payment system", "booking system", "messaging system"
+			"notification system", "payment system", "booking system", "messaging system",
+			"build a system", "create a system", "implement a system", "develop a system"
 		]
 		return any(k in q for k in keywords)
+
+	def _is_database_schema_question(self, question: str) -> bool:
+		"""Detect database schema / ER diagram questions"""
+		q = (question or "").lower()
+		keywords = [
+			"database schema", "er diagram", "entity relationship", "database design",
+			"show the database", "database structure", "table design", "schema design",
+			"relational model", "database model", "data model"
+		]
+		return any(k in q for k in keywords)
+
+	def _is_ui_design_question(self, question: str) -> bool:
+		"""Detect UI/UX design questions"""
+		q = (question or "").lower()
+		keywords = [
+			"front page", "user interface", "ui design", "mobile app interface",
+			"frontend design", "ui/ux", "user experience", "wireframe",
+			"mockup", "prototype", "visual design", "layout design",
+			"design the front", "design the interface", "design the page"
+		]
+		return any(k in q for k in keywords)
+
+	def _is_algorithm_question(self, question: str) -> bool:
+		"""Detect algorithm and data structure questions"""
+		q = (question or "").lower()
+		keywords = [
+			"algorithm", "data structure", "sorting", "searching", "recommendation algorithm",
+			"build a recommendation", "implement authentication", "authentication algorithm",
+			"search algorithm", "matching algorithm", "optimization algorithm"
+		]
+		return any(k in q for k in keywords)
+
+	def _database_schema_overrides(self) -> str:
+		"""Overrides for database schema questions"""
+		return (
+			"\n\nDatabase Schema Overrides (apply only to database schema questions):\n"
+			"- Include a 'Database Schema' section with an ER diagram using Mermaid.\n"
+			"- Use erDiagram syntax with entities, relationships, and attributes.\n"
+			"- Example format:\n"
+			"  ```mermaid\n"
+			"  erDiagram\n"
+			"    USER ||--o{ ORDER : places\n"
+			"    USER {\n"
+			"      int id PK\n"
+			"      string name\n"
+			"      string email\n"
+			"    }\n"
+			"    ORDER {\n"
+			"      int id PK\n"
+			"      int user_id FK\n"
+			"      decimal total\n"
+			"    }\n"
+			"  ```\n"
+		)
+
+	def _ui_design_overrides(self) -> str:
+		"""Overrides for UI design questions"""
+		return (
+			"\n\nUI Design Overrides (apply only to UI/UX design questions):\n"
+			"- Include a 'UI Design' section with a wireframe or layout diagram using Mermaid.\n"
+			"- Use flowchart syntax to show component hierarchy and layout.\n"
+			"- Example format:\n"
+			"  ```mermaid\n"
+			"  flowchart TD\n"
+			"    A[Header] --> B[Navigation]\n"
+			"    A --> C[Search Bar]\n"
+			"    A --> D[User Menu]\n"
+			"    E[Main Content] --> F[Article List]\n"
+			"    E --> G[Sidebar]\n"
+			"    H[Footer] --> I[Links]\n"
+			"  ```\n"
+		)
+
+	def _algorithm_overrides(self) -> str:
+		"""Overrides for algorithm questions"""
+		return (
+			"\n\nAlgorithm Overrides (apply only to algorithm questions):\n"
+			"- Include a 'Algorithm Flow' section with a flowchart using Mermaid.\n"
+			"- Use flowchart syntax to show the algorithm steps and decision points.\n"
+			"- Example format:\n"
+			"  ```mermaid\n"
+			"  flowchart TD\n"
+			"    A[Start] --> B{Input Valid?}\n"
+			"    B -->|Yes| C[Process Data]\n"
+			"    B -->|No| D[Return Error]\n"
+			"    C --> E[Return Result]\n"
+			"  ```\n"
+		)
 
 	def _system_design_overrides(self) -> str:
 		"""Enforce the System Design response structure requested by the user."""
@@ -1621,6 +1723,18 @@ class LLMService:
 		# If this is a system design question, enforce the SD structure
 		if self._is_system_design_question(question):
 			prompt = prompt + self._system_design_overrides()
+		
+		# If this is a database schema question, add ER diagram overrides
+		if self._is_database_schema_question(question):
+			prompt = prompt + self._database_schema_overrides()
+		
+		# If this is a UI design question, add UI design overrides
+		if self._is_ui_design_question(question):
+			prompt = prompt + self._ui_design_overrides()
+		
+		# If this is an algorithm question, add algorithm overrides
+		if self._is_algorithm_question(question):
+			prompt = prompt + self._algorithm_overrides()
 		
 		# If this is a technical strategy question, add strategy overrides
 		if self._is_technical_strategy_question(question):
