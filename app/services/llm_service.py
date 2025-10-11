@@ -300,6 +300,8 @@ CODE_FORWARD_PROMPT = (
 "16. **Visual & Diagram Request Handling:**\n"
 "    - For architecture diagrams: Provide text-based component descriptions\n"
 "    - For flowcharts: Use numbered steps with clear decision points\n"
+"    - For Mermaid diagrams: Use proper syntax with one statement per line, proper indentation (2 spaces for subgraphs, 4 for nodes), and no semicolons as separators\n"
+"    - Mermaid format: Start with 'flowchart LR' or 'flowchart TD', use proper node syntax [Label], and separate each connection on its own line\n"
 "    - For system designs: Describe components, relationships, and data flow in text\n"
 "    - Format: 'Here's how I would structure this visually:' followed by detailed text description\n"
 "    - Include: Component names, connections, data flow direction, key interfaces\n"
@@ -830,31 +832,81 @@ class LLMService:
 		import re
 		
 		def normalize_block(code: str) -> str:
+			"""Comprehensive Mermaid syntax normalizer that ensures proper formatting."""
 			c = code.strip()
-			# Remove stray backtick artifacts sometimes injected by models
-			c = c.replace("`mermaid", "").replace("`", "")
-			# Insert newline before structural tokens if missing
-			c = re.sub(r"\s+(subgraph\s+)", r"\n\1", c)
-			c = re.sub(r"\s+(end)(?!\w)", r"\n\1", c)
-			c = re.sub(r"\s+(classDef\s+)", r"\n\1", c)
-			c = re.sub(r"\s+(class\s+)", r"\n\1", c)
-			# Ensure flowchart header at start of a line
-			c = re.sub(r"\s+(flowchart\s+[A-Z]{2})", r"\n\1", c)
-			# Add newline after 'end' when followed by another token
-			c = re.sub(r"end\s+(?=\w|subgraph|classDef|class|flowchart)", "end\n", c)
-			# Put each edge statement on its own line by introducing line breaks before new edges/nodes
-			c = re.sub(r"(\]|[a-zA-Z0-9_])\s+([a-zA-Z0-9_\)\]]\s*(?:-->|-\.->|==>))", r"\1\n\2", c)
-			# New line before a new node like XYZ[Label] when crammed onto one line
-			c = re.sub(r"(\]|[a-zA-Z0-9_])\s+([A-Za-z0-9_]+\[)", r"\1\n\2", c)
-			# New line before a bare node id starting the next edge: "... A --> B B --> C" => line break before 2nd "B -->"
-			c = re.sub(r"(?m)(?<!^)\s+([A-Za-z0-9_]+)\s+(-->|-\.->|==>)", r"\n\1 \2", c)
-			# Keep spaces around arrows for Mermaid readability
-			c = re.sub(r"\)\s*(-->|-\.->|==>)\s*", r") \1 ", c)
-			# Add newline before classDef/class if they appear mid-line
-			c = re.sub(r"([^\n])\s+(classDef\s+)", r"\1\n\2", c)
-			c = re.sub(r"([^\n])\s+(class\s+)", r"\1\n\2", c)
-			# Ensure trailing newline
-			return (c.strip() + "\n").replace("\r\n", "\n")
+			
+			# Remove stray backtick artifacts
+			c = c.replace("`mermaid", "").replace("```", "").replace("`", "")
+			
+			# First, split by major structural elements
+			# Split by subgraph boundaries
+			parts = re.split(r'(\bsubgraph\s+[^}]+?\bend\b)', c, flags=re.DOTALL)
+			
+			formatted_lines = []
+			in_subgraph = False
+			
+			for part in parts:
+				part = part.strip()
+				if not part:
+					continue
+					
+				# Check if this is a subgraph block
+				if part.startswith('subgraph '):
+					# Extract subgraph name and content
+					subgraph_match = re.match(r'subgraph\s+([^}]+?)\s+(.*?)\s+end', part, re.DOTALL)
+					if subgraph_match:
+						subgraph_name = subgraph_match.group(1).strip()
+						subgraph_content = subgraph_match.group(2).strip()
+						
+						formatted_lines.append(f"subgraph {subgraph_name}")
+						
+						# Process subgraph content
+						subgraph_lines = subgraph_content.split('\n')
+						for line in subgraph_lines:
+							line = line.strip()
+							if line:
+								# Split by semicolons and arrows
+								statements = re.split(r'[;]', line)
+								for stmt in statements:
+									stmt = stmt.strip()
+									if stmt:
+										formatted_lines.append(f"  {stmt}")
+						
+						formatted_lines.append("end")
+					else:
+						# Fallback for malformed subgraph
+						formatted_lines.append(f"subgraph {part}")
+						formatted_lines.append("end")
+				else:
+					# Regular content - check for flowchart declaration
+					if re.match(r'^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s+', part):
+						formatted_lines.append(part)
+					else:
+						# Process regular lines
+						lines = part.split('\n')
+						for line in lines:
+							line = line.strip()
+							if line:
+								# Split by semicolons
+								statements = re.split(r'[;]', line)
+								for stmt in statements:
+									stmt = stmt.strip()
+									if stmt:
+										# Check if it's a classDef or class statement
+										if stmt.startswith('classDef ') or stmt.startswith('class '):
+											formatted_lines.append(stmt)
+										else:
+											formatted_lines.append(f"  {stmt}")
+			
+			# Join lines and clean up
+			result = '\n'.join(formatted_lines)
+			
+			# Final cleanup
+			result = re.sub(r'\n\s*\n', '\n', result)  # Remove empty lines
+			result = re.sub(r'^\s*\n', '', result)     # Remove leading empty lines
+			result = result.strip()
+			
+			return result
 		
 		lines = text.split('\n')
 		out: list[str] = []
