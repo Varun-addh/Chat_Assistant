@@ -3,7 +3,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 import httpx
-import re
 
 from app.utils.security import verify_api_key
 
@@ -57,14 +56,6 @@ async def render_mermaid(payload: dict):
     if theme and theme != "default" and not code.lstrip().startswith("%%{init"):
         # Prepend Mermaid init directive for theme; keep code intact otherwise
         code = f"%%{{init: {{ 'theme': '{theme}' }} }}%%\n" + code
-    
-    # Basic syntax validation
-    if not code.strip():
-        raise HTTPException(status_code=400, detail="Empty Mermaid code")
-    
-    # Check for basic Mermaid structure
-    if not re.search(r'^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s+', code, re.MULTILINE):
-        raise HTTPException(status_code=400, detail="Invalid Mermaid syntax: missing diagram type declaration")
 
     import requests
     import base64

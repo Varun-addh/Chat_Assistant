@@ -832,87 +832,71 @@ class LLMService:
 		import re
 		
 		def normalize_block(code: str) -> str:
-			"""Robust Mermaid syntax normalizer that ensures proper formatting."""
+			"""Comprehensive Mermaid syntax normalizer that ensures proper formatting."""
 			c = code.strip()
 			
 			# Remove stray backtick artifacts
 			c = c.replace("`mermaid", "").replace("```", "").replace("`", "")
 			
-			# Split the entire code into tokens for better processing
-			# First, normalize spaces and split by common delimiters
-			c = re.sub(r'\s+', ' ', c)  # Normalize whitespace
-			
-			# Split by major structural elements
-			tokens = re.split(r'(\b(?:subgraph|end|classDef|class)\b)', c)
+			# First, split by major structural elements
+			# Split by subgraph boundaries
+			parts = re.split(r'(\bsubgraph\s+[^}]+?\bend\b)', c, flags=re.DOTALL)
 			
 			formatted_lines = []
-			i = 0
+			in_subgraph = False
 			
-			while i < len(tokens):
-				token = tokens[i].strip()
-				if not token:
-					i += 1
+			for part in parts:
+				part = part.strip()
+				if not part:
 					continue
 					
-				# Handle flowchart declaration
-				if re.match(r'^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s+', token):
-					formatted_lines.append(token)
-					
-				# Handle subgraph
-				elif token == 'subgraph':
-					if i + 1 < len(tokens):
-						subgraph_name = tokens[i + 1].strip()
+				# Check if this is a subgraph block
+				if part.startswith('subgraph '):
+					# Extract subgraph name and content
+					subgraph_match = re.match(r'subgraph\s+([^}]+?)\s+(.*?)\s+end', part, re.DOTALL)
+					if subgraph_match:
+						subgraph_name = subgraph_match.group(1).strip()
+						subgraph_content = subgraph_match.group(2).strip()
+						
 						formatted_lines.append(f"subgraph {subgraph_name}")
-						i += 2
 						
-						# Collect subgraph content until 'end'
-						subgraph_content = []
-						while i < len(tokens) and tokens[i].strip() != 'end':
-							content = tokens[i].strip()
-							if content:
-								# Split by semicolons and process each statement
-								statements = [s.strip() for s in content.split(';') if s.strip()]
+						# Process subgraph content
+						subgraph_lines = subgraph_content.split('\n')
+						for line in subgraph_lines:
+							line = line.strip()
+							if line:
+								# Split by semicolons and arrows
+								statements = re.split(r'[;]', line)
 								for stmt in statements:
-									if stmt and not stmt.startswith('subgraph'):
-										subgraph_content.append(f"  {stmt}")
-							i += 1
+									stmt = stmt.strip()
+									if stmt:
+										formatted_lines.append(f"  {stmt}")
 						
-						# Add subgraph content
-						formatted_lines.extend(subgraph_content)
-						
-						# Add end
-						if i < len(tokens) and tokens[i].strip() == 'end':
-							formatted_lines.append("end")
-							i += 1
+						formatted_lines.append("end")
 					else:
-						i += 1
-						
-				# Handle classDef
-				elif token == 'classDef':
-					if i + 1 < len(tokens):
-						classdef_content = f"classDef {tokens[i + 1].strip()}"
-						formatted_lines.append(classdef_content)
-						i += 2
-					else:
-						i += 1
-						
-				# Handle class
-				elif token == 'class':
-					if i + 1 < len(tokens):
-						class_content = f"class {tokens[i + 1].strip()}"
-						formatted_lines.append(class_content)
-						i += 2
-					else:
-						i += 1
-						
-				# Handle regular content
+						# Fallback for malformed subgraph
+						formatted_lines.append(f"subgraph {part}")
+						formatted_lines.append("end")
 				else:
-					# Split by semicolons and process each statement
-					statements = [s.strip() for s in token.split(';') if s.strip()]
-					for stmt in statements:
-						if stmt and not stmt.startswith(('subgraph', 'classDef', 'class', 'flowchart', 'sequenceDiagram')):
-							formatted_lines.append(f"  {stmt}")
-					i += 1
+					# Regular content - check for flowchart declaration
+					if re.match(r'^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s+', part):
+						formatted_lines.append(part)
+					else:
+						# Process regular lines
+						lines = part.split('\n')
+						for line in lines:
+							line = line.strip()
+							if line:
+								# Split by semicolons
+								statements = re.split(r'[;]', line)
+								for stmt in statements:
+									stmt = stmt.strip()
+									if stmt:
+										# Check if it's a classDef or class statement
+										if stmt.startswith('classDef ') or stmt.startswith('class '):
+											formatted_lines.append(stmt)
+										else:
+											formatted_lines.append(f"  {stmt}")
 			
 			# Join lines and clean up
 			result = '\n'.join(formatted_lines)
