@@ -847,79 +847,61 @@ class LLMService:
 			
 			formatted_lines = [flowchart_type]
 			
-			# Completely rebuild the Mermaid by parsing it properly
-			# Split by 'subgraph' and 'end' to find all subgraph blocks
-			parts = re.split(r'\bsubgraph\s+', remaining)
-			
-			if len(parts) > 1:
-				# Process first part (before any subgraphs)
-				first_part = parts[0].strip()
-				if first_part:
-					statements = [s.strip() for s in first_part.split(';') if s.strip()]
-					for stmt in statements:
-						if stmt and not stmt.startswith(('classDef', 'class')):
-							formatted_lines.append(f"  {stmt}")
-				
-				# Process each subgraph part
-				for part in parts[1:]:
-					# Find the matching 'end' for this subgraph
-					end_pos = part.find(' end')
-					if end_pos == -1:
-						end_pos = part.find('end')
-					
-					if end_pos != -1:
-						# Extract subgraph name and content
-						# The name is everything before the first space that's not inside brackets
-						name_end = 0
-						bracket_depth = 0
-						while name_end < len(part) and name_end < end_pos:
-							char = part[name_end]
-							if char == '[':
-								bracket_depth += 1
-							elif char == ']':
-								bracket_depth -= 1
-							elif char == ' ' and bracket_depth == 0:
-								break
-							name_end += 1
-						
-						subgraph_name = part[:name_end].strip()
-						content = part[name_end:end_pos].strip()
-						
-						formatted_lines.append(f"subgraph {subgraph_name}")
-						
-						# Process subgraph content
-						if content:
-							statements = [s.strip() for s in content.split(';') if s.strip()]
-							for stmt in statements:
-								if stmt:
-									formatted_lines.append(f"  {stmt}")
-						
-						formatted_lines.append("end")
-						
-						# Process any remaining content after this subgraph
-						remaining_after = part[end_pos + 3:].strip()
-						if remaining_after:
-							statements = [s.strip() for s in remaining_after.split(';') if s.strip()]
-							for stmt in statements:
-								if stmt and not stmt.startswith(('classDef', 'class')):
-									formatted_lines.append(f"  {stmt}")
-			else:
-				# No subgraphs, just process the content
-				statements = [s.strip() for s in remaining.split(';') if s.strip()]
-				for stmt in statements:
-					if stmt and not stmt.startswith(('classDef', 'class')):
-						formatted_lines.append(f"  {stmt}")
-			
-			# Add classDef and class statements at the end
+			# Extract classDef and class statements first to avoid duplication
 			classdef_pattern = r'classDef\s+([^;]+)'
 			classdef_matches = re.findall(classdef_pattern, c)
-			for classdef in classdef_matches:
-				formatted_lines.append(f"classDef {classdef.strip()}")
+			classdef_statements = [f"classDef {classdef.strip()}" for classdef in classdef_matches]
 			
 			class_pattern = r'class\s+([^;]+)'
 			class_matches = re.findall(class_pattern, c)
-			for class_stmt in class_matches:
-				formatted_lines.append(f"class {class_stmt.strip()}")
+			class_statements = [f"class {class_stmt.strip()}" for class_stmt in class_matches]
+			
+			# Remove classDef and class statements from remaining content to avoid duplication
+			remaining = re.sub(r'classDef\s+[^;]+;?', '', remaining)
+			remaining = re.sub(r'class\s+[^;]+;?', '', remaining)
+			
+			# Process the content line by line to preserve structure
+			lines = remaining.split('\n')
+			in_subgraph = False
+			subgraph_depth = 0
+			
+			for line in lines:
+				line = line.strip()
+				if not line:
+					continue
+					
+				# Check if this line starts a subgraph
+				subgraph_match = re.match(r'subgraph\s+(.+)', line)
+				if subgraph_match:
+					subgraph_name = subgraph_match.group(1).strip()
+					# Ensure subgraph name is properly formatted
+					if not subgraph_name.endswith(']') and '[' in subgraph_name:
+						# Add missing closing bracket if needed
+						subgraph_name += ']'
+					formatted_lines.append(f"subgraph {subgraph_name}")
+					in_subgraph = True
+					subgraph_depth += 1
+					continue
+				
+				# Check if this line ends a subgraph
+				if line == 'end' and in_subgraph:
+					formatted_lines.append("end")
+					subgraph_depth -= 1
+					if subgraph_depth == 0:
+						in_subgraph = False
+					continue
+				
+				# Process regular statements
+				if in_subgraph:
+					# Indent content inside subgraphs
+					formatted_lines.append(f"  {line}")
+				else:
+					# Regular content outside subgraphs
+					formatted_lines.append(f"  {line}")
+			
+			# Add classDef and class statements at the end
+			formatted_lines.extend(classdef_statements)
+			formatted_lines.extend(class_statements)
 			
 			# Join lines and clean up
 			result = '\n'.join(formatted_lines)
