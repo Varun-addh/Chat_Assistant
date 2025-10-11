@@ -26,7 +26,7 @@ def _sanitize_code(raw: str) -> str:
 
 
 @router.post("/render_mermaid")
-async def render_mermaid(payload: dict, _: None = Depends(verify_api_key)):
+async def render_mermaid(payload: dict):
     """Render Mermaid code to SVG via Kroki backend.
 
     Expected payload: { "code": "flowchart LR...", "theme": "default|dark|forest|neutral" }
@@ -42,10 +42,12 @@ async def render_mermaid(payload: dict, _: None = Depends(verify_api_key)):
 
     theme = (payload.get("theme") or "").strip() or "default"
 
-    # Kroki mermaid rendering endpoint
-    url = "https://kroki.io/mermaid/svg"
-
-    # Kroki accepts either plain text body or JSON; use text to reduce overhead
+    # Try multiple Mermaid rendering services for better reliability
+    services = [
+        "https://mermaid.ink/svg",
+        "https://kroki.io/mermaid/svg"
+    ]
+    
     headers = {
         "Content-Type": "text/plain; charset=utf-8",
     }
@@ -55,18 +57,48 @@ async def render_mermaid(payload: dict, _: None = Depends(verify_api_key)):
         # Prepend Mermaid init directive for theme; keep code intact otherwise
         code = f"%%{{init: {{ 'theme': '{theme}' }} }}%%\n" + code
 
+    import requests
+    import base64
+    
+    # Try mermaid.ink first (more reliable)
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, content=code.encode("utf-8"), headers=headers)
+        print(f"DEBUG: Trying mermaid.ink")
+        print(f"DEBUG: Code: {code[:100]}...")
+        
+        # mermaid.ink uses base64 encoded diagram in URL
+        encoded_code = base64.b64encode(code.encode('utf-8')).decode('ascii')
+        url = f"https://mermaid.ink/svg/{encoded_code}"
+        
+        resp = requests.get(url, timeout=10)
+        print(f"DEBUG: mermaid.ink response: {resp.status_code}")
+        
+        if resp.status_code == 200 and resp.text.strip().startswith("<svg"):
+            svg = resp.text
+        else:
+            raise Exception(f"mermaid.ink failed: {resp.status_code}")
+            
+    except Exception as exc:
+        print(f"DEBUG: mermaid.ink failed: {exc}")
+        # Fallback to Kroki with shorter timeout
+        try:
+            print(f"DEBUG: Trying Kroki as fallback")
+            url = "https://kroki.io/mermaid/svg"
+            resp = requests.post(url, data=code.encode("utf-8"), headers=headers, timeout=5)
+            print(f"DEBUG: Kroki response: {resp.status_code}")
+            
             if resp.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Kroki render failed: {resp.status_code}")
-    except HTTPException:
-        raise
-    except Exception as exc:  # Network/timeout/etc
-        raise HTTPException(status_code=502, detail=f"Render error: {exc}")
+                error_text = resp.text[:200] if resp.text else "No error details"
+                raise Exception(f"Kroki failed: {resp.status_code} - {error_text}")
+                
+            svg = resp.text
+            if not svg.strip().startswith("<svg"):
+                raise Exception("Invalid SVG from Kroki")
+                
+        except Exception as kroki_exc:
+            print(f"DEBUG: Both services failed. Kroki error: {kroki_exc}")
+            raise HTTPException(status_code=502, detail=f"All rendering services failed. Last error: {str(kroki_exc)}")
 
-    svg = resp.text
-    # Minimal sanity check
+    # Final sanity check
     if not svg.strip().startswith("<svg"):
         raise HTTPException(status_code=502, detail="Invalid SVG returned from renderer")
 
@@ -77,13 +109,12 @@ async def render_mermaid(payload: dict, _: None = Depends(verify_api_key)):
 async def render_mermaid_get(
     code: str = Query(default=""),
     theme: str = Query(default="default"),
-    _: None = Depends(verify_api_key),
 ):
     """GET variant for <img src> compatibility.
 
     Accepts `code` and optional `theme` as query params and returns SVG.
     """
     payload = {"code": code, "theme": theme}
-    return await render_mermaid(payload, None)
+    return await render_mermaid(payload)
 
 
