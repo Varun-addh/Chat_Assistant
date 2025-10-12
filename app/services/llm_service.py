@@ -954,6 +954,18 @@ class LLMService:
 			# Clean up any leading/trailing whitespace and newlines
 			c = c.strip()
 			
+			# Fix Mermaid syntax issues with special characters in labels
+			# Remove parentheses from node labels (Mermaid doesn't handle them well)
+			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3]', c)
+			# Handle multiple parentheses in the same label
+			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3\4\5]', c)
+			# Clean up any remaining parentheses in labels
+			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3]', c)
+			# Remove parentheses from subgraph names
+			c = re.sub(r'subgraph\s+([^[]*?)\(([^)]*?)\)([^[]*?)\[', r'subgraph \1\2\3[', c)
+			# Clean up any remaining parentheses in subgraph names
+			c = re.sub(r'subgraph\s+([^[]*?)\(([^)]*?)\)([^[]*?)\[', r'subgraph \1\2\3[', c)
+			
 			# Extract flowchart type - preserve the original direction
 			flowchart_match = re.match(r'^(flowchart\s+[A-Z]{2})', c)
 			flowchart_type = flowchart_match.group(1) if flowchart_match else "flowchart LR"
