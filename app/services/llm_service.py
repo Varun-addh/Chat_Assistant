@@ -645,18 +645,64 @@ class LLMService:
 		if any(k in q for k in exclude_keywords):
 			return False
 		
-		# System design specific keywords
+		# System design and architecture specific keywords - EXPANDED for better coverage
 		keywords = [
+			# Explicit system design terms
 			"system design", "how would you design", "architecture", "architect",
 			"high-level design", "hld", "low-level design", "scale to", 
 			"million users", "billions", "throughput", "latency",
 			"load balancer", "cache", "queue", "kafka", "replication",
 			"microservices", "distributed system", "scalable", "scalability",
 			"api design", "service design", "component design",
+			
+			# Specific system types
 			"url shortener", "chat system", "social media", "e-commerce",
 			"video streaming", "file storage", "search engine", "recommendation system",
 			"notification system", "payment system", "booking system", "messaging system",
-			"build a system", "create a system", "implement a system", "develop a system"
+			"build a system", "create a system", "implement a system", "develop a system",
+			
+			# Architecture-related terms (EXPANDED)
+			"how to build", "how to create", "how to implement", "how to develop",
+			"how would you build", "how would you create", "how would you implement",
+			"design a", "design an", "build a", "create a", "implement a", "develop a",
+			"construct a", "setup a", "setup an", "configure a", "configure an",
+			
+			# Infrastructure and deployment terms
+			"infrastructure", "deployment", "deploy", "hosting", "cloud architecture",
+			"aws architecture", "azure architecture", "gcp architecture", "cloud design",
+			"container", "docker", "kubernetes", "orchestration", "devops",
+			
+			# Performance and scaling terms
+			"performance", "optimization", "optimize", "scaling", "scale",
+			"high availability", "fault tolerance", "redundancy", "backup",
+			"disaster recovery", "monitoring", "logging", "metrics",
+			"load balancing", "load balancer", "auto-scaling", "auto scaling",
+			
+			# Data and storage architecture
+			"data architecture", "data pipeline", "etl", "elt", "data warehouse",
+			"data lake", "big data", "analytics", "reporting", "business intelligence",
+			"real-time processing", "batch processing", "stream processing",
+			
+			# Security and networking
+			"security architecture", "network design", "firewall", "vpn",
+			"authentication", "authorization", "encryption", "ssl", "tls",
+			
+			# Integration and API terms
+			"integration", "api integration", "third-party integration",
+			"webhook", "rest api", "graphql", "soap", "rpc",
+			
+			# Application architecture patterns
+			"mvc", "mvp", "mvvm", "microservices", "monolith", "serverless",
+			"event-driven", "cqs", "cqrs", "event sourcing", "saga pattern",
+			
+			# Technology-specific architecture
+			"react architecture", "angular architecture", "vue architecture",
+			"node.js architecture", "python architecture", "java architecture",
+			"spring architecture", "django architecture", "flask architecture",
+			
+			# Business and domain terms
+			"business architecture", "domain architecture", "enterprise architecture",
+			"solution architecture", "technical architecture", "application architecture"
 		]
 		return any(k in q for k in keywords)
 
@@ -762,11 +808,13 @@ class LLMService:
 			"\n#### **2. High-Level Architecture**\n"
 			"- Provide a table with Component | Purpose | Technology/Layer.\n"
 			"- **MANDATORY: Include a 'Visual Architecture Diagram' section with a Mermaid flowchart code block.**\n"
-			"- **ALWAYS generate a Mermaid diagram for system design questions - this is required, not optional.**\n"
+			"- **ALWAYS generate a Mermaid diagram for ANY architecture question - this is required, not optional.**\n"
+			"- **Generate diagrams for ALL architecture questions: system design, cloud architecture, data architecture, security architecture, etc.**\n"
 			"- Use solid arrows (-->), subgraphs for layers (User, Backend, Services, Cache, Database), and colorful classDefs.\n"
 			"- Choose appropriate flowchart direction: TD (top-down) for layered architectures, LR (left-right) for data flow.\n"
 			"- Include all major components: clients, load balancers, API gateways, microservices, databases, caches, message queues.\n"
 			"- Use descriptive node names and proper styling with classDef statements.\n"
+			"- Adapt the diagram to the specific architecture type (system, cloud, data, security, etc.).\n"
 			"- Example style guide to follow (adapt names to the problem):\n"
 			"  ```mermaid\nflowchart TD\n  subgraph Client[Client Layer]\n    Web[Web App]:::client\n    Mobile[Mobile App]:::client\n  end\n  subgraph CDN[Content Delivery Network]\n    CloudFlare[CloudFlare]:::cdn\n  end\n  subgraph Load_Balancer[Load Balancer Layer]\n    ALB[Application Load Balancer]:::lb\n  end\n  subgraph API_Gateway[API Gateway Layer]\n    Kong[Kong Gateway]:::gateway\n    Auth[Authentication]:::gateway\n  end\n  subgraph Microservices[Microservices Layer]\n    User_Service[User Service]:::service\n    Order_Service[Order Service]:::service\n  end\n  subgraph Database[Database Layer]\n    Postgres[(PostgreSQL)]:::db\n    Redis[(Redis Cache)]:::cache\n  end\n  Web --> CloudFlare\n  CloudFlare --> ALB\n  ALB --> Kong\n  Kong --> Auth\n  Auth --> User_Service\n  Auth --> Order_Service\n  User_Service --> Postgres\n  Order_Service --> Postgres\n  User_Service --> Redis\n  classDef client fill:#e1f5fe,stroke:#01579b,color:#000\n  classDef cdn fill:#f3e5f5,stroke:#4a148c,color:#000\n  classDef lb fill:#fff3e0,stroke:#e65100,color:#000\n  classDef gateway fill:#e8f5e8,stroke:#1b5e20,color:#000\n  classDef service fill:#fff8e1,stroke:#f57f17,color:#000\n  classDef db fill:#e3f2fd,stroke:#0d47a1,color:#000\n  classDef cache fill:#fff3e0,stroke:#f57c00,color:#000\n  ```\n"
 			"\n#### **3. Component Design**\n"
