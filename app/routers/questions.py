@@ -2,12 +2,11 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from datetime import datetime
 
-from app.schemas import CreateSessionResponse, QuestionIn, AnswerOut, SessionHistory, QnA, SessionList, SessionSummary, CodeEvaluationIn, CodeEvaluationOut
+from app.schemas import CreateSessionResponse, QuestionIn, AnswerOut, SessionHistory, QnA, SessionList, SessionSummary
 from app.services.session_manager import session_manager
 from app.services.llm_service import llm_service
 from app.utils.security import verify_api_key
 from app.utils.audit import auditor
-from app.utils.code_analysis import analyze_python_code
 
 
 router = APIRouter()
@@ -84,49 +83,6 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 		"answer": answer,
 	})
 	return AnswerOut(answer=answer, created_at=datetime.utcnow())
-
-@router.post("/evaluate_code", response_model=CodeEvaluationOut)
-async def evaluate_code(payload: CodeEvaluationIn, _: None = Depends(verify_api_key)):
-	try:
-		state = await session_manager.get_required(payload.session_id)
-	except KeyError:
-		raise HTTPException(status_code=404, detail="Session not found.")
-
-	analysis = {}
-	if (payload.language or "").lower() == "python":
-		analysis = analyze_python_code(payload.code)
-
-	eval_text = await llm_service.evaluate_code_and_explanation(
-		question=payload.question,
-		language=payload.language,
-		code=payload.code,
-		explanation=payload.explanation,
-		analysis=analysis,
-	)
-
-	summary = eval_text
-	strengths: list[str] = []
-	weaknesses: list[str] = []
-	scores: dict = {}
-	coaching: list[str] = []
-
-	await auditor.log({
-		"type": "code_evaluation",
-		"session_id": state.session_id,
-		"question": payload.question,
-		"analysis": analysis,
-		"evaluation": eval_text,
-	})
-
-	return CodeEvaluationOut(
-		summary=summary,
-		strengths=strengths,
-		weaknesses=weaknesses,
-		scores=scores,
-		coaching=coaching,
-		analysis=analysis,
-		created_at=datetime.utcnow(),
-	)
 
 
 @router.post("/upload_profile")

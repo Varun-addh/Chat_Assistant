@@ -411,6 +411,62 @@ class LLMService:
 	def __init__(self) -> None:
 		self._client: Groq | None = None
 
+	async def evaluate_code_with_critique(self, problem: str, code: str, language: str) -> str:
+		"""Ask the model to produce a structured evaluation and approach explanation.
+
+		Returns markdown text with sections: Summary, Strengths, Weaknesses, Scores JSON, Recommendations.
+		"""
+		client = self._ensure_client()
+		if client is None:
+			# fallback mock
+			return (
+				"Summary: Offline mode. Cannot evaluate without LLM.\n\n"
+				"Strengths:\n- Runs locally\n\nWeaknesses:\n- No LLM available\n\n"
+				"Scores: {\"correctness\":0.0,\"optimization\":0.0,\"approach_explanation\":0.0,\"complexity_discussion\":0.0,\"edge_cases_testing\":0.0,\"total\":0.0}\n\n"
+				"Recommendations:\n- Configure LLM provider"
+			)
+
+		prompt = (
+			"You are a senior coding interview evaluator. Given a coding problem (if provided), a candidate's source code, and the language, you must produce a concise, world-class critique.\n\n"
+			"Output strictly in this format (exact headings):\n"
+			"Summary:\n<3-6 sentence overview of approach and correctness>\n\n"
+			"Strengths:\n- <bullet 1>\n- <bullet 2>\n\n"
+			"Weaknesses:\n- <bullet 1>\n- <bullet 2>\n\n"
+			"Scores: {\"correctness\":<0..1>,\"optimization\":<0..1>,\"approach_explanation\":<0..1>,\"complexity_discussion\":<0..1>,\"edge_cases_testing\":<0..1>,\"total\":<0..1>}\n\n"
+			"Recommendations:\n- <actionable bullet 1>\n- <actionable bullet 2>\n\n"
+			"Guidance: Be concrete. Do not use placeholders. If problem is missing, infer likely intent from code."
+		)
+
+		messages: List[Dict[str, str]] = [
+			{"role": "system", "content": prompt},
+			{"role": "user", "content": f"Problem: {problem or 'N/A'}\nLanguage: {language}\n\nCode:\n```{language}\n{code}\n```"},
+		]
+		provider = settings.llm_provider
+		max_tokens = min(settings.groq_max_tokens, 2048)
+		def _call():
+			if provider == "groq":
+				return client.chat.completions.create(
+					model=settings.groq_model,
+					messages=messages,
+					temperature=0.2,
+					max_tokens=max_tokens,
+				)
+			elif provider == "gemini":
+				gmodel = client.GenerativeModel(settings.gemini_model)
+				full_prompt = (prompt + "\n\nUser:\n" + messages[-1]["content"]).strip()
+				resp = gmodel.generate_content(full_prompt)
+				return getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+			else:
+				return None
+
+		import anyio
+		result = await anyio.to_thread.run_sync(_call)
+		if result is None:
+			return "Summary: Provider not available.\n\nStrengths:\n- N/A\n\nWeaknesses:\n- N/A\n\nScores: {\"correctness\":0,\"optimization\":0,\"approach_explanation\":0,\"complexity_discussion\":0,\"edge_cases_testing\":0,\"total\":0}\n\nRecommendations:\n- Configure provider"
+		if isinstance(result, str):
+			return result
+		return result.choices[0].message.content or ""
+
 	def _needs_comparison(self, question: str) -> bool:
 		q = (question or "").lower()
 		keywords = [
@@ -1868,39 +1924,6 @@ class LLMService:
 			"\n- Vary headings and bullet density to avoid repetitive structure; choose the lightest structure that conveys clarity."
 			"\n- Do not force the earlier template sections if brevity or narrative works better for this question."
 		)
-
-	async def evaluate_code_and_explanation(self, *, question: str, language: str, code: str, explanation: str, analysis: dict) -> str:
-		"""Ask the LLM to evaluate the solution using a rubric, given static analysis signals."""
-		client = self._ensure_client()
-		if client is None:
-			return "Evaluation unavailable: LLM key not configured."
-
-		rubric = (
-			"You are an AI Interview Assistant. Evaluate a candidate's coding solution and approach.\n\n"
-			"Inputs:\n"
-			f"Problem: {question}\n"
-			f"Language: {language}\n\n"
-			"Code:\n```\n" + code.strip() + "\n```\n\n"
-			"Approach Explanation:\n" + explanation.strip() + "\n\n"
-			"Static Analysis Signals (from AST):\n" + str(analysis) + "\n\n"
-			"Score using this structure strictly:\n"
-			"- Summary of understanding (2-3 sentences)\n"
-			"- Strengths (bullets)\n"
-			"- Weaknesses (bullets)\n"
-			"- Scoring JSON: { correctness:0-5, approach:0-5, complexity:0-5, clarity:0-5, optimization:0-5 }\n"
-			"- Feedback for improvement (3-5 bullets, specific and actionable)\n"
-		)
-
-		resp = client.chat.completions.create(
-			model=settings.groq_model,
-			messages=[
-				{"role": "system", "content": "Be concise, structured, and interview-realistic."},
-				{"role": "user", "content": rubric},
-			],
-			max_tokens=self._get_optimal_token_limit(question, settings.groq_max_tokens_code),
-			temperature=0.2,
-		)
-		return resp.choices[0].message.content
 
 	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None) -> str:
 		client = self._ensure_client()

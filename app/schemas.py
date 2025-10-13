@@ -25,24 +25,6 @@ class AnswerOut(BaseModel):
 	created_at: datetime
 
 
-class CodeEvaluationIn(BaseModel):
-	session_id: str
-	question: str
-	language: str = Field(default="python", description="Language of the submitted code")
-	code: str
-	explanation: str = Field(default="", description="Candidate's written approach explanation")
-
-
-class CodeEvaluationOut(BaseModel):
-	summary: str
-	strengths: list[str]
-	weaknesses: list[str]
-	scores: dict
-	coaching: list[str]
-	analysis: dict
-	created_at: datetime
-
-
 class QnA(BaseModel):
 	question: str
 	answer: str
@@ -62,3 +44,52 @@ class SessionSummary(BaseModel):
 
 class SessionList(BaseModel):
     items: List[SessionSummary]
+
+
+class EvaluationIn(BaseModel):
+	"""Request for one-click evaluation of a coding attempt.
+
+	- session_id: existing session to attach evaluation context
+	- problem: short problem name or prompt (optional but recommended)
+	- code: candidate's solution source code
+	- language: programming language hint (default: python)
+	"""
+	session_id: str = Field(..., description="Session identifier")
+	problem: Optional[str] = Field(default=None, description="Problem title or prompt")
+	code: str = Field(..., min_length=1, description="Source code to evaluate")
+	language: Optional[str] = Field(default="python", description="Code language: python|js|ts|java|cpp|go ...")
+
+
+class EvaluationScores(BaseModel):
+	correctness: float = Field(..., ge=0.0, le=1.0)
+	optimization: float = Field(..., ge=0.0, le=1.0)
+	approach_explanation: float = Field(..., ge=0.0, le=1.0)
+	complexity_discussion: float = Field(..., ge=0.0, le=1.0)
+	edge_cases_testing: float = Field(..., ge=0.0, le=1.0)
+	total: float = Field(..., ge=0.0, le=1.0)
+
+
+class StaticSignals(BaseModel):
+	uses_recursion: bool
+	uses_memoization: bool
+	uses_dynamic_programming: bool
+	loop_nesting_depth: int
+	uses_slicing_heavily: bool
+	uses_list_or_set_comprehension: bool
+	function_count: int
+	comment_density: float
+	estimated_time_complexity_hint: Optional[str] = None
+
+
+class EvaluationOut(BaseModel):
+	session_id: str
+	problem: Optional[str]
+	language: Optional[str]
+	approach_auto_explanation: str
+	feedback_summary: str
+	strengths: List[str]
+	weaknesses: List[str]
+	scores: EvaluationScores
+	static_signals: StaticSignals
+	recommendations: List[str]
+	created_at: datetime
