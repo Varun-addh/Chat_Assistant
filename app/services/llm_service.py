@@ -1010,6 +1010,8 @@ class LLMService:
 			text = self._clean_code_formatting(text)
 			# Ensure headings are still bolded
 			text = self._format_headings_bold(text)
+			# Strip LaTeX markers in non-code segments
+			text = self._strip_latex_math(text)
 			# Normalize Mermaid blocks even inside mixed content
 			text = self._normalize_mermaid_blocks(text)
 			return text
@@ -1021,6 +1023,8 @@ class LLMService:
 			# Preserve bold emphasis for headings, side headings, and keywords
 			# Ensure headings are still bolded
 			text = self._format_headings_bold(text)
+			# Remove LaTeX math markers for readability
+			text = self._strip_latex_math(text)
 			return text
 		
 		# Only touch pipe tables; do not try to infer tables from text
