@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from datetime import datetime
 import json
 
@@ -37,8 +38,28 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 	if not payload.code.strip():
 		raise HTTPException(status_code=400, detail="Empty code")
 
-	# Run evaluation (static + LLM critique)
-	critique_text, static = await evaluate_code(payload.problem, payload.code, payload.language or "python")
+	# Run evaluation (static + LLM critique) with safety net
+	try:
+		critique_text, static = await evaluate_code(payload.problem, payload.code, payload.language or "python")
+	except Exception as e:
+		# Provide graceful fallback so browsers still see CORS headers
+		critique_text = (
+			"Summary: Evaluation service encountered an issue but returned a safe fallback.\n\n"
+			"Strengths:\n- Code received\n\nWeaknesses:\n- LLM critique unavailable\n\n"
+			"Scores: {\"correctness\":0.0,\"optimization\":0.0,\"approach_explanation\":0.0,\"complexity_discussion\":0.0,\"edge_cases_testing\":0.0,\"total\":0.0}\n\n"
+			"Recommendations:\n- Retry shortly; if persistent, check provider logs"
+		)
+		static = {
+			"uses_recursion": False,
+			"uses_memoization": False,
+			"uses_dynamic_programming": False,
+			"loop_nesting_depth": 0,
+			"uses_slicing_heavily": False,
+			"uses_list_or_set_comprehension": False,
+			"function_count": 0,
+			"comment_density": 0.0,
+			"estimated_time_complexity_hint": None,
+		}
 
 	# Extract scores JSON from critique text
 	# Look for 'Scores: {...}'
