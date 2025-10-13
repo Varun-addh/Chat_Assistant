@@ -54,8 +54,8 @@ async def render_mermaid(payload: dict):
 
     # Some themes are supported by Mermaid directly; inject theme directive if provided
     if theme and theme != "default" and not code.lstrip().startswith("%%{init"):
-        # Prepend Mermaid init directive for theme; keep code intact otherwise
-        code = f"%%{{init: {{ 'theme': '{theme}' }} }}%%\n" + code
+        # Prepend Mermaid init directive using valid JSON (double quotes)
+        code = f"%%{{init: {{ \"theme\": \"{theme}\" }} }}%%\n" + code
 
     import requests
     import base64
