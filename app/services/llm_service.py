@@ -1035,6 +1035,8 @@ class LLMService:
 		
 		# Ensure headings are properly bolded
 		text = self._format_headings_bold(text)
+		# Remove LaTeX math markers from non-code sections for readability
+		text = self._strip_latex_math(text)
 		# Normalize any Mermaid code blocks so each statement is on its own line
 		text = self._normalize_mermaid_blocks(text)
 		
@@ -1073,6 +1075,29 @@ class LLMService:
 				formatted_lines.append(line)
 		
 		return '\n'.join(formatted_lines)
+
+	def _strip_latex_math(self, text: str) -> str:
+		"""Remove LaTeX math markers ($...$, \(...\), \[...\]) from non-code blocks while preserving inner text.
+		Skips fenced code blocks entirely."""
+		import re
+		lines = text.split('\n')
+		out: list[str] = []
+		in_code = False
+		for line in lines:
+			stripped = line.strip()
+			if stripped.startswith('```'):
+				in_code = not in_code
+				out.append(line)
+				continue
+			if in_code:
+				out.append(line)
+				continue
+			# Replace inline math markers
+			newline = re.sub(r'\$(.*?)\$', r'\1', line)
+			newline = re.sub(r'\\\((.*?)\\\)', r'\1', newline)
+			newline = re.sub(r'\\\[(.*?)\\\]', r'\1', newline, flags=re.DOTALL)
+			out.append(newline)
+		return '\n'.join(out)
 
 	def _normalize_mermaid_blocks(self, text: str) -> str:
 		"""Normalize Mermaid blocks without changing their content semantics.
