@@ -1041,26 +1041,31 @@ class LLMService:
 		return text
 
 	def _format_headings_bold(self, text: str) -> str:
-		"""Ensure all headings are properly bolded"""
+		"""Ensure all headings are properly bolded, but never touch fenced code blocks."""
 		import re
 		
 		lines = text.split('\n')
 		formatted_lines = []
+		in_code = False
 		
 		for line in lines:
-			# Check if this is a heading line
-			if line.strip().startswith(('##', '###', '####')):
+			stripped = line.strip()
+			# Toggle code fence regions
+			if stripped.startswith('```'):
+				in_code = not in_code
+				formatted_lines.append(line)
+				continue
+			
+			if not in_code and stripped.startswith(('##', '###', '####')):
 				# Extract the heading text (remove the ##, ###, etc.)
-				heading_match = re.match(r'^(#{2,4})\s*(.+)$', line.strip())
+				heading_match = re.match(r'^(#{2,4})\s*(.+)$', stripped)
 				if heading_match:
 					hashes, heading_text = heading_match.groups()
 					# Check if already bolded
 					if not heading_text.strip().startswith('**') or not heading_text.strip().endswith('**'):
-						# Bold the heading text
 						formatted_line = f"{hashes} **{heading_text.strip()}**"
 						formatted_lines.append(formatted_line)
 					else:
-						# Already bolded, keep as is
 						formatted_lines.append(line)
 				else:
 					formatted_lines.append(line)
