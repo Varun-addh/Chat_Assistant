@@ -13,13 +13,13 @@ router = APIRouter()
 
 
 @router.post("/session", response_model=CreateSessionResponse)
-async def create_session(_: None = Depends(verify_api_key)):
+async def create_session():
 	state = await session_manager.create_session()
 	return CreateSessionResponse(session_id=state.session_id)
 
 
 @router.post("/question")
-async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)):
+async def submit_question(payload: QuestionIn):
 	try:
 		state = await session_manager.get_required(payload.session_id)
 	except KeyError:
@@ -87,9 +87,8 @@ async def submit_question(payload: QuestionIn, _: None = Depends(verify_api_key)
 
 @router.post("/upload_profile")
 async def upload_profile(
-	file: UploadFile = File(...),
-	session_id: str = Form(...),
-	_: None = Depends(verify_api_key),
+    file: UploadFile = File(...),
+    session_id: str = Form(...),
 ):
 	# Ensure session exists
 	try:
@@ -138,7 +137,7 @@ async def upload_profile(
 
 
 @router.get("/history/{session_id}", response_model=SessionHistory)
-async def get_history(session_id: str, _: None = Depends(verify_api_key)):
+async def get_history(session_id: str):
 	try:
 		state = await session_manager.get_required(session_id)
 	except KeyError:
@@ -151,7 +150,7 @@ async def get_history(session_id: str, _: None = Depends(verify_api_key)):
 
 
 @router.get("/sessions", response_model=SessionList)
-async def list_sessions(_: None = Depends(verify_api_key)):
+async def list_sessions():
 	items_raw = await session_manager.list_sessions()
 	items = [
 		SessionSummary(
@@ -165,7 +164,7 @@ async def list_sessions(_: None = Depends(verify_api_key)):
 
 
 @router.delete("/session/{session_id}")
-async def delete_session(session_id: str, _: None = Depends(verify_api_key)):
+async def delete_session(session_id: str):
 	deleted = await session_manager.delete_session(session_id)
 	if not deleted:
 		raise HTTPException(status_code=404, detail="Session not found")
@@ -173,7 +172,7 @@ async def delete_session(session_id: str, _: None = Depends(verify_api_key)):
 
 
 @router.delete("/history/{session_id}")
-async def clear_history(session_id: str, _: None = Depends(verify_api_key)):
+async def clear_history(session_id: str):
 	try:
 		await session_manager.clear_history(session_id)
 	except KeyError:
@@ -182,7 +181,7 @@ async def clear_history(session_id: str, _: None = Depends(verify_api_key)):
 
 
 @router.delete("/history/{session_id}/{index}")
-async def delete_qna_item(session_id: str, index: int, _: None = Depends(verify_api_key)):
+async def delete_qna_item(session_id: str, index: int):
 	try:
 		await session_manager.remove_qna(session_id, index)
 	except KeyError:

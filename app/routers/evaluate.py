@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from datetime import datetime
 import json
 
 from app.schemas import EvaluationIn, EvaluationOut, EvaluationScores, StaticSignals
 from app.services.session_manager import session_manager
 from app.services.code_evaluation_service import evaluate_code
-from app.utils.security import verify_api_key
 from app.utils.audit import auditor
 
 
@@ -15,7 +14,7 @@ router = APIRouter()
 
 
 @router.post("/evaluate", response_model=EvaluationOut)
-async def evaluate(payload: EvaluationIn, _: None = Depends(verify_api_key)):
+async def evaluate(payload: EvaluationIn):
 	try:
 		await session_manager.get_required(payload.session_id)
 	except KeyError:
