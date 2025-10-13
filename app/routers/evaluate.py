@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from datetime import datetime
 import json
 
@@ -13,8 +13,22 @@ from app.utils.audit import auditor
 router = APIRouter()
 
 
+@router.options("/evaluate")
+async def evaluate_cors_options(request: Request) -> Response:
+	origin = request.headers.get("origin", "*")
+	acr_headers = request.headers.get("access-control-request-headers", "*")
+	headers = {
+		"Access-Control-Allow-Origin": origin,
+		"Vary": "Origin",
+		"Access-Control-Allow-Headers": acr_headers,
+		"Access-Control-Allow-Methods": "POST, OPTIONS",
+		"Access-Control-Max-Age": "3600",
+	}
+	return Response(status_code=204, headers=headers)
+
+
 @router.post("/evaluate", response_model=EvaluationOut)
-async def evaluate(payload: EvaluationIn):
+async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 	try:
 		await session_manager.get_required(payload.session_id)
 	except KeyError:
@@ -88,6 +102,12 @@ async def evaluate(payload: EvaluationIn):
 		recommendations=_bullets(recs_raw),
 		created_at=datetime.utcnow(),
 	)
+
+	# Ensure CORS header mirrors other endpoints for some hosts that require explicit setting
+	origin = request.headers.get("origin")
+	if origin:
+		response.headers["Access-Control-Allow-Origin"] = origin
+		response.headers["Vary"] = "Origin"
 
 	await auditor.log({
 		"type": "evaluation",
