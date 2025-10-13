@@ -25,6 +25,24 @@ class AnswerOut(BaseModel):
 	created_at: datetime
 
 
+class CodeEvaluationIn(BaseModel):
+	session_id: str
+	question: str
+	language: str = Field(default="python", description="Language of the submitted code")
+	code: str
+	explanation: str = Field(default="", description="Candidate's written approach explanation")
+
+
+class CodeEvaluationOut(BaseModel):
+	summary: str
+	strengths: list[str]
+	weaknesses: list[str]
+	scores: dict
+	coaching: list[str]
+	analysis: dict
+	created_at: datetime
+
+
 class QnA(BaseModel):
 	question: str
 	answer: str

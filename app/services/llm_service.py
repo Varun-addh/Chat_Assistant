@@ -122,6 +122,14 @@ CODE_FORWARD_PROMPT = (
 "   - **Space Complexity**: O(1) – detailed explanation of why\n\n"
 "   ## Alternative Approaches (if applicable)\n"
 "   - Approach 2: trade-offs and when to use\n\n"
+		"   ## Optimization & Variants (when relevant)\n"
+		"   - Memoization vs Tabulation: show how caching changes exponential → polynomial complexity; provide the state definition.\n"
+		"   - Refactor recursion to iterative (explicit stack/queue) for production safety and to avoid stack overflows.\n"
+		"   - Space-time trade-offs: in-place vs auxiliary structures, pruning, early exits.\n"
+		"   - If input limits are large, include a high-performance version (iterative DP/greedy, two pointers, or heap-based) and justify.\n\n"
+		"   ## Evidence (lightweight)\n"
+		"   - Brief complexity justification or proof sketch.\n"
+		"   - Optional micro-benchmark snippet or test harness to compare approaches (clarify it's illustrative).\n\n"
 "   ## Edge Cases & Optimization\n"
 "   - Edge cases to consider\n"
 "   - Performance optimization tips\n\n"
@@ -1860,6 +1868,39 @@ class LLMService:
 			"\n- Vary headings and bullet density to avoid repetitive structure; choose the lightest structure that conveys clarity."
 			"\n- Do not force the earlier template sections if brevity or narrative works better for this question."
 		)
+
+	async def evaluate_code_and_explanation(self, *, question: str, language: str, code: str, explanation: str, analysis: dict) -> str:
+		"""Ask the LLM to evaluate the solution using a rubric, given static analysis signals."""
+		client = self._ensure_client()
+		if client is None:
+			return "Evaluation unavailable: LLM key not configured."
+
+		rubric = (
+			"You are an AI Interview Assistant. Evaluate a candidate's coding solution and approach.\n\n"
+			"Inputs:\n"
+			f"Problem: {question}\n"
+			f"Language: {language}\n\n"
+			"Code:\n```\n" + code.strip() + "\n```\n\n"
+			"Approach Explanation:\n" + explanation.strip() + "\n\n"
+			"Static Analysis Signals (from AST):\n" + str(analysis) + "\n\n"
+			"Score using this structure strictly:\n"
+			"- Summary of understanding (2-3 sentences)\n"
+			"- Strengths (bullets)\n"
+			"- Weaknesses (bullets)\n"
+			"- Scoring JSON: { correctness:0-5, approach:0-5, complexity:0-5, clarity:0-5, optimization:0-5 }\n"
+			"- Feedback for improvement (3-5 bullets, specific and actionable)\n"
+		)
+
+		resp = client.chat.completions.create(
+			model=settings.groq_model,
+			messages=[
+				{"role": "system", "content": "Be concise, structured, and interview-realistic."},
+				{"role": "user", "content": rubric},
+			],
+			max_tokens=self._get_optimal_token_limit(question, settings.groq_max_tokens_code),
+			temperature=0.2,
+		)
+		return resp.choices[0].message.content
 
 	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None) -> str:
 		client = self._ensure_client()
