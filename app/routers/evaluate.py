@@ -118,6 +118,8 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 				break
 		return rem.strip()
 
+	# Prefer explicit Approach section if present; otherwise fallback to Summary; otherwise use full text
+	approach_text = _section("Approach")
 	summary = _section("Summary")
 	strengths_raw = _section("Strengths")
 	weaknesses_raw = _section("Weaknesses")
@@ -131,12 +133,15 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 				items.append(l[2:].strip())
 		return items
 
+	# Choose the best available approach content
+	_best_approach = (approach_text or summary or critique_text).strip()
+
 	resp = EvaluationOut(
 		session_id=payload.session_id,
 		problem=payload.problem,
 		language=(payload.language or "python"),
-		approach_auto_explanation=summary or "",
-		feedback_summary=summary or "",
+		approach_auto_explanation=_best_approach,
+		feedback_summary=_best_approach,
 		strengths=_bullets(strengths_raw),
 		weaknesses=_bullets(weaknesses_raw),
 		scores=EvaluationScores(**scores_dict),
@@ -146,7 +151,7 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 		markdown=f"""
 ### Approach
 
-{summary or ''}
+{_best_approach}
 """,
 	)
 
