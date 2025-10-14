@@ -93,3 +93,4 @@ class EvaluationOut(BaseModel):
 	static_signals: StaticSignals
 	recommendations: List[str]
 	created_at: datetime
+	markdown: Optional[str] = None

@@ -143,6 +143,39 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 		static_signals=StaticSignals(**static),
 		recommendations=_bullets(recs_raw),
 		created_at=datetime.utcnow(),
+		markdown=f"""
+### Evaluation: {payload.problem or 'Solution'}
+
+**Language:** {payload.language or 'python'}
+
+#### Approach Explanation
+{summary or ''}
+
+#### Strengths
+{''.join(f'- {s}\n' for s in _bullets(strengths_raw)) or '- N/A'}
+
+#### Weaknesses
+{''.join(f'- {w}\n' for w in _bullets(weaknesses_raw)) or '- N/A'}
+
+#### Scores
+- Correctness: {scores_dict['correctness']:.0%}
+- Optimization: {scores_dict['optimization']:.0%}
+- Approach Explanation: {scores_dict['approach_explanation']:.0%}
+- Complexity Discussion: {scores_dict['complexity_discussion']:.0%}
+- Edge Cases & Testing: {scores_dict['edge_cases_testing']:.0%}
+- Total: {scores_dict['total']:.0%}
+
+#### Static Signals
+- Recursion: {static.get('uses_recursion')}
+- Memoization: {static.get('uses_memoization')}
+- Dynamic Programming: {static.get('uses_dynamic_programming')}
+- Loop Nesting Depth: {static.get('loop_nesting_depth')}
+- Comment Density: {static.get('comment_density')}
+{f"- Complexity Hint: {static.get('estimated_time_complexity_hint')}" if static.get('estimated_time_complexity_hint') else ''}
+
+#### Recommendations
+{''.join(f'- {r}\n' for r in _bullets(recs_raw)) or '- N/A'}
+""",
 	)
 
 	# Cache the result for future requests
