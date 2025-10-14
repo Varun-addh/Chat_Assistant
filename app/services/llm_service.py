@@ -1072,6 +1072,86 @@ class LLMService:
 			return bool(settings.gemini_api_key)
 		return False
 
+	async def generate_algorithm_frames(self, problem: str, code: str, language: str) -> List[Dict[str, str]]:
+		"""Ask the model to emit STRICT JSON frames describing step-by-step Mermaid diagrams.
+
+		Return value: List[ {"mermaid": str, "caption": str} ] with 3–12 frames.
+		If the provider is not configured, return an empty list.
+		"""
+		client = self._ensure_client()
+		if client is None:
+			return []
+
+		prompt = (
+			"You are producing step-by-step VISUALIZATION FRAMES for how the algorithm executes.\n"
+			"Output STRICT JSON ONLY — no prose. The JSON schema is: {\n"
+			"  \"frames\": [ { \"mermaid\": string, \"caption\": string } ]\n"
+			"}.\n\n"
+			"Rules for frames (avoid extra legend boxes):\n"
+			"- 3 to 12 frames, each a small delta from previous.\n"
+			"- Use Mermaid flowchart TD or LR. Prefer LR for array-like steps.\n"
+			"- Show array contents and highlight current key/comparisons using class or styles.\n"
+			"- Use arrows to indicate movement or comparison.\n"
+			"- Use classDef to color: key (fill:#ffecb3,stroke:#ff9800), compare (fill:#e1f5fe,stroke:#0288d1), fixed (fill:#e8f5e9,stroke:#2e7d32).\n"
+			"- Do NOT create separate legend nodes like 'Data Layer' or 'Client Layer'. If grouping is needed, use 'subgraph' with titles only; no floating boxes.\n"
+			"- Keep the canvas minimal: only nodes that participate in the current step.\n"
+			"- Keep labels short.\n"
+			"- Do NOT include markdown fences.\n"
+			"- Escape newlines and quotes for valid JSON.\n\n"
+			"Context provided:\n"
+			f"Problem: {problem or 'N/A'}\n"
+			f"Language: {language}\n"
+			"Code snippet follows. Derive the algorithm (e.g., insertion sort) and produce frames accordingly.\n"
+			"Focus on: array state per outer loop, key element insertion, shifts, comparisons.\n"
+		)
+
+		user_payload = (
+			f"```{language}\n{code}\n```\n"
+		)
+
+		provider = (settings.llm_provider or "groq").lower()
+
+		import anyio, json as _json
+		def _call():
+			if provider == "groq":
+				messages: List[Dict[str, str]] = [
+					{"role": "system", "content": prompt},
+					{"role": "user", "content": user_payload},
+				]
+				resp = client.chat.completions.create(
+					model=settings.groq_model,
+					messages=messages,
+					temperature=0.2,
+					max_tokens=min(settings.groq_max_tokens or 1024, 1024),
+				)
+				return resp.choices[0].message.content
+			elif provider == "gemini":
+				gmodel = client.GenerativeModel(settings.gemini_model)
+				full_prompt = prompt + "\n\nUser:\n" + user_payload
+				resp = gmodel.generate_content(full_prompt)
+				return getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+			else:
+				return ""
+
+		try:
+			raw = await anyio.to_thread.run_sync(_call)
+			text = (raw or "").strip()
+			# Extract JSON robustly
+			start = text.find("{")
+			end = text.rfind("}")
+			if start != -1 and end != -1 and end > start:
+				obj = _json.loads(text[start:end+1])
+				frames = obj.get("frames") or []
+				clean: List[Dict[str, str]] = []
+				for item in frames:
+					merm = (item.get("mermaid") or "").strip()
+					cap = (item.get("caption") or "").strip()
+					if merm:
+						clean.append({"mermaid": merm, "caption": cap})
+				return clean
+			except Exception:
+			return []
+
 	def _format_response(self, text: str) -> str:
 		"""Return clean markdown for frontend rendering.
 
@@ -1137,6 +1217,30 @@ class LLMService:
 		text = self._normalize_mermaid_blocks(text)
 		
 		return text
+
+	def _inject_architecture_walkthrough(self, text: str) -> str:
+		"""Append a concise Architecture Walkthrough when content appears code/algorithmic.
+		Heuristics:
+		- Contains fenced code block, or mentions algorithm/complexity, or contains Mermaid.
+		- Avoid duplicate insertion if section already exists.
+		"""
+		import re
+		lower = text.lower()
+		if any(h in lower for h in ["architecture walkthrough", "data flow:", "components:"]):
+			return text
+		contains_code = "```" in text
+		mentions_algo = any(k in lower for k in ["algorithm", "complexity", "time complexity", "space complexity"]) 
+		contains_mermaid = self._contains_mermaid(text)
+		if not (contains_code or mentions_algo or contains_mermaid):
+			return text
+		appendix = (
+			"\n\n### **Architecture Walkthrough**\n\n"
+			"- Data flow: how inputs are validated, processed, and returned.\n"
+			"- Components: functions/classes collaborating; key responsibilities.\n"
+			"- Control flow: main loop/recursion, decision points, and error paths.\n"
+			"- Complexity: where time/space is spent, and why.\n"
+		)
+		return (text.rstrip() + appendix)
 
 	def _format_headings_bold(self, text: str) -> str:
 		"""Ensure all headings are properly bolded, but never touch fenced code blocks."""
@@ -2065,11 +2169,13 @@ class LLMService:
 					for chunk in stream_resp:
 						parts.append(getattr(chunk.choices[0].delta, "content", None) or "")
 					raw_text = "".join(parts).strip()
-					return self._format_response(raw_text)
+					formatted = self._format_response(raw_text)
+					return self._inject_architecture_walkthrough(formatted)
 				else:
 					resp = client.chat.completions.create(**build_kwargs(False))
 					raw_text = resp.choices[0].message.content.strip()
-					return self._format_response(raw_text)
+					formatted = self._format_response(raw_text)
+					return self._inject_architecture_walkthrough(formatted)
 			elif provider == "gemini":
 				# Gemini: use the GenerativeModel with non-streaming first
 				model_id = settings.gemini_model
@@ -2082,7 +2188,8 @@ class LLMService:
 				full_prompt = (prompt + "\n\nUser: " + question).strip()
 				resp = gmodel.generate_content(full_prompt)
 				raw_text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
-				return self._format_response((raw_text or "").strip())
+				formatted = self._format_response((raw_text or "").strip())
+				return self._inject_architecture_walkthrough(formatted)
 			else:
 				return question
 

@@ -58,6 +58,8 @@ class EvaluationIn(BaseModel):
 	problem: Optional[str] = Field(default=None, description="Problem title or prompt")
 	code: str = Field(..., min_length=1, description="Source code to evaluate")
 	language: Optional[str] = Field(default="python", description="Code language: python|js|ts|java|cpp|go ...")
+	# Controls whether to generate step-by-step diagram frames (Mermaid)
+	include_diagrams: Optional[bool] = Field(default=True, description="If true, returns step-by-step Mermaid frames that visualize the algorithm")
 
 
 class EvaluationScores(BaseModel):
@@ -94,3 +96,6 @@ class EvaluationOut(BaseModel):
 	recommendations: List[str]
 	created_at: datetime
 	markdown: Optional[str] = None
+	# Optional step-by-step visualization frames (Mermaid code per frame)
+	diagram_frames: Optional[List[str]] = None
+	diagram_captions: Optional[List[str]] = None
