@@ -1149,7 +1149,7 @@ class LLMService:
 					if merm:
 						clean.append({"mermaid": merm, "caption": cap})
 				return clean
-			except Exception:
+		except Exception:
 			return []
 
 	def _format_response(self, text: str) -> str:
