@@ -418,54 +418,62 @@ class LLMService:
 		"""
 		client = self._ensure_client()
 		if client is None:
-			# fallback mock
-			return (
-				"Summary: Offline mode. Cannot evaluate without LLM.\n\n"
-				"Strengths:\n- Runs locally\n\nWeaknesses:\n- No LLM available\n\n"
-				"Scores: {\"correctness\":0.0,\"optimization\":0.0,\"approach_explanation\":0.0,\"complexity_discussion\":0.0,\"edge_cases_testing\":0.0,\"total\":0.0}\n\n"
-				"Recommendations:\n- Configure LLM provider"
-			)
+			raise Exception("LLM client not available. Please configure GEMINI_API_KEY or GROQ_API_KEY.")
 
 		prompt = (
-			"You are a senior coding interview evaluator. Given a coding problem (if provided), a candidate's source code, and the language, you must produce a concise, world-class critique.\n\n"
-			"Output strictly in this format (exact headings):\n"
-			"Summary:\n<3-6 sentence overview of approach and correctness>\n\n"
-			"Strengths:\n- <bullet 1>\n- <bullet 2>\n\n"
-			"Weaknesses:\n- <bullet 1>\n- <bullet 2>\n\n"
+			"You are a senior coding interview evaluator. Your job is to provide world-class feedback on coding approaches.\n\n"
+			"CRITICAL: Focus heavily on the APPROACH and REASONING, not just correctness. This is what separates top engineers.\n\n"
+			"Analyze:\n"
+			"1. Problem-solving approach and strategy\n"
+			"2. Algorithm choice and why it's appropriate\n"
+			"3. Time/space complexity reasoning\n"
+			"4. Edge case handling\n"
+			"5. Code clarity and maintainability\n"
+			"6. Optimization opportunities\n\n"
+			"Output EXACTLY this format:\n"
+			"Summary:\n<3-6 sentences explaining the approach, strategy, and overall assessment>\n\n"
+			"Strengths:\n- <specific strength 1>\n- <specific strength 2>\n- <specific strength 3>\n\n"
+			"Weaknesses:\n- <specific weakness 1>\n- <specific weakness 2>\n- <specific weakness 3>\n\n"
 			"Scores: {\"correctness\":<0..1>,\"optimization\":<0..1>,\"approach_explanation\":<0..1>,\"complexity_discussion\":<0..1>,\"edge_cases_testing\":<0..1>,\"total\":<0..1>}\n\n"
-			"Recommendations:\n- <actionable bullet 1>\n- <actionable bullet 2>\n\n"
-			"Guidance: Be concrete. Do not use placeholders. If problem is missing, infer likely intent from code."
+			"Recommendations:\n- <actionable improvement 1>\n- <actionable improvement 2>\n- <actionable improvement 3>\n\n"
+			"Be specific, constructive, and focus on the thinking process behind the code."
 		)
 
-		messages: List[Dict[str, str]] = [
-			{"role": "system", "content": prompt},
-			{"role": "user", "content": f"Problem: {problem or 'N/A'}\nLanguage: {language}\n\nCode:\n```{language}\n{code}\n```"},
-		]
 		provider = settings.llm_provider
-		max_tokens = min(settings.groq_max_tokens, 2048)
+		max_tokens = min(settings.groq_max_tokens or 2048, 2048)
+		
 		def _call():
 			if provider == "groq":
+				messages: List[Dict[str, str]] = [
+					{"role": "system", "content": prompt},
+					{"role": "user", "content": f"Problem: {problem or 'N/A'}\nLanguage: {language}\n\nCode:\n```{language}\n{code}\n```"},
+				]
 				return client.chat.completions.create(
 					model=settings.groq_model,
 					messages=messages,
-					temperature=0.2,
+					temperature=0.3,
 					max_tokens=max_tokens,
 				)
 			elif provider == "gemini":
 				gmodel = client.GenerativeModel(settings.gemini_model)
-				full_prompt = (prompt + "\n\nUser:\n" + messages[-1]["content"]).strip()
+				user_content = f"Problem: {problem or 'N/A'}\nLanguage: {language}\n\nCode:\n```{language}\n{code}\n```"
+				full_prompt = (prompt + "\n\nUser:\n" + user_content).strip()
 				resp = gmodel.generate_content(full_prompt)
 				return getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
 			else:
-				return None
+				raise Exception(f"Unsupported LLM provider: {provider}")
 
 		import anyio
-		result = await anyio.to_thread.run_sync(_call)
-		if result is None:
-			return "Summary: Provider not available.\n\nStrengths:\n- N/A\n\nWeaknesses:\n- N/A\n\nScores: {\"correctness\":0,\"optimization\":0,\"approach_explanation\":0,\"complexity_discussion\":0,\"edge_cases_testing\":0,\"total\":0}\n\nRecommendations:\n- Configure provider"
-		if isinstance(result, str):
-			return result
-		return result.choices[0].message.content or ""
+		try:
+			result = await anyio.to_thread.run_sync(_call)
+			if result is None:
+				raise Exception("LLM returned no response")
+			if isinstance(result, str):
+				return result
+			return result.choices[0].message.content or ""
+		except Exception as e:
+			raise Exception(f"LLM evaluation failed: {str(e)}")
+
 
 	def _needs_comparison(self, question: str) -> bool:
 		q = (question or "").lower()
