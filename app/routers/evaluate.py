@@ -8,8 +8,6 @@ import hashlib
 from typing import Dict, Optional
 
 from app.schemas import EvaluationIn, EvaluationOut, EvaluationScores, StaticSignals
-from app.services.llm_service import llm_service
-import httpx
 from app.services.session_manager import session_manager
 from app.services.code_evaluation_service import evaluate_code
 from app.utils.audit import auditor
@@ -157,16 +155,7 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 """,
 	)
 
-	# Optionally generate step-by-step visualization frames using Mermaid
-	if payload.include_diagrams:
-		try:
-			frames = await llm_service.generate_algorithm_frames(payload.problem or "", payload.code, payload.language or "python")
-			if frames:
-				resp.diagram_frames = [f.get("mermaid") or "" for f in frames]
-				resp.diagram_captions = [f.get("caption") or "" for f in frames]
-		except Exception:
-			# Best-effort; ignore failures
-			pass
+    # Diagrammatic evaluation disabled temporarily per user request.
 
 	# Cache the result for future requests
 	_evaluation_cache[cache_key] = resp
