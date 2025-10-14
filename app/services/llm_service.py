@@ -411,7 +411,7 @@ class LLMService:
 	def __init__(self) -> None:
 		self._client: Groq | None = None
 
-	async def evaluate_code_with_critique(self, problem: str, code: str, language: str) -> str:
+	async def evaluate_code_with_critique(self, problem: str, code: str, language: str, conversation_context: str = "") -> str:
 		"""Ask the model to produce a structured evaluation and approach explanation.
 
 		Returns markdown text with sections: Summary, Strengths, Weaknesses, Scores JSON, Recommendations.
@@ -438,6 +438,10 @@ class LLMService:
 			"Recommendations:\n- <actionable improvement 1>\n- <actionable improvement 2>\n- <actionable improvement 3>\n\n"
 			"Be specific, constructive, and focus on the thinking process behind the code."
 		)
+		
+		# Add conversation context if provided
+		if conversation_context.strip():
+			prompt += f"\n\nCONVERSATION CONTEXT:\n{conversation_context.strip()}\n\nUse this context to provide more relevant feedback based on the ongoing discussion."
 
 		provider = settings.llm_provider
 		max_tokens = min(settings.groq_max_tokens or 2048, 2048)

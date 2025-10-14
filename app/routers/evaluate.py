@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from datetime import datetime
 import json
+import hashlib
+from typing import Dict, Optional
 
 from app.schemas import EvaluationIn, EvaluationOut, EvaluationScores, StaticSignals
 from app.services.session_manager import session_manager
@@ -12,6 +14,9 @@ from app.utils.audit import auditor
 
 
 router = APIRouter()
+
+# In-memory cache for evaluations
+_evaluation_cache: Dict[str, EvaluationOut] = {}
 
 
 @router.options("/evaluate")
@@ -38,9 +43,42 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 	if not payload.code.strip():
 		raise HTTPException(status_code=400, detail="Empty code")
 
+	# Get session context for cache key
+	session_state = await session_manager.get_required(payload.session_id)
+	
+	# Create cache key based on session + conversation context + code
+	# This ensures same code in different conversations gets different evaluations
+	conversation_context = ""
+	if session_state.qna:
+		# Use last 2 QnA pairs for context
+		recent_qna = session_state.qna[-2:] if len(session_state.qna) >= 2 else session_state.qna
+		for item in recent_qna:
+			conversation_context += f"Q: {item.get('question', '')}\nA: {item.get('answer', '')}\n"
+	
+	cache_key = hashlib.md5(
+		f"{payload.session_id}|{conversation_context}|{payload.code.strip()}|{payload.problem or ''}|{payload.language or 'python'}".encode()
+	).hexdigest()
+
+	# Check cache first
+	if cache_key in _evaluation_cache:
+		cached_result = _evaluation_cache[cache_key]
+		# Update session_id to match current request
+		cached_result.session_id = payload.session_id
+		
+		# Log cache hit
+		await auditor.log({
+			"type": "evaluation",
+			"session_id": payload.session_id,
+			"problem": payload.problem,
+			"language": payload.language,
+			"cached": True,  # This is a cached result
+		})
+		
+		return cached_result
+
 	# Run evaluation (static + LLM critique)
 	try:
-		critique_text, static = await evaluate_code(payload.problem, payload.code, payload.language or "python")
+		critique_text, static = await evaluate_code(payload.problem, payload.code, payload.language or "python", conversation_context)
 	except Exception as e:
 		raise HTTPException(status_code=500, detail=f"LLM evaluation failed: {str(e)}")
 
@@ -107,6 +145,9 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 		created_at=datetime.utcnow(),
 	)
 
+	# Cache the result for future requests
+	_evaluation_cache[cache_key] = resp
+
 	# Ensure CORS header mirrors other endpoints for some hosts that require explicit setting
 	origin = request.headers.get("origin")
 	if origin:
@@ -119,6 +160,7 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 		"problem": payload.problem,
 		"language": payload.language,
 		"scores": scores_dict,
+		"cached": False,  # This is a new evaluation
 	})
 
 	return resp

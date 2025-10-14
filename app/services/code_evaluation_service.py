@@ -119,7 +119,7 @@ def _comment_density(code: str) -> float:
 	return round(min(1.0, comment_lines / max(1, code_lines)), 3)
 
 
-async def evaluate_code(problem: str | None, code: str, language: str) -> Tuple[str, dict]:
+async def evaluate_code(problem: str | None, code: str, language: str, conversation_context: str = "") -> Tuple[str, dict]:
 	"""Returns (llm_text, static_signals)."""
 	lang = (language or "").lower().strip() or "python"
 	if lang == "py" or lang == "python":
@@ -138,7 +138,7 @@ async def evaluate_code(problem: str | None, code: str, language: str) -> Tuple[
 			"estimated_time_complexity_hint": None,
 		}
 
-	critique = await llm_service.evaluate_code_with_critique(problem or "", code, lang)
+	critique = await llm_service.evaluate_code_with_critique(problem or "", code, lang, conversation_context)
 	return critique, static
 
 
