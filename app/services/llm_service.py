@@ -421,21 +421,37 @@ class LLMService:
 			raise Exception("LLM client not available. Please configure GEMINI_API_KEY or GROQ_API_KEY.")
 
 		prompt = (
-			"You are helping me explain my CODE APPROACH to an interviewer in a single, uninterrupted, world-class professional explanation."
-			" Output only the APPROACH — nothing else (no strengths, weaknesses, scores, or recommendations)."
-			" Use the CANDIDATE'S VOICE (first person: 'I', 'my approach') and speak as if I'm thinking aloud to impress a senior interviewer."
-			" The explanation must be detailed, structured, and polished, but still conversational — the kind of answer that demonstrates deep technical mastery and clear tradeoff reasoning.\n\n"
-			"Required structure and content (present as one cohesive spoken-style block, with short paragraphs or connecting phrases):\n"
-			"- Opening: one clear sentence stating the high-level idea and why it fits the problem.\n"
-			"- Problem framing: how I interpreted constraints, input shape, edge cases I prioritized, and assumptions I made.\n"
-			"- Chosen approach: step-by-step description of the algorithm or design, why I chose it over alternatives, and the key insight that makes it work.\n"
-			"- Complexity & tradeoffs: succinct time/space complexity with the dominant terms, and explicit tradeoffs compared to at least one reasonable alternative.\n"
-			"- Correctness & edge cases: how the approach ensures correctness and how I handle important edge cases or failure modes.\n"
-			"- Implementation plan: concrete steps I would code (data structures, main loop/recursion strategy, termination conditions), and small optimizations I would add if I had time.\n"
-			"- Testing & verification: brief mention of test cases or checks I'd run to validate the approach quickly.\n"
-			"- Closing sentence: a confident one-line summary of why this is a robust, production-ready approach.\n\n"
-			"Tone: confident, concise, and professional — use transitions like 'so I decided', 'the key idea', 'this ensures', 'under the hood', 'to handle', and 'if time permits'."
-			" Avoid bullet lists in the final output; present as fluent, interview-ready speech with natural pauses suitable for word-by-word reveal."
+			"You are helping me articulate my CODE APPROACH during a live technical interview —"
+			" the goal is to make my explanation sound world-class, professional, and naturally spoken,"
+			" as if I’m confidently walking an interviewer through my reasoning in real time.\n\n"
+
+			"Output only the APPROACH — no lists, no sections, no scores, and no self-evaluation."
+			" It must be a single flowing narrative that reads like a calm, confident, and insightful candidate explaining their logic step by step.\n\n"
+
+			"Use the CANDIDATE'S VOICE (first person: 'I', 'my approach', 'what I decided next')."
+			" The tone should balance technical depth with conversational clarity —"
+			" mature, reflective, and effortlessly structured, not robotic or over-rehearsed.\n\n"
+
+			"Structure and content (present naturally, not as headers):\n"
+			"- Start with how I framed the problem in my own words and what key factors I focused on.\n"
+			"- Describe the reasoning that led me to the chosen algorithm or data structure."
+			" Mention alternatives briefly, showing deliberate tradeoff thinking.\n"
+			"- Walk through the step-by-step flow of the solution — how data moves, what decisions are made, and why each step matters.\n"
+			"- Explain complexity clearly and conversationally (e.g., 'this runs in O(n log n) because...'),"
+			" showing awareness of time and space impact.\n"
+			"- Mention how I ensure correctness and handle edge cases naturally within the explanation.\n"
+			"- End with a confident reflection — a single line summarizing why this approach is clean, reliable, and optimal for the scenario.\n\n"
+
+			"Writing style:\n"
+			"- Use transitional phrases that mimic real interview speech: 'so the first thing I thought about was...',"
+			" 'the key insight here is...', 'this ensures that...', 'to handle that case...', 'if I had more time, I’d consider...'.\n"
+			"- Include light micro-pauses or rhythm markers using commas or short sentences,"
+			" to make it flow beautifully in a word-by-word streaming display.\n"
+			"- Avoid bullet points or markdown formatting in the final output —"
+			" it should read as a smooth, spoken-style explanation, not a written essay.\n\n"
+
+			"The result should make any interviewer feel that I deeply understand the problem,"
+			" made deliberate design choices, and can communicate complex ideas with clarity and confidence."
 		)
 
 		
