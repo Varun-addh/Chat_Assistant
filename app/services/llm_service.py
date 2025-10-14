@@ -1219,14 +1219,12 @@ class LLMService:
 		return text
 
 	def _inject_architecture_walkthrough(self, text: str) -> str:
-		"""Append a concise Architecture Walkthrough when content appears code/algorithmic.
-		Heuristics:
-		- Contains fenced code block, or mentions algorithm/complexity, or contains Mermaid.
-		- Avoid duplicate insertion if section already exists.
+		"""Append a concise, narrative Architecture Walkthrough suitable for speaking out loud.
+		Adds only if the content looks code/algorithmic and the section isn't already present.
 		"""
 		import re
 		lower = text.lower()
-		if any(h in lower for h in ["architecture walkthrough", "data flow:", "components:"]):
+		if "architecture walkthrough" in lower:
 			return text
 		contains_code = "```" in text
 		mentions_algo = any(k in lower for k in ["algorithm", "complexity", "time complexity", "space complexity"]) 
@@ -1235,10 +1233,10 @@ class LLMService:
 			return text
 		appendix = (
 			"\n\n### **Architecture Walkthrough**\n\n"
-			"- Data flow: how inputs are validated, processed, and returned.\n"
-			"- Components: functions/classes collaborating; key responsibilities.\n"
-			"- Control flow: main loop/recursion, decision points, and error paths.\n"
-			"- Complexity: where time/space is spent, and why.\n"
+			"Here's the flow in plain words. The client enters through the primary entrypoint, we validate input early, "
+			"and then the core routine orchestrates the work: it prepares the key state, iterates through the data, and performs the main decisions. "
+			"Whenever a branch occurs, success continues along the fast path and errors short‑circuit to a safe return. "
+			"On completion, we aggregate the result and return it in a clean shape. In short, inputs → validation → core loop/decisions → result assembly → output."
 		)
 		return (text.rstrip() + appendix)
 
@@ -1300,117 +1298,12 @@ class LLMService:
 		return '\n'.join(out)
 
 	def _normalize_mermaid_blocks(self, text: str) -> str:
-		"""Normalize Mermaid blocks without changing their content semantics.
-		Rules (conservative):
-		- Do NOT change letters, brackets, or punctuation inside labels.
-		- Only insert newlines around structural tokens: subgraph, end, classDef, class, flowchart, and edge statements.
-		- Ensure blocks are fenced with ```mermaid.
+		"""Conservative Mermaid handling: keep author content intact.
+		- If fenced with ```mermaid, pass through unchanged.
+		- If unfenced but starts with a Mermaid diagram type, fence it without rewriting.
+		- Special case: erDiagram is left exactly as-is to avoid indentation complaints.
 		"""
 		import re
-		
-		def normalize_block(code: str) -> str:
-			"""Bulletproof Mermaid normalizer that completely rebuilds valid syntax."""
-			c = code.strip()
-			
-			# Remove stray backtick artifacts
-			c = c.replace("`mermaid", "").replace("```", "").replace("`", "")
-			
-			# Clean up any leading/trailing whitespace and newlines
-			c = c.strip()
-			
-			# Fix Mermaid syntax issues with special characters in labels
-			# Remove parentheses from node labels (Mermaid doesn't handle them well)
-			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3]', c)
-			# Handle multiple parentheses in the same label
-			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3\4\5]', c)
-			# Clean up any remaining parentheses in labels
-			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3]', c)
-			# Remove parentheses from subgraph names
-			c = re.sub(r'subgraph\s+([^[]*?)\(([^)]*?)\)([^[]*?)\[', r'subgraph \1\2\3[', c)
-			# Clean up any remaining parentheses in subgraph names
-			c = re.sub(r'subgraph\s+([^[]*?)\(([^)]*?)\)([^[]*?)\[', r'subgraph \1\2\3[', c)
-			
-			# Extract flowchart type - preserve the original direction
-			flowchart_match = re.match(r'^(flowchart\s+[A-Z]{2})', c)
-			flowchart_type = flowchart_match.group(1) if flowchart_match else "flowchart LR"
-			
-			# Remove flowchart declaration
-			remaining = re.sub(r'^flowchart\s+[A-Z]{2}\s*', '', c).strip()
-			
-			formatted_lines = [flowchart_type]
-			
-			# Extract classDef and class statements first to avoid duplication
-			classdef_pattern = r'classDef\s+([^;]+)'
-			classdef_matches = re.findall(classdef_pattern, c)
-			classdef_statements = [f"classDef {classdef.strip()}" for classdef in classdef_matches]
-			
-			class_pattern = r'class\s+([^;]+)'
-			class_matches = re.findall(class_pattern, c)
-			class_statements = [f"class {class_stmt.strip()}" for class_stmt in class_matches]
-			
-			# Remove classDef and class statements from remaining content to avoid duplication
-			remaining = re.sub(r'classDef\s+[^;]+;?', '', remaining)
-			remaining = re.sub(r'class\s+[^;]+;?', '', remaining)
-			
-			# Process the content line by line to preserve structure
-			lines = remaining.split('\n')
-			in_subgraph = False
-			subgraph_depth = 0
-			
-			for line in lines:
-				line = line.strip()
-				if not line:
-					continue
-					
-				# Skip flowchart declaration as it's already added
-				if re.match(r'^(flowchart\s+[A-Z]{2}|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s*', line):
-					continue
-					
-				# Check if this line starts a subgraph
-				subgraph_match = re.match(r'subgraph\s+(.+)', line)
-				if subgraph_match:
-					subgraph_name = subgraph_match.group(1).strip()
-					# Ensure subgraph name is properly formatted
-					if not subgraph_name.endswith(']') and '[' in subgraph_name:
-						# Add missing closing bracket if needed
-						subgraph_name += ']'
-					formatted_lines.append(f"subgraph {subgraph_name}")
-					in_subgraph = True
-					subgraph_depth += 1
-					continue
-				
-				# Check if this line ends a subgraph
-				if line == 'end' and in_subgraph:
-					formatted_lines.append("end")
-					subgraph_depth -= 1
-					if subgraph_depth == 0:
-						in_subgraph = False
-					continue
-				
-				# Process regular statements
-				if in_subgraph:
-					# Indent content inside subgraphs
-					formatted_lines.append(f"  {line}")
-				else:
-					# Regular content outside subgraphs
-					formatted_lines.append(f"  {line}")
-			
-			# Add classDef and class statements at the end with proper formatting
-			for classdef in classdef_statements:
-				formatted_lines.append(classdef)
-			for class_stmt in class_statements:
-				formatted_lines.append(class_stmt)
-			
-			# Join lines and clean up
-			result = '\n'.join(formatted_lines)
-			
-			# Final cleanup
-			result = re.sub(r'\n\s*\n', '\n', result)
-			result = re.sub(r'^\s*\n', '', result)
-			result = result.strip()
-			
-			return result
-		
 		lines = text.split('\n')
 		out: list[str] = []
 		in_mermaid = False
@@ -1422,9 +1315,8 @@ class LLMService:
 				out.append(line)
 				continue
 			if in_mermaid and line.strip().startswith("```"):
-				# close block
-				normalized = normalize_block("\n".join(buffer))
-				out.append(normalized)
+				# close block: emit exactly what we received
+				out.extend(buffer)
 				out.append(line)
 				in_mermaid = False
 				buffer = []
@@ -1433,13 +1325,10 @@ class LLMService:
 				buffer.append(line)
 			else:
 				out.append(line)
-		
-		# If there was orphan flowchart text without fences, try to wrap it
-		joined = "\n".join(out)
-		import re as _re
-		if _re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", joined, _re.MULTILINE) and "```mermaid" not in joined:
-			code = normalize_block(joined)
-			return "```mermaid\n" + code + "```"
+		joined = '\n'.join(out)
+		# Wrap bare Mermaid content without modification
+		if re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", joined, re.MULTILINE) and "```mermaid" not in joined:
+			return "```mermaid\n" + joined.strip() + "\n```"
 		return joined
 
 	def _contains_mermaid(self, text: str) -> bool:
