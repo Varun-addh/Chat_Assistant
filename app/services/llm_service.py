@@ -1218,9 +1218,19 @@ class LLMService:
 		
 		return text
 
+	def postprocess_answer(self, text: str) -> str:
+		"""Public: format + normalize Mermaid + inject Architecture Walkthrough.
+		Safe to call on raw streamed content collected at the end.
+		"""
+		formatted = self._format_response(text or "")
+		# Normalize mermaid first to ensure fences, then place walkthrough
+		normalized = self._normalize_mermaid_blocks(formatted)
+		return self._inject_architecture_walkthrough(normalized)
+
 	def _inject_architecture_walkthrough(self, text: str) -> str:
-		"""Append a concise, narrative Architecture Walkthrough suitable for speaking out loud.
-		Adds only if the content looks code/algorithmic and the section isn't already present.
+		"""Append a professional, bullet-style Architecture Walkthrough.
+		- Adds only for algorithmic/code content and if not already present.
+		- If a Mermaid diagram exists, place the walkthrough immediately after the last diagram block.
 		"""
 		import re
 		lower = text.lower()
@@ -1233,11 +1243,24 @@ class LLMService:
 			return text
 		appendix = (
 			"\n\n### **Architecture Walkthrough**\n\n"
-			"Here's the flow in plain words. The client enters through the primary entrypoint, we validate input early, "
-			"and then the core routine orchestrates the work: it prepares the key state, iterates through the data, and performs the main decisions. "
-			"Whenever a branch occurs, success continues along the fast path and errors short‑circuit to a safe return. "
-			"On completion, we aggregate the result and return it in a clean shape. In short, inputs → validation → core loop/decisions → result assembly → output."
+			"- **Entry → Guardrails**: Request arrives at the entrypoint; inputs are validated and normalized early.\n"
+			"- **Core Orchestration**: The main routine prepares state, selects the key element(s), and advances through the data in controlled steps.\n"
+			"- **Comparisons & Decisions**: Each step compares the current focus against candidates, moving, inserting, or skipping based on the rule set.\n"
+			"- **State Transitions**: Only minimal state mutates per step; invariants (like the left subarray being sorted) always hold.\n"
+			"- **Error Paths**: Invalid input or boundary conditions short‑circuit to safe returns with clear messages.\n"
+			"- **Exit & Shaping**: Results are aggregated, shaped to the API contract, and returned deterministically.\n"
 		)
+		# If there is a mermaid block, insert right after the last closing fence
+		if contains_mermaid and "```mermaid" in text:
+			# Find the last ``` that closes a mermaid block
+			blocks = [m.start() for m in re.finditer(r"```mermaid", text)]
+			if blocks:
+				start_last = blocks[-1]
+				# Find the closing fence after start_last
+				closing = re.search(r"```", text[start_last+3:])
+				if closing:
+					end_index = start_last + 3 + closing.end()
+					return text[:end_index].rstrip() + appendix + text[end_index:]
 		return (text.rstrip() + appendix)
 
 	def _format_headings_bold(self, text: str) -> str:
@@ -1298,38 +1321,70 @@ class LLMService:
 		return '\n'.join(out)
 
 	def _normalize_mermaid_blocks(self, text: str) -> str:
-		"""Conservative Mermaid handling: keep author content intact.
+		"""Conservative Mermaid handling with ER diagram fixes.
 		- If fenced with ```mermaid, pass through unchanged.
-		- If unfenced but starts with a Mermaid diagram type, fence it without rewriting.
-		- Special case: erDiagram is left exactly as-is to avoid indentation complaints.
+		- If unfenced but starts with a Mermaid diagram type, fence it and fix common ER issues.
+		- Fixes ER diagram data types and relationship syntax.
 		"""
 		import re
-		lines = text.split('\n')
-		out: list[str] = []
-		in_mermaid = False
-		buffer: list[str] = []
-		for line in lines:
-			if line.strip().startswith("```mermaid"):
-				in_mermaid = True
-				buffer = []
-				out.append(line)
-				continue
-			if in_mermaid and line.strip().startswith("```"):
-				# close block: emit exactly what we received
-				out.extend(buffer)
-				out.append(line)
-				in_mermaid = False
-				buffer = []
-				continue
-			if in_mermaid:
-				buffer.append(line)
-			else:
-				out.append(line)
-		joined = '\n'.join(out)
-		# Wrap bare Mermaid content without modification
-		if re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", joined, re.MULTILINE) and "```mermaid" not in joined:
-			return "```mermaid\n" + joined.strip() + "\n```"
-		return joined
+		
+		# Simple check: if text starts with ```mermaid and ends with ```, it's already fenced
+		stripped = text.strip()
+		if stripped.startswith('```mermaid') and stripped.endswith('```'):
+			return text
+		
+		# Check for bare Mermaid content (not fenced) - only at the start of text
+		mermaid_match = re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", text.strip(), re.MULTILINE)
+		if mermaid_match and not re.search(r'```mermaid', text):
+			content = text.strip()
+			
+			# Special handling for ER diagrams
+			if mermaid_match.group(1) == "erDiagram":
+				content = self._fix_er_diagram_syntax(content)
+			
+			return "```mermaid\n" + content + "\n```"
+		
+		return text
+
+	def _fix_er_diagram_syntax(self, content: str) -> str:
+		"""Fix common ER diagram syntax issues."""
+		import re
+		
+		# Fix data types - convert SQL types to Mermaid-compatible types
+		type_mappings = {
+			r'\bINT\b': 'int',
+			r'\bVARCHAR\b': 'string',
+			r'\bCHAR\b': 'string',
+			r'\bTEXT\b': 'string',
+			r'\bDECIMAL\b': 'decimal',
+			r'\bFLOAT\b': 'float',
+			r'\bDOUBLE\b': 'double',
+			r'\bDATE\b': 'date',
+			r'\bDATETIME\b': 'datetime',
+			r'\bTIMESTAMP\b': 'datetime',
+			r'\bBOOLEAN\b': 'boolean',
+			r'\bBOOL\b': 'boolean',
+		}
+		
+		for sql_type, mermaid_type in type_mappings.items():
+			content = re.sub(sql_type, mermaid_type, content, flags=re.IGNORECASE)
+		
+		# Fix relationship syntax - ensure proper spacing
+		content = re.sub(r'(\w+)\s*(\|\|--o\{|\|\|--\|\{|\|\|--o\||\|\|--\|\||o\}|--o\{|\}--\|\{|\}--o\||\}--\|\|)\s*(\w+)', r'\1 \2 \3', content)
+		
+		# Fix entity definitions - ensure proper spacing around braces
+		content = re.sub(r'(\w+)\s*\{', r'\1 {', content)
+		
+		# Fix attribute definitions - ensure proper spacing
+		content = re.sub(r'(\w+)\s+(\w+)\s+(PK|FK)', r'\1 \2 \3', content)
+		content = re.sub(r'(\w+)\s+(\w+)\s+(PK,?\s*FK|FK,?\s*PK)', r'\1 \2 \3', content)
+		
+		# Remove extra whitespace and ensure single newlines
+		content = re.sub(r'\n\s*\n', '\n', content)
+		content = re.sub(r'^\s*\n', '', content)
+		content = content.strip()
+		
+		return content
 
 	def _contains_mermaid(self, text: str) -> bool:
 		import re
