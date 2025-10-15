@@ -49,13 +49,33 @@ def _convert_layer_nodes_to_subgraphs(code: str) -> str:
     lines = src.split("\n")
     header_regex = _re.compile(r"^\s*([A-Za-z0-9_]+)\s*([\[\(\{])\s*(.+?)\s*([\]\)\}])\s*$")
 
+    # Gather edge references to avoid converting nodes that are used in edges
+    edge_ref_regex = _re.compile(r"(^|\W)([A-Za-z0-9_]+)\s*[-=~]+[ox]?\>|\<[-=~]+[ox]?\s*([A-Za-z0-9_]+)(\W|$)")
+    edge_refs: set[str] = set()
+    for line in lines:
+        for m in edge_ref_regex.finditer(line):
+            # Matches either source in group 2 or target in group 3
+            if m.group(2):
+                edge_refs.add(m.group(2))
+            if m.group(3):
+                edge_refs.add(m.group(3))
+
     header_indices: list[tuple[int, str, str]] = []  # (line_index, id, label)
     for idx, line in enumerate(lines):
         m = header_regex.match(line)
         if not m:
             continue
         node_id, _open, label, _close = m.groups()
-        if label.strip().lower().endswith("layer"):
+        label_clean = label.strip()
+        lower = label_clean.lower()
+        looks_like_layer = (
+            lower.endswith("layer") or
+            " layer" in lower or
+            "plane" in lower or
+            lower in {"file/external", "external", "file layer"}
+        )
+        # Only convert if it looks like a grouping header and is not referenced in edges
+        if looks_like_layer and node_id not in edge_refs:
             header_indices.append((idx, node_id, label.strip()))
 
     if not header_indices:
