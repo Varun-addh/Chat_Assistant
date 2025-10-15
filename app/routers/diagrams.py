@@ -144,6 +144,32 @@ async def render_mermaid(payload: dict):
 
     theme = (payload.get("theme") or "").strip() or "default"
 
+    # Optional: style preset for modern elegant look without changing semantics
+    style = (payload.get("style") or "").strip().lower()
+    if style == "modern" and not code.lstrip().startswith("%%{init"):
+        init = (
+            "%%{init: {\n"
+            "  'theme': 'neutral',\n"
+            "  'themeVariables': {\n"
+            "    'fontSize':'12px', 'fontFamily':'Inter, sans-serif',\n"
+            "    'lineColor':'#888', 'primaryColor':'#f8f9fa',\n"
+            "    'edgeLabelBackground':'#ffffff', 'padding':8, 'curve':'basis'\n"
+            "  }\n"
+            "}}%%\n"
+        )
+        # Add compact spacing helpers
+        code = (
+            init
+            + code
+            + "\nlinkStyle default stroke:#666,stroke-width:1.3px;\n"
+            + "classDef client fill:#e3f2fd,stroke:#1976d2,color:#000;\n"
+            + "classDef network fill:#fff3e0,stroke:#e65100,color:#000;\n"
+            + "classDef service fill:#fff8e1,stroke:#f57f17,color:#000;\n"
+            + "classDef storage fill:#f1f8e9,stroke:#2e7d32,color:#000;\n"
+            + "classDef queue fill:#e0f7fa,stroke:#006064,color:#000;\n"
+            + "classDef cache fill:#f3e5f5,stroke:#6a1b9a,color:#000;\n"
+        )
+
     # Try multiple Mermaid rendering services for better reliability
     services = [
         "https://mermaid.ink/svg",
