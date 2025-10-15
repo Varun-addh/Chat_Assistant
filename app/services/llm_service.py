@@ -1249,10 +1249,9 @@ class LLMService:
 		# Enforce unlabeled bullets inside Complete Answer
 		text = self._strip_labeled_bullets_in_complete_answer(text)
 		
-		# If content includes a Mermaid diagram, return it UNCHANGED.
-		# Frontend/renderer will handle syntax; we avoid mutating subgraphs/edges.
+		# If content includes a Mermaid diagram, normalize and return as-is (don't treat as code)
 		if self._contains_mermaid(text):
-			return text
+			return self._normalize_mermaid_blocks(text)
 		
 		# First, check if this is code content that should not be formatted as tables
 		if self._is_code_content(text):

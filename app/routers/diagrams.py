@@ -25,6 +25,81 @@ def _sanitize_code(raw: str) -> str:
     return text
 
 
+def _convert_layer_nodes_to_subgraphs(code: str) -> str:
+    """Best-effort transform: turn standalone nodes whose labels end with
+    the word "Layer" into Mermaid subgraphs.
+
+    Rationale: Some generators model architectural layers as simple nodes
+    (e.g., `CL[Client Layer]`). This function rewrites such headers into
+    `subgraph` blocks so that contained content is visually grouped.
+
+    Rules (conservative):
+    - If the code already contains any `subgraph` token, leave unchanged.
+    - Detect header lines shaped like: <ID>[<... Layer>] or <ID>(<... Layer>) or <ID>{<... Layer>}.
+    - Start a subgraph at each detected header line and automatically close it
+      right before the next detected header (or end of document).
+    - Header node definitions are removed (replaced by the subgraph title).
+    """
+    src = code
+    if "subgraph" in src:
+        return src
+
+    import re as _re
+
+    lines = src.split("\n")
+    header_regex = _re.compile(r"^\s*([A-Za-z0-9_]+)\s*([\[\(\{])\s*(.+?)\s*([\]\)\}])\s*$")
+
+    header_indices: list[tuple[int, str, str]] = []  # (line_index, id, label)
+    for idx, line in enumerate(lines):
+        m = header_regex.match(line)
+        if not m:
+            continue
+        node_id, _open, label, _close = m.groups()
+        if label.strip().lower().endswith("layer"):
+            header_indices.append((idx, node_id, label.strip()))
+
+    if not header_indices:
+        return src
+
+    # Build new code with subgraphs spanning header-to-next-header-1
+    result: list[str] = []
+    i = 0
+    header_ptr = 0
+    current_block_end = -1
+    while i < len(lines):
+        if header_ptr < len(header_indices) and i == header_indices[header_ptr][0]:
+            # Open new subgraph
+            _idx, node_id, label = header_indices[header_ptr]
+            # Determine end
+            if header_ptr + 1 < len(header_indices):
+                current_block_end = header_indices[header_ptr + 1][0]
+            else:
+                current_block_end = len(lines)
+
+            # Emit subgraph header (escaped quotes inside label)
+            safe_label = label.replace('"', '\\"')
+            result.append(f"subgraph {node_id}[\"{safe_label}\"]")
+            # Skip the header node line itself
+            i += 1
+            # Emit content until next header (exclusive)
+            while i < current_block_end:
+                result.append(lines[i])
+                i += 1
+            # Close block
+            result.append("end")
+            header_ptr += 1
+            continue
+
+        # Lines before the first header or between already processed blocks
+        result.append(lines[i])
+        i += 1
+
+    # Cleanup: remove accidental double blank lines
+    out = "\n".join(result)
+    out = _re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
+
+
 @router.post("/render_mermaid")
 async def render_mermaid(payload: dict):
     """Render Mermaid code to SVG via Kroki backend.
@@ -39,6 +114,13 @@ async def render_mermaid(payload: dict):
     # Basic guardrail: hard-limit size to avoid abuse
     if len(code) > 40_000:
         raise HTTPException(status_code=413, detail="Diagram too large")
+
+    # Attempt to group layer headers into subgraphs before rendering
+    try:
+        code = _convert_layer_nodes_to_subgraphs(code)
+    except Exception:
+        # Do not fail rendering if transformation has issues
+        pass
 
     theme = (payload.get("theme") or "").strip() or "default"
 
