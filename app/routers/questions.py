@@ -105,9 +105,7 @@ async def submit_question(payload: QuestionIn):
 				yield f"data: {chunk}\n\n"
 			# On stream end, persist the full answer
 			full_answer = "".join(collected)
-			# Postprocess to ensure Mermaid diagrams are fenced and architecture walkthrough is added
-			processed_answer = llm_service.postprocess_answer(full_answer)
-			await session_manager.append_qna(state.session_id, payload.question, processed_answer)
+			await session_manager.append_qna(state.session_id, payload.question, full_answer)
 			await auditor.log({
 				"type": "qna",
 				"session_id": state.session_id,
@@ -135,9 +133,7 @@ async def submit_question(payload: QuestionIn):
 		variability=payload.variability,
 		seed=payload.seed,
 	)
-	# Postprocess to ensure Mermaid diagrams are fenced and architecture walkthrough is added
-	processed_answer = llm_service.postprocess_answer(answer)
-	await session_manager.append_qna(state.session_id, payload.question, processed_answer)
+	await session_manager.append_qna(state.session_id, payload.question, answer)
 	await auditor.log({
 		"type": "qna",
 		"session_id": state.session_id,
@@ -148,7 +144,7 @@ async def submit_question(payload: QuestionIn):
 	# Auto-evaluate if response contains code
 	asyncio.create_task(_auto_evaluate_if_code(state.session_id, payload.question, answer))
 	
-	return AnswerOut(answer=processed_answer, created_at=datetime.utcnow())
+	return AnswerOut(answer=answer, created_at=datetime.utcnow())
 
 
 @router.post("/upload_profile")
