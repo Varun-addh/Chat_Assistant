@@ -137,6 +137,59 @@ def _prettify_edge_labels(code: str) -> str:
     return code
 
 
+def _fix_parenthetical_edge_labels(code: str) -> str:
+    """Convert invalid parenthetical edge labels like `A --> B (W)` to
+    Mermaid-compliant `A -- W --> B` or `A -- (W) --> B`.
+    Also supports spaced labels: `( Read )`. Conservative regex.
+    """
+    import re as _re
+    # Pattern: NodeId --> NodeId (Label)
+    pattern = _re.compile(r"(^|\n)\s*([A-Za-z0-9_]+)\s*--?>\s*([A-Za-z0-9_]+)\s*\(([^)]+)\)")
+    def repl(m: _re.Match[str]) -> str:
+        prefix = m.group(1)
+        a = m.group(2)
+        b = m.group(3)
+        label = m.group(4).strip()
+        return f"{prefix}{a} -- {label} --> {b}"
+    return pattern.sub(repl, code)
+
+
+def _auto_insert_line_breaks(code: str, max_len: int = 28) -> str:
+    """Hard-wrap node labels by inserting <br/> at word boundaries when labels
+    exceed max_len. Guarantees visibility without truncation.
+    Examples converted:
+      NodeId[This is a very long title] -> NodeId[This is a very<br/>long title]
+    """
+    import re as _re
+
+    def wrap_label(text: str) -> str:
+        words = text.split()
+        lines: list[str] = []
+        current = ""
+        for w in words:
+            if not current:
+                current = w
+                continue
+            if len(current) + 1 + len(w) <= max_len:
+                current += " " + w
+            else:
+                lines.append(current)
+                current = w
+        if current:
+            lines.append(current)
+        return "<br/>".join(lines)
+
+    pattern = _re.compile(r"([A-Za-z0-9_]+)\s*\[(.*?)\]")
+    def repl(m: _re.Match[str]) -> str:
+        node = m.group(1)
+        label = m.group(2)
+        if '<br/>' in label or len(label) <= max_len:
+            return m.group(0)
+        return f"{node}[{wrap_label(label)}]"
+
+    return pattern.sub(repl, code)
+
+
 @router.post("/render_mermaid")
 async def render_mermaid(payload: dict):
     """Render Mermaid code to SVG via Kroki backend.
@@ -163,26 +216,30 @@ async def render_mermaid(payload: dict):
 
     # Optional: style preset for modern elegant look without changing semantics
     style = (payload.get("style") or "").strip().lower()
-    if style == "modern" and not code.lstrip().startswith("%%{init"):
+    if style in ("modern", "enterprise") and not code.lstrip().startswith("%%{init"):
+        is_enterprise = style == "enterprise"
         init = (
             "%%{init: {\n"
             "  'theme': 'neutral',\n"
             "  'themeVariables': {\n"
-            "    'fontSize':'12px', 'fontFamily':'Inter, sans-serif',\n"
-            "    'lineColor':'#666', 'primaryColor':'#f8f9fa',\n"
-            "    'edgeLabelBackground':'#ffffff', 'padding':12, 'curve':'basis',\n"
-            "    'textWrapWidth': 220\n"
+            f"    'fontSize':'12px', 'fontFamily':'Inter, sans-serif',\n"
+            f"    'lineColor':'#666', 'primaryColor':'#f8f9fa',\n"
+            f"    'edgeLabelBackground':'#ffffff', 'padding':12, 'curve':'{'step' if is_enterprise else 'basis'}',\n"
+            f"    'textWrapWidth': {240 if is_enterprise else 220}\n"
             "  },\n"
-            "  'flowchart': { 'htmlLabels': true, 'useMaxWidth': false,\n"
-            "                 'nodeSpacing': 40, 'rankSpacing': 50,\n"
-            "                 'diagramPadding': 8, 'wrap': true }\n"
+            f"  'flowchart': {{ 'htmlLabels': true, 'useMaxWidth': false,\n"
+            f"                 'nodeSpacing': {60 if is_enterprise else 40}, 'rankSpacing': {80 if is_enterprise else 50},\n"
+            f"                 'diagramPadding': {16 if is_enterprise else 8}, 'wrap': true }}\n"
             "}}%%\n"
         )
         # Add compact spacing helpers
+        # Force LR for cleaner edges when requested
+        direction_prefix = "flowchart LR\n" if code.lstrip().startswith("flowchart ") else ""
         code = (
             init
+            + (direction_prefix if direction_prefix else "")
             + code
-            + "\nlinkStyle default stroke:#666,stroke-width:1.3px;\n"
+            + ("\nlinkStyle default stroke:#444,stroke-width:1.6px;\n" if is_enterprise else "\nlinkStyle default stroke:#666,stroke-width:1.3px;\n")
             + "classDef client fill:#e3f2fd,stroke:#1976d2,color:#000;\n"
             + "classDef network fill:#fff3e0,stroke:#e65100,color:#000;\n"
             + "classDef service fill:#fff8e1,stroke:#f57f17,color:#000;\n"
@@ -192,9 +249,11 @@ async def render_mermaid(payload: dict):
         )
 
     # Optional: prettify numeric edge labels
-    if style == "modern":
+    if style in ("modern", "enterprise"):
         try:
+            code = _fix_parenthetical_edge_labels(code)
             code = _prettify_edge_labels(code)
+            code = _auto_insert_line_breaks(code, max_len=26)
         except Exception:
             pass
 
