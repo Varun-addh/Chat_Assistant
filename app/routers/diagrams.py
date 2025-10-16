@@ -25,6 +25,30 @@ def _sanitize_code(raw: str) -> str:
     return text
 
 
+def _normalize_text(s: str) -> str:
+    """Normalize diagram text to avoid Mermaid parse issues from pasted content.
+    - Normalize newlines to \n
+    - Replace smart quotes/dashes with ASCII
+    - Remove zero‑width and non-breaking spaces
+    - Strip UTF-8 BOM if present
+    """
+    import re as _re
+    if s.startswith("\ufeff"):
+        s = s.lstrip("\ufeff")
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    trans = {
+        "\u2018": "'", "\u2019": "'", "\u201C": '"', "\u201D": '"',
+        "\u2013": "-", "\u2014": "-", "\u00A0": " ",
+    }
+    for k, v in trans.items():
+        s = s.replace(k, v)
+    # Remove zero-width characters
+    s = _re.sub("[\u200B\u200C\u200D\uFEFF]", "", s)
+    # Collapse trailing spaces that can break labels
+    s = _re.sub(r"[ \t]+\n", "\n", s)
+    return s
+
+
 def _convert_layer_nodes_to_subgraphs(code: str) -> str:
     """Best-effort transform: turn standalone nodes whose labels end with
     the word "Layer" into Mermaid subgraphs.
@@ -190,6 +214,63 @@ def _auto_insert_line_breaks(code: str, max_len: int = 28) -> str:
     return pattern.sub(repl, code)
 
 
+def _redirect_edges_to_subgraphs(code: str) -> str:
+    """Mermaid doesn't allow edges to subgraph IDs. If found, create an anchor
+    node inside each subgraph and redirect edges to that anchor.
+    Example: `Web --> E` becomes `Web --> E_anchor`, and we inject
+    `E_anchor(( )):::anchor` as the first line inside subgraph E.
+    """
+    import re as _re
+
+    # Find subgraph ids and their line indices
+    lines = code.split("\n")
+    subgraph_re = _re.compile(r"^\s*subgraph\s+([A-Za-z0-9_]+)\s*\[")
+    id_to_line: dict[str, int] = {}
+    for idx, line in enumerate(lines):
+        m = subgraph_re.match(line)
+        if m:
+            id_to_line[m.group(1)] = idx
+
+    if not id_to_line:
+        return code
+
+    # Detect edges referencing subgraph ids
+    edge_re = _re.compile(r"(^|\n)(\s*)([A-Za-z0-9_]+)\s*--[\-|>\s\w\.\(\)]*?>\s*([A-Za-z0-9_]+)")
+    used: set[str] = set()
+
+    def edge_replacer(m: _re.Match[str]) -> str:
+        prefix, indent, src, dst = m.group(1), m.group(2), m.group(3), m.group(4)
+        new_src = src
+        new_dst = dst
+        if src in id_to_line:
+            new_src = f"{src}_anchor"
+            used.add(src)
+        if dst in id_to_line:
+            new_dst = f"{dst}_anchor"
+            used.add(dst)
+        # Reconstruct the original edge text by keeping everything between src and dst
+        # Simpler: replace only the ids at ends to avoid changing labels
+        s = m.group(0)
+        s = _re.sub(rf"(^|\n){indent}{src}(?=\s*--)", f"{prefix}{indent}{new_src}", s)
+        s = _re.sub(rf"(?<=>)\s*{dst}(?=\b)", new_dst, s)
+        return s
+
+    new_code = edge_re.sub(edge_replacer, code)
+    if not used:
+        return new_code
+
+    # Inject anchors into corresponding subgraphs (right after 'subgraph ...' line)
+    insertion_offset = 0
+    for sid, line_idx in sorted(id_to_line.items(), key=lambda kv: kv[1]):
+        if sid not in used:
+            continue
+        insert_at = line_idx + 1 + insertion_offset
+        lines.insert(insert_at, f"  {sid}_anchor(( )):::anchor")
+        insertion_offset += 1
+
+    return "\n".join(lines)
+
+
 @router.post("/render_mermaid")
 async def render_mermaid(payload: dict):
     """Render Mermaid code to SVG via Kroki backend.
@@ -198,6 +279,7 @@ async def render_mermaid(payload: dict):
     Returns raw SVG content.
     """
     code = _sanitize_code(payload.get("code") or "")
+    code = _normalize_text(code)
     if not code:
         raise HTTPException(status_code=400, detail="Missing 'code' in payload")
 
@@ -254,6 +336,7 @@ async def render_mermaid(payload: dict):
             code = _fix_parenthetical_edge_labels(code)
             code = _prettify_edge_labels(code)
             code = _auto_insert_line_breaks(code, max_len=26)
+            code = _redirect_edges_to_subgraphs(code)
         except Exception:
             pass
 
