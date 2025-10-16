@@ -121,25 +121,19 @@ def _convert_layer_nodes_to_subgraphs(code: str) -> str:
 
 
 def _prettify_edge_labels(code: str) -> str:
-    """Convert numeric step labels like `-- 1. Foo -->` into circled numerals
-    to improve aesthetics. Conservative: only changes numbers 1-20.
+    """Convert numeric step labels like `-- 1. Foo -->` into clean numeric format
+    removing the dot and extra spaces for professional look.
     """
     import re as _re
-    circled = {
-        1: "①", 2: "②", 3: "③", 4: "④", 5: "⑤",
-        6: "⑥", 7: "⑦", 8: "⑧", 9: "⑨", 10: "⑩",
-        11: "⑪", 12: "⑫", 13: "⑬", 14: "⑭", 15: "⑮",
-        16: "⑯", 17: "⑰", 18: "⑱", 19: "⑲", 20: "⑳",
-    }
 
     def repl(m: _re.Match[str]) -> str:
-        n = int(m.group(1))
-        symbol = circled.get(n, m.group(1))
-        return f" -- {symbol} "
+        n = m.group(1)
+        return f" -- {n} "
 
     # Edge label patterns:  A -- 1. Text --> B  or A ---|1. Text| B
+    # Convert "1. Send Msg" to just "1"
     code = _re.sub(r"\s--\s*(\d+)\.(\s|\|)", lambda m: repl(m), code)
-    code = _re.sub(r"\|\s*(\d+)\.(\s|\|)", lambda m: f"| {circled.get(int(m.group(1)), m.group(1))} ", code)
+    code = _re.sub(r"\|\s*(\d+)\.(\s|\|)", lambda m: f"| {m.group(1)} ", code)
     return code
 
 
