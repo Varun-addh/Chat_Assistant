@@ -296,7 +296,7 @@ async def render_mermaid(payload: dict):
 
     theme = (payload.get("theme") or "").strip() or "default"
 
-    # Optional: style preset for modern elegant look without changing semantics
+    # Optional: style preset for modern/enterprise look (visual only)
     style = (payload.get("style") or "").strip().lower()
     if style in ("modern", "enterprise") and not code.lstrip().startswith("%%{init"):
         is_enterprise = style == "enterprise"
@@ -331,14 +331,14 @@ async def render_mermaid(payload: dict):
         )
 
     # Optional: prettify numeric edge labels
-    if style in ("modern", "enterprise"):
-        try:
-            code = _fix_parenthetical_edge_labels(code)
-            code = _prettify_edge_labels(code)
-            code = _auto_insert_line_breaks(code, max_len=26)
-            code = _redirect_edges_to_subgraphs(code)
-        except Exception:
-            pass
+    # Always apply syntax tolerant transforms so diagrams render reliably
+    try:
+        code = _fix_parenthetical_edge_labels(code)
+        code = _prettify_edge_labels(code)
+        code = _auto_insert_line_breaks(code, max_len=26)
+        code = _redirect_edges_to_subgraphs(code)
+    except Exception:
+        pass
 
     # Try multiple Mermaid rendering services for better reliability
     services = [
