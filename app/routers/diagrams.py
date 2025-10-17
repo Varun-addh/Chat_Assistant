@@ -143,6 +143,48 @@ def _prettify_edge_labels(code: str) -> str:
     return code
 
 
+def _add_sequential_step_numbers(code: str) -> str:
+    """Add sequential step numbers to nodes based on their position in the diagram.
+    Numbers appear as small labels next to each node to show workflow sequence.
+    """
+    import re as _re
+    
+    lines = code.split('\n')
+    node_definitions = []
+    node_ids = set()
+    
+    # Find all node definitions (A[Label], B(Label), etc.)
+    node_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*[\[\(\{]([^\]\)\}]+)[\]\)\}]\s*')
+    
+    for line in lines:
+        match = node_pattern.match(line)
+        if match:
+            node_id, label = match.groups()
+            node_definitions.append((node_id, label.strip()))
+            node_ids.add(node_id)
+    
+    if not node_definitions:
+        return code
+    
+    # Add step numbers as small labels next to each node
+    result_lines = []
+    step_num = 1
+    
+    for line in lines:
+        match = node_pattern.match(line)
+        if match:
+            node_id, label = match.groups()
+            # Add step number as a small label
+            step_label = f"{node_id}_step[{step_num}]"
+            result_lines.append(line)
+            result_lines.append(f"  {node_id} -.-> {node_id}_step")
+            step_num += 1
+        else:
+            result_lines.append(line)
+    
+    return '\n'.join(result_lines)
+
+
 @router.post("/render_mermaid")
 async def render_mermaid(payload: dict):
     """Render Mermaid code to SVG via Kroki backend.
@@ -177,11 +219,11 @@ async def render_mermaid(payload: dict):
             "    'fontSize':'12px', 'fontFamily':'Inter, sans-serif',\n"
             "    'lineColor':'#666', 'primaryColor':'#f8f9fa',\n"
             "    'edgeLabelBackground':'#ffffff', 'padding':12, 'curve':'basis',\n"
-            "    'textWrapWidth': 220\n"
+            "    'textWrapWidth': 280\n"
             "  },\n"
             "  'flowchart': { 'htmlLabels': true, 'useMaxWidth': false,\n"
-            "                 'nodeSpacing': 40, 'rankSpacing': 50,\n"
-            "                 'diagramPadding': 8, 'wrap': true }\n"
+            "                 'nodeSpacing': 45, 'rankSpacing': 55,\n"
+            "                 'diagramPadding': 12, 'wrap': true }\n"
             "}}%%\n"
         )
         # Add compact spacing helpers
@@ -197,10 +239,11 @@ async def render_mermaid(payload: dict):
             + "classDef cache fill:#f3e5f5,stroke:#6a1b9a,color:#000;\n"
         )
 
-    # Optional: prettify numeric edge labels
+    # Optional: prettify numeric edge labels and add step numbers
     if style == "modern":
         try:
             code = _prettify_edge_labels(code)
+            code = _add_sequential_step_numbers(code)
         except Exception:
             pass
 
