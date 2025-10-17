@@ -144,43 +144,39 @@ def _prettify_edge_labels(code: str) -> str:
 
 
 def _add_sequential_step_numbers(code: str) -> str:
-    """Add sequential step numbers to nodes based on their position in the diagram.
-    Numbers appear as small labels next to each node to show workflow sequence.
+    """Add sequential step numbers directly to node labels to show workflow sequence.
+    Modifies existing node definitions to include step numbers inline.
     """
     import re as _re
     
     lines = code.split('\n')
-    node_definitions = []
-    node_ids = set()
-    
-    # Find all node definitions (A[Label], B(Label), etc.)
     node_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*[\[\(\{]([^\]\)\}]+)[\]\)\}]\s*')
     
-    for line in lines:
+    # Find all node definitions and track their order
+    node_definitions = []
+    for i, line in enumerate(lines):
         match = node_pattern.match(line)
         if match:
             node_id, label = match.groups()
-            node_definitions.append((node_id, label.strip()))
-            node_ids.add(node_id)
+            node_definitions.append((i, node_id, label.strip()))
     
     if not node_definitions:
         return code
     
-    # Add step numbers as small labels next to each node
-    result_lines = []
+    # Modify lines to add step numbers to node labels
+    result_lines = lines.copy()
     step_num = 1
     
-    for line in lines:
-        match = node_pattern.match(line)
-        if match:
-            node_id, label = match.groups()
-            # Add step number as a small label
-            step_label = f"{node_id}_step[{step_num}]"
-            result_lines.append(line)
-            result_lines.append(f"  {node_id} -.-> {node_id}_step")
-            step_num += 1
-        else:
-            result_lines.append(line)
+    for line_idx, node_id, label in node_definitions:
+        # Add step number to the beginning of the label
+        new_label = f"{step_num}. {label}"
+        # Replace the line with updated label
+        result_lines[line_idx] = _re.sub(
+            r'^\s*([A-Za-z0-9_]+)\s*[\[\(\{]([^\]\)\}]+)[\]\)\}]\s*',
+            f'{node_id}[{new_label}]',
+            result_lines[line_idx]
+        )
+        step_num += 1
     
     return '\n'.join(result_lines)
 
