@@ -25,30 +25,6 @@ def _sanitize_code(raw: str) -> str:
     return text
 
 
-def _normalize_text(s: str) -> str:
-    """Normalize diagram text to avoid Mermaid parse issues from pasted content.
-    - Normalize newlines to \n
-    - Replace smart quotes/dashes with ASCII
-    - Remove zero‑width and non-breaking spaces
-    - Strip UTF-8 BOM if present
-    """
-    import re as _re
-    if s.startswith("\ufeff"):
-        s = s.lstrip("\ufeff")
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    trans = {
-        "\u2018": "'", "\u2019": "'", "\u201C": '"', "\u201D": '"',
-        "\u2013": "-", "\u2014": "-", "\u00A0": " ",
-    }
-    for k, v in trans.items():
-        s = s.replace(k, v)
-    # Remove zero-width characters
-    s = _re.sub("[\u200B\u200C\u200D\uFEFF]", "", s)
-    # Collapse trailing spaces that can break labels
-    s = _re.sub(r"[ \t]+\n", "\n", s)
-    return s
-
-
 def _convert_layer_nodes_to_subgraphs(code: str) -> str:
     """Best-effort transform: turn standalone nodes whose labels end with
     the word "Layer" into Mermaid subgraphs.
@@ -145,130 +121,26 @@ def _convert_layer_nodes_to_subgraphs(code: str) -> str:
 
 
 def _prettify_edge_labels(code: str) -> str:
-    """Convert numeric step labels like `-- 1. Foo -->` into clean numeric format
-    removing the dot and extra spaces for professional look.
+    """Convert numeric step labels like `-- 1. Foo -->` into circled numerals
+    to improve aesthetics. Conservative: only changes numbers 1-20.
     """
     import re as _re
+    circled = {
+        1: "①", 2: "②", 3: "③", 4: "④", 5: "⑤",
+        6: "⑥", 7: "⑦", 8: "⑧", 9: "⑨", 10: "⑩",
+        11: "⑪", 12: "⑫", 13: "⑬", 14: "⑭", 15: "⑮",
+        16: "⑯", 17: "⑰", 18: "⑱", 19: "⑲", 20: "⑳",
+    }
 
     def repl(m: _re.Match[str]) -> str:
-        n = m.group(1)
-        return f" -- {n} "
+        n = int(m.group(1))
+        symbol = circled.get(n, m.group(1))
+        return f" -- {symbol} "
 
     # Edge label patterns:  A -- 1. Text --> B  or A ---|1. Text| B
-    # Convert "1. Send Msg" to just "1"
     code = _re.sub(r"\s--\s*(\d+)\.(\s|\|)", lambda m: repl(m), code)
-    code = _re.sub(r"\|\s*(\d+)\.(\s|\|)", lambda m: f"| {m.group(1)} ", code)
+    code = _re.sub(r"\|\s*(\d+)\.(\s|\|)", lambda m: f"| {circled.get(int(m.group(1)), m.group(1))} ", code)
     return code
-
-
-def _fix_parenthetical_edge_labels(code: str) -> str:
-    """Convert invalid parenthetical edge labels like `A --> B (W)` to
-    Mermaid-compliant `A -- W --> B` or `A -- (W) --> B`.
-    Also supports spaced labels: `( Read )`. Conservative regex.
-    """
-    import re as _re
-    # Pattern: NodeId --> NodeId (Label)
-    pattern = _re.compile(r"(^|\n)\s*([A-Za-z0-9_]+)\s*--?>\s*([A-Za-z0-9_]+)\s*\(([^)]+)\)")
-    def repl(m: _re.Match[str]) -> str:
-        prefix = m.group(1)
-        a = m.group(2)
-        b = m.group(3)
-        label = m.group(4).strip()
-        return f"{prefix}{a} -- {label} --> {b}"
-    return pattern.sub(repl, code)
-
-
-def _auto_insert_line_breaks(code: str, max_len: int = 28) -> str:
-    """Hard-wrap node labels by inserting <br/> at word boundaries when labels
-    exceed max_len. Guarantees visibility without truncation.
-    Examples converted:
-      NodeId[This is a very long title] -> NodeId[This is a very<br/>long title]
-    """
-    import re as _re
-
-    def wrap_label(text: str) -> str:
-        words = text.split()
-        lines: list[str] = []
-        current = ""
-        for w in words:
-            if not current:
-                current = w
-                continue
-            if len(current) + 1 + len(w) <= max_len:
-                current += " " + w
-            else:
-                lines.append(current)
-                current = w
-        if current:
-            lines.append(current)
-        return "<br/>".join(lines)
-
-    pattern = _re.compile(r"([A-Za-z0-9_]+)\s*\[(.*?)\]")
-    def repl(m: _re.Match[str]) -> str:
-        node = m.group(1)
-        label = m.group(2)
-        if '<br/>' in label or len(label) <= max_len:
-            return m.group(0)
-        return f"{node}[{wrap_label(label)}]"
-
-    return pattern.sub(repl, code)
-
-
-def _redirect_edges_to_subgraphs(code: str) -> str:
-    """Mermaid doesn't allow edges to subgraph IDs. If found, create an anchor
-    node inside each subgraph and redirect edges to that anchor.
-    Example: `Web --> E` becomes `Web --> E_anchor`, and we inject
-    `E_anchor(( )):::anchor` as the first line inside subgraph E.
-    """
-    import re as _re
-
-    # Find subgraph ids and their line indices
-    lines = code.split("\n")
-    subgraph_re = _re.compile(r"^\s*subgraph\s+([A-Za-z0-9_]+)\s*\[")
-    id_to_line: dict[str, int] = {}
-    for idx, line in enumerate(lines):
-        m = subgraph_re.match(line)
-        if m:
-            id_to_line[m.group(1)] = idx
-
-    if not id_to_line:
-        return code
-
-    # Detect edges referencing subgraph ids
-    edge_re = _re.compile(r"(^|\n)(\s*)([A-Za-z0-9_]+)\s*--[\-|>\s\w\.\(\)]*?>\s*([A-Za-z0-9_]+)")
-    used: set[str] = set()
-
-    def edge_replacer(m: _re.Match[str]) -> str:
-        prefix, indent, src, dst = m.group(1), m.group(2), m.group(3), m.group(4)
-        new_src = src
-        new_dst = dst
-        if src in id_to_line:
-            new_src = f"{src}_anchor"
-            used.add(src)
-        if dst in id_to_line:
-            new_dst = f"{dst}_anchor"
-            used.add(dst)
-        # Reconstruct the original edge text by keeping everything between src and dst
-        # Simpler: replace only the ids at ends to avoid changing labels
-        s = m.group(0)
-        s = _re.sub(rf"(^|\n){indent}{src}(?=\s*--)", f"{prefix}{indent}{new_src}", s)
-        s = _re.sub(rf"(?<=>)\s*{dst}(?=\b)", new_dst, s)
-        return s
-
-    new_code = edge_re.sub(edge_replacer, code)
-    if not used:
-        return new_code
-
-    # Inject anchors into corresponding subgraphs (right after 'subgraph ...' line)
-    insertion_offset = 0
-    for sid, line_idx in sorted(id_to_line.items(), key=lambda kv: kv[1]):
-        if sid not in used:
-            continue
-        insert_at = line_idx + 1 + insertion_offset
-        lines.insert(insert_at, f"  {sid}_anchor(( )):::anchor")
-        insertion_offset += 1
-
-    return "\n".join(lines)
 
 
 @router.post("/render_mermaid")
@@ -279,7 +151,6 @@ async def render_mermaid(payload: dict):
     Returns raw SVG content.
     """
     code = _sanitize_code(payload.get("code") or "")
-    code = _normalize_text(code)
     if not code:
         raise HTTPException(status_code=400, detail="Missing 'code' in payload")
 
@@ -296,32 +167,28 @@ async def render_mermaid(payload: dict):
 
     theme = (payload.get("theme") or "").strip() or "default"
 
-    # Optional: style preset for modern/enterprise look (visual only)
+    # Optional: style preset for modern elegant look without changing semantics
     style = (payload.get("style") or "").strip().lower()
-    if style in ("modern", "enterprise") and not code.lstrip().startswith("%%{init"):
-        is_enterprise = style == "enterprise"
+    if style == "modern" and not code.lstrip().startswith("%%{init"):
         init = (
             "%%{init: {\n"
             "  'theme': 'neutral',\n"
             "  'themeVariables': {\n"
-            f"    'fontSize':'12px', 'fontFamily':'Inter, sans-serif',\n"
-            f"    'lineColor':'#666', 'primaryColor':'#f8f9fa',\n"
-            f"    'edgeLabelBackground':'#ffffff', 'padding':12, 'curve':'{'step' if is_enterprise else 'basis'}',\n"
-            f"    'textWrapWidth': {240 if is_enterprise else 220}\n"
+            "    'fontSize':'12px', 'fontFamily':'Inter, sans-serif',\n"
+            "    'lineColor':'#666', 'primaryColor':'#f8f9fa',\n"
+            "    'edgeLabelBackground':'#ffffff', 'padding':12, 'curve':'basis',\n"
+            "    'textWrapWidth': 220\n"
             "  },\n"
-            f"  'flowchart': {{ 'htmlLabels': true, 'useMaxWidth': false,\n"
-            f"                 'nodeSpacing': {60 if is_enterprise else 40}, 'rankSpacing': {80 if is_enterprise else 50},\n"
-            f"                 'diagramPadding': {16 if is_enterprise else 8}, 'wrap': true }}\n"
+            "  'flowchart': { 'htmlLabels': true, 'useMaxWidth': false,\n"
+            "                 'nodeSpacing': 40, 'rankSpacing': 50,\n"
+            "                 'diagramPadding': 8, 'wrap': true }\n"
             "}}%%\n"
         )
         # Add compact spacing helpers
-        # Force LR for cleaner edges when requested
-        direction_prefix = "flowchart LR\n" if code.lstrip().startswith("flowchart ") else ""
         code = (
             init
-            + (direction_prefix if direction_prefix else "")
             + code
-            + ("\nlinkStyle default stroke:#444,stroke-width:1.6px;\n" if is_enterprise else "\nlinkStyle default stroke:#666,stroke-width:1.3px;\n")
+            + "\nlinkStyle default stroke:#666,stroke-width:1.3px;\n"
             + "classDef client fill:#e3f2fd,stroke:#1976d2,color:#000;\n"
             + "classDef network fill:#fff3e0,stroke:#e65100,color:#000;\n"
             + "classDef service fill:#fff8e1,stroke:#f57f17,color:#000;\n"
@@ -331,14 +198,11 @@ async def render_mermaid(payload: dict):
         )
 
     # Optional: prettify numeric edge labels
-    # Always apply syntax tolerant transforms so diagrams render reliably
-    try:
-        code = _fix_parenthetical_edge_labels(code)
-        code = _prettify_edge_labels(code)
-        code = _auto_insert_line_breaks(code, max_len=26)
-        code = _redirect_edges_to_subgraphs(code)
-    except Exception:
-        pass
+    if style == "modern":
+        try:
+            code = _prettify_edge_labels(code)
+        except Exception:
+            pass
 
     # Try multiple Mermaid rendering services for better reliability
     services = [
