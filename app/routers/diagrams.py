@@ -227,7 +227,7 @@ async def render_mermaid(payload: dict):
             "  },\n"
             "  'flowchart': { 'htmlLabels': true, 'useMaxWidth': false,\n"
             f"                 'nodeSpacing': {node_sp}, 'rankSpacing': {rank_sp},\n"
-            f"                 'diagramPadding': {diag_pad}, 'wrap': true }\n"
+            f"                 'diagramPadding': {diag_pad}, 'wrap': true " + "}\n"
             "}}%%\n"
         )
         # Add compact spacing helpers
