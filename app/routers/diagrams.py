@@ -208,18 +208,26 @@ async def render_mermaid(payload: dict):
     # Optional: style preset for modern elegant look without changing semantics
     style = (payload.get("style") or "").strip().lower()
     if style == "modern" and not code.lstrip().startswith("%%{init"):
+        size = (payload.get("size") or "medium").strip().lower()
+        if size == "compact":
+            font_size = "11px"; padding_val = 10; wrap_w = 260; node_sp = 38; rank_sp = 46; diag_pad = 10
+        elif size == "large":
+            font_size = "14px"; padding_val = 18; wrap_w = 380; node_sp = 56; rank_sp = 68; diag_pad = 18
+        else:  # medium (default)
+            font_size = "12px"; padding_val = 12; wrap_w = 300; node_sp = 42; rank_sp = 52; diag_pad = 12
+
         init = (
             "%%{init: {\n"
             "  'theme': 'neutral',\n"
             "  'themeVariables': {\n"
-            "    'fontSize':'13px', 'fontFamily':'Inter, sans-serif',\n"
+            f"    'fontSize':'{font_size}', 'fontFamily':'Inter, sans-serif',\n"
             "    'lineColor':'#666', 'primaryColor':'#f8f9fa',\n"
-            "    'edgeLabelBackground':'#ffffff', 'padding':16, 'curve':'basis',\n"
-            "    'textWrapWidth': 340\n"
+            f"    'edgeLabelBackground':'#ffffff', 'padding':{padding_val}, 'curve':'basis',\n"
+            f"    'textWrapWidth': {wrap_w}\n"
             "  },\n"
             "  'flowchart': { 'htmlLabels': true, 'useMaxWidth': false,\n"
-            "                 'nodeSpacing': 50, 'rankSpacing': 60,\n"
-            "                 'diagramPadding': 16, 'wrap': true }\n"
+            f"                 'nodeSpacing': {node_sp}, 'rankSpacing': {rank_sp},\n"
+            f"                 'diagramPadding': {diag_pad}, 'wrap': true }\n"
             "}}%%\n"
         )
         # Add compact spacing helpers
