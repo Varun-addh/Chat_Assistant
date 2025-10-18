@@ -144,39 +144,92 @@ def _prettify_edge_labels(code: str) -> str:
 
 
 def _add_sequential_step_numbers(code: str) -> str:
-    """Add sequential step numbers directly to node labels to show workflow sequence.
-    Modifies existing node definitions to include step numbers inline.
+    """Add sequential step numbers based on actual workflow path, not code order.
+    Analyzes edges to determine execution sequence: which node gets hit first, second, etc.
     """
     import re as _re
     
     lines = code.split('\n')
     node_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*[\[\(\{]([^\]\)\}]+)[\]\)\}]\s*')
+    edge_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*[-=~]+[ox]?\>.*?\>\s*([A-Za-z0-9_]+)')
     
-    # Find all node definitions and track their order
-    node_definitions = []
-    for i, line in enumerate(lines):
-        match = node_pattern.match(line)
-        if match:
-            node_id, label = match.groups()
-            node_definitions.append((i, node_id, label.strip()))
+    # Find all nodes and edges
+    nodes = {}
+    edges = []
     
-    if not node_definitions:
+    for line in lines:
+        # Extract node definitions
+        node_match = node_pattern.match(line)
+        if node_match:
+            node_id, label = node_match.groups()
+            nodes[node_id] = label.strip()
+        
+        # Extract edges (A --> B)
+        edge_match = edge_pattern.match(line)
+        if edge_match:
+            from_node, to_node = edge_match.groups()
+            edges.append((from_node, to_node))
+    
+    if not nodes or not edges:
         return code
     
-    # Modify lines to add step numbers to node labels
-    result_lines = lines.copy()
-    step_num = 1
+    # Find workflow sequence by following the path
+    def find_workflow_sequence():
+        # Find starting nodes (nodes that are sources but not targets)
+        all_targets = {edge[1] for edge in edges}
+        starting_nodes = [node_id for node_id in nodes.keys() if node_id not in all_targets]
+        
+        if not starting_nodes:
+            # If no clear starting point, use first node alphabetically
+            starting_nodes = [min(nodes.keys())]
+        
+        sequence = []
+        visited = set()
+        
+        def follow_path(node_id, step_num):
+            if node_id in visited or node_id not in nodes:
+                return step_num
+            
+            visited.add(node_id)
+            sequence.append((node_id, step_num))
+            step_num += 1
+            
+            # Find next nodes in the workflow
+            next_nodes = [edge[1] for edge in edges if edge[0] == node_id]
+            for next_node in next_nodes:
+                step_num = follow_path(next_node, step_num)
+            
+            return step_num
+        
+        # Start from each starting node
+        step_num = 1
+        for start_node in starting_nodes:
+            step_num = follow_path(start_node, step_num)
+        
+        return sequence
     
-    for line_idx, node_id, label in node_definitions:
-        # Add step number to the beginning of the label
-        new_label = f"{step_num}. {label}"
-        # Replace the line with updated label
-        result_lines[line_idx] = _re.sub(
-            r'^\s*([A-Za-z0-9_]+)\s*[\[\(\{]([^\]\)\}]+)[\]\)\}]\s*',
-            f'{node_id}[{new_label}]',
-            result_lines[line_idx]
-        )
-        step_num += 1
+    workflow_sequence = find_workflow_sequence()
+    
+    # Apply step numbers to nodes based on workflow sequence
+    result_lines = []
+    step_map = {node_id: step_num for node_id, step_num in workflow_sequence}
+    
+    for line in lines:
+        node_match = node_pattern.match(line)
+        if node_match:
+            node_id, label = node_match.groups()
+            step_num = step_map.get(node_id, 0)
+            if step_num > 0:
+                new_label = f"{step_num}. {label}"
+                result_lines.append(_re.sub(
+                    r'^\s*([A-Za-z0-9_]+)\s*[\[\(\{]([^\]\)\}]+)[\]\)\}]\s*',
+                    f'{node_id}[{new_label}]',
+                    line
+                ))
+            else:
+                result_lines.append(line)
+        else:
+            result_lines.append(line)
     
     return '\n'.join(result_lines)
 
