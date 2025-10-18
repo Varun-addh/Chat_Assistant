@@ -150,7 +150,8 @@ def _add_sequential_step_numbers(code: str) -> str:
     import re as _re
     
     lines = code.split('\n')
-    edge_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*([-=~]+[ox]?\>.*?\>\s*[A-Za-z0-9_]+)')
+    # More flexible edge pattern to catch various arrow styles
+    edge_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*([-=~]+[ox]?[>].*?[>]\s*[A-Za-z0-9_]+)')
     
     # Find all edges and track their order
     edges = []
@@ -168,22 +169,17 @@ def _add_sequential_step_numbers(code: str) -> str:
     step_num = 1
     
     for line_idx, original_line, from_node, edge_part in edges:
-        # Extract the target node
-        target_match = _re.search(r'\>\s*([A-Za-z0-9_]+)', edge_part)
-        if target_match:
-            target_node = target_match.group(1)
-            
-            # Check if edge already has a label
-            if '|' in edge_part:
-                # Edge has existing label, add step number before it
-                new_edge = edge_part.replace('|', f'|{step_num}. ')
-            else:
-                # No existing label, add step number
-                new_edge = edge_part.replace('>', f'|{step_num}|')
-            
-            # Replace the line
-            result_lines[line_idx] = f"  {from_node} {new_edge}"
-            step_num += 1
+        # Check if edge already has a label
+        if '|' in edge_part:
+            # Edge has existing label, add step number before it
+            new_edge = edge_part.replace('|', f'|{step_num}. ', 1)
+        else:
+            # No existing label, add step number
+            new_edge = edge_part.replace('>', f'|{step_num}|', 1)
+        
+        # Replace the line
+        result_lines[line_idx] = f"  {from_node} {new_edge}"
+        step_num += 1
     
     return '\n'.join(result_lines)
 
@@ -216,12 +212,14 @@ async def render_mermaid(payload: dict):
     style = (payload.get("style") or "").strip().lower()
     if style == "modern" and not code.lstrip().startswith("%%{init"):
         size = (payload.get("size") or "medium").strip().lower()
+        responsive = (payload.get("responsive") or "true").strip().lower() == "true"
+        
         if size == "compact":
-            font_size = "11px"; padding_val = 10; wrap_w = 260; node_sp = 38; rank_sp = 46; diag_pad = 10
+            font_size = "10px"; padding_val = 8; wrap_w = 240; node_sp = 32; rank_sp = 40; diag_pad = 8
         elif size == "large":
-            font_size = "14px"; padding_val = 18; wrap_w = 380; node_sp = 56; rank_sp = 68; diag_pad = 18
+            font_size = "14px"; padding_val = 18; wrap_w = 400; node_sp = 60; rank_sp = 72; diag_pad = 20
         else:  # medium (default)
-            font_size = "12px"; padding_val = 12; wrap_w = 300; node_sp = 42; rank_sp = 52; diag_pad = 12
+            font_size = "12px"; padding_val = 12; wrap_w = 300; node_sp = 45; rank_sp = 55; diag_pad = 12
 
         init = (
             "%%{init: {\n"
@@ -232,7 +230,7 @@ async def render_mermaid(payload: dict):
             f"    'edgeLabelBackground':'#ffffff', 'padding':{padding_val}, 'curve':'basis',\n"
             f"    'textWrapWidth': {wrap_w}\n"
             "  },\n"
-            "  'flowchart': { 'htmlLabels': true, 'useMaxWidth': false,\n"
+            "  'flowchart': { 'htmlLabels': true, 'useMaxWidth': " + ("true" if responsive else "false") + ",\n"
             f"                 'nodeSpacing': {node_sp}, 'rankSpacing': {rank_sp},\n"
             f"                 'diagramPadding': {diag_pad}, 'wrap': true " + "}\n"
             "}}%%\n"
