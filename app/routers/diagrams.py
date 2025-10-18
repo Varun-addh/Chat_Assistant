@@ -144,92 +144,46 @@ def _prettify_edge_labels(code: str) -> str:
 
 
 def _add_sequential_step_numbers(code: str) -> str:
-    """Add sequential step numbers based on actual workflow path, not code order.
-    Analyzes edges to determine execution sequence: which node gets hit first, second, etc.
+    """Add sequential step numbers to edges/arrows to show workflow sequence.
+    Numbers appear on the connections between nodes: 1st arrow gets "1", 2nd gets "2", etc.
     """
     import re as _re
     
     lines = code.split('\n')
-    node_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*[\[\(\{]([^\]\)\}]+)[\]\)\}]\s*')
-    edge_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*[-=~]+[ox]?\>.*?\>\s*([A-Za-z0-9_]+)')
+    edge_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*([-=~]+[ox]?\>.*?\>\s*[A-Za-z0-9_]+)')
     
-    # Find all nodes and edges
-    nodes = {}
+    # Find all edges and track their order
     edges = []
-    
-    for line in lines:
-        # Extract node definitions
-        node_match = node_pattern.match(line)
-        if node_match:
-            node_id, label = node_match.groups()
-            nodes[node_id] = label.strip()
-        
-        # Extract edges (A --> B)
+    for i, line in enumerate(lines):
         edge_match = edge_pattern.match(line)
         if edge_match:
-            from_node, to_node = edge_match.groups()
-            edges.append((from_node, to_node))
+            from_node, edge_part = edge_match.groups()
+            edges.append((i, line, from_node, edge_part))
     
-    if not nodes or not edges:
+    if not edges:
         return code
     
-    # Find workflow sequence by following the path
-    def find_workflow_sequence():
-        # Find starting nodes (nodes that are sources but not targets)
-        all_targets = {edge[1] for edge in edges}
-        starting_nodes = [node_id for node_id in nodes.keys() if node_id not in all_targets]
-        
-        if not starting_nodes:
-            # If no clear starting point, use first node alphabetically
-            starting_nodes = [min(nodes.keys())]
-        
-        sequence = []
-        visited = set()
-        
-        def follow_path(node_id, step_num):
-            if node_id in visited or node_id not in nodes:
-                return step_num
-            
-            visited.add(node_id)
-            sequence.append((node_id, step_num))
-            step_num += 1
-            
-            # Find next nodes in the workflow
-            next_nodes = [edge[1] for edge in edges if edge[0] == node_id]
-            for next_node in next_nodes:
-                step_num = follow_path(next_node, step_num)
-            
-            return step_num
-        
-        # Start from each starting node
-        step_num = 1
-        for start_node in starting_nodes:
-            step_num = follow_path(start_node, step_num)
-        
-        return sequence
+    # Add step numbers to each edge
+    result_lines = lines.copy()
+    step_num = 1
     
-    workflow_sequence = find_workflow_sequence()
-    
-    # Apply step numbers to nodes based on workflow sequence
-    result_lines = []
-    step_map = {node_id: step_num for node_id, step_num in workflow_sequence}
-    
-    for line in lines:
-        node_match = node_pattern.match(line)
-        if node_match:
-            node_id, label = node_match.groups()
-            step_num = step_map.get(node_id, 0)
-            if step_num > 0:
-                new_label = f"{step_num}. {label}"
-                result_lines.append(_re.sub(
-                    r'^\s*([A-Za-z0-9_]+)\s*[\[\(\{]([^\]\)\}]+)[\]\)\}]\s*',
-                    f'{node_id}[{new_label}]',
-                    line
-                ))
+    for line_idx, original_line, from_node, edge_part in edges:
+        # Extract the target node
+        target_match = _re.search(r'\>\s*([A-Za-z0-9_]+)', edge_part)
+        if target_match:
+            target_node = target_match.group(1)
+            
+            # Check if edge already has a label
+            if '|' in edge_part:
+                # Edge has existing label, add step number before it
+                new_edge = edge_part.replace('|', f'|{step_num}. ')
             else:
-                result_lines.append(line)
-        else:
-            result_lines.append(line)
+                # No existing label, add step number
+                new_edge = edge_part.replace('>', f'|{step_num}|')
+            
+            # Replace the line
+            result_lines[line_idx] = f"  {from_node} {new_edge}"
+            step_num += 1
     
     return '\n'.join(result_lines)
 
