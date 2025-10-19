@@ -1078,8 +1078,6 @@ class LLMService:
 			"  * If user asks 'what about X edge case?' → Increase to L6-L7 depth\n"
 			"  * If user says 'simpler please' → Focus on MVP, defer optimizations\n"
 			"  * If user specifies 'Staff level' → Add org design, multi-year roadmap, build-vs-buy.\n"
-			"\n#### **6. Interview Takeaways**\n"
-			"- 3–5 bullets candidates should emphasize.\n"
 			"\n#### **Advanced Enhancements (Include when relevant)**\n"
 			"- Memory optimization: prefer Compressed Radix Tree/Patricia or Double-Array Trie for long single-child paths; immutable main index with batch rebuilds.\n"
 			"- Hybrid indexing: immutable main index + real-time delta index from Kafka/Kinesis; merge results (delta → main).\n"
@@ -1094,6 +1092,8 @@ class LLMService:
 			"\n- Style: Senior, precise, 600–1200 words, no filler. Always include at least one code block.\n"
 			"- Diagram rendering: Prefer Mermaid flowchart fenced as ```mermaid for UIs that support it.\n"
 			"  If Mermaid is not supported, provide a Graphviz DOT fallback fenced as ```dot with solid edges and color attributes.\n"
+			"\n#### **Interview Takeaways**\n"
+			"- 3–5 bullets candidates should emphasize.\n"
 		)
 
 	def _technical_strategy_overrides(self) -> str:
@@ -1295,29 +1295,6 @@ class LLMService:
 		
 		return text
 
-	def _inject_architecture_walkthrough(self, text: str) -> str:
-		"""Append a concise Architecture Walkthrough when content appears code/algorithmic.
-		Heuristics:
-		- Contains fenced code block, or mentions algorithm/complexity, or contains Mermaid.
-		- Avoid duplicate insertion if section already exists.
-		"""
-		import re
-		lower = text.lower()
-		if any(h in lower for h in ["architecture walkthrough", "data flow:", "components:"]):
-			return text
-		contains_code = "```" in text
-		mentions_algo = any(k in lower for k in ["algorithm", "complexity", "time complexity", "space complexity"]) 
-		contains_mermaid = self._contains_mermaid(text)
-		if not (contains_code or mentions_algo or contains_mermaid):
-			return text
-		appendix = (
-			"\n\n### **Architecture Walkthrough**\n\n"
-			"- Data flow: how inputs are validated, processed, and returned.\n"
-			"- Components: functions/classes collaborating; key responsibilities.\n"
-			"- Control flow: main loop/recursion, decision points, and error paths.\n"
-			"- Complexity: where time/space is spent, and why.\n"
-		)
-		return (text.rstrip() + appendix)
 
 	def _format_headings_bold(self, text: str) -> str:
 		"""Ensure all headings are properly bolded, but never touch fenced code blocks."""
@@ -2247,12 +2224,12 @@ class LLMService:
 						parts.append(getattr(chunk.choices[0].delta, "content", None) or "")
 					raw_text = "".join(parts).strip()
 					formatted = self._format_response(raw_text)
-					return self._inject_architecture_walkthrough(formatted)
+					return formatted
 				else:
 					resp = client.chat.completions.create(**build_kwargs(False))
 					raw_text = resp.choices[0].message.content.strip()
 					formatted = self._format_response(raw_text)
-					return self._inject_architecture_walkthrough(formatted)
+					return formatted
 			elif provider == "gemini":
 				# Gemini: use the GenerativeModel with non-streaming first
 				model_id = settings.gemini_model
@@ -2266,7 +2243,7 @@ class LLMService:
 				resp = gmodel.generate_content(full_prompt)
 				raw_text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
 				formatted = self._format_response((raw_text or "").strip())
-				return self._inject_architecture_walkthrough(formatted)
+				return formatted
 			else:
 				return question
 
