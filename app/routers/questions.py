@@ -72,34 +72,6 @@ async def create_session():
 	return CreateSessionResponse(session_id=state.session_id)
 
 
-@router.get("/session/{session_id}/exists")
-async def check_session_exists(session_id: str):
-	"""Check if a session exists and return basic info."""
-	try:
-		state = await session_manager.get_required(session_id)
-		return {
-			"exists": True,
-			"session_id": session_id,
-			"qna_count": len(state.qna),
-			"last_update": state.last_update.isoformat()
-		}
-	except KeyError:
-		return {"exists": False, "session_id": session_id}
-
-
-@router.get("/session/latest")
-async def get_latest_session():
-	"""Get the most recent session for frontend persistence."""
-	state = await session_manager.get_latest_session()
-	if state:
-		return {
-			"session_id": state.session_id,
-			"qna_count": len(state.qna),
-			"last_update": state.last_update.isoformat()
-		}
-	return {"session_id": None, "qna_count": 0, "last_update": None}
-
-
 @router.post("/question")
 async def submit_question(payload: QuestionIn):
 	try:
@@ -251,13 +223,6 @@ async def list_sessions():
 		for i in items_raw
 	]
 	return SessionList(items=items)
-
-
-@router.post("/cleanup")
-async def cleanup_sessions():
-	"""Clean up empty sessions and remove duplicates."""
-	cleaned_count = await session_manager.cleanup_empty_sessions()
-	return {"status": "ok", "cleaned_sessions": cleaned_count}
 
 
 @router.delete("/session/{session_id}")

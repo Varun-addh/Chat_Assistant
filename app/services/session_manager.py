@@ -87,22 +87,6 @@ class SessionManager:
 
 	async def append_qna(self, session_id: str, question: str, answer: str) -> None:
 		state = await self.get_required(session_id)
-		
-		# More aggressive duplicate prevention - check ALL entries, not just last 5
-		question_lower = question.strip().lower()
-		for i, item in enumerate(state.qna):
-			if item["question"].strip().lower() == question_lower:
-				# Update existing entry instead of adding duplicate
-				state.qna[i] = {
-					"question": question,
-					"answer": answer,
-					"created_at": datetime.utcnow().isoformat(),
-				}
-				state.last_update = datetime.utcnow()
-				self._save(state)
-				return
-		
-		# Add new entry if not duplicate
 		state.qna.append({
 			"question": question,
 			"answer": answer,
@@ -183,37 +167,6 @@ class SessionManager:
 		state.qna.pop(index)
 		state.last_update = datetime.utcnow()
 		self._save(state)
-
-	async def cleanup_empty_sessions(self) -> int:
-		"""Remove sessions with no Q&A history. Returns count of cleaned sessions."""
-		async with self._lock:
-			to_remove = []
-			for session_id, state in self._sessions.items():
-				if not state.qna and not state.profile_text.strip():
-					to_remove.append(session_id)
-			
-			for session_id in to_remove:
-				await self.delete_session(session_id)
-			
-			return len(to_remove)
-
-	async def get_or_create_session(self, session_id: str = None) -> SessionState:
-		"""Get existing session or create new one. Useful for frontend session management."""
-		if session_id:
-			state = await self.get(session_id)
-			if state:
-				return state
-		
-		# Create new session
-		return await self.create_session()
-
-	async def get_latest_session(self) -> Optional[SessionState]:
-		"""Get the most recently updated session. Useful for frontend persistence."""
-		if not self._sessions:
-			return None
-		
-		latest = max(self._sessions.values(), key=lambda s: s.last_update)
-		return latest
 
 
 session_manager = SessionManager()
