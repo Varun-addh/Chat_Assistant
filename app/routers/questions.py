@@ -72,6 +72,34 @@ async def create_session():
 	return CreateSessionResponse(session_id=state.session_id)
 
 
+@router.get("/session/{session_id}/exists")
+async def check_session_exists(session_id: str):
+	"""Check if a session exists and return basic info."""
+	try:
+		state = await session_manager.get_required(session_id)
+		return {
+			"exists": True,
+			"session_id": session_id,
+			"qna_count": len(state.qna),
+			"last_update": state.last_update.isoformat()
+		}
+	except KeyError:
+		return {"exists": False, "session_id": session_id}
+
+
+@router.get("/session/latest")
+async def get_latest_session():
+	"""Get the most recent session for frontend persistence."""
+	state = await session_manager.get_latest_session()
+	if state:
+		return {
+			"session_id": state.session_id,
+			"qna_count": len(state.qna),
+			"last_update": state.last_update.isoformat()
+		}
+	return {"session_id": None, "qna_count": 0, "last_update": None}
+
+
 @router.post("/question")
 async def submit_question(payload: QuestionIn):
 	try:

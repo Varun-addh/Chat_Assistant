@@ -88,21 +88,19 @@ class SessionManager:
 	async def append_qna(self, session_id: str, question: str, answer: str) -> None:
 		state = await self.get_required(session_id)
 		
-		# Check for duplicate questions in the last 5 entries to prevent spam
-		recent_questions = [item["question"].strip().lower() for item in state.qna[-5:]]
-		if question.strip().lower() in recent_questions:
-			# Update the last similar question instead of adding duplicate
-			for i, item in enumerate(state.qna[-5:]):
-				if item["question"].strip().lower() == question.strip().lower():
-					# Update existing entry
-					state.qna[len(state.qna) - 5 + i] = {
-						"question": question,
-						"answer": answer,
-						"created_at": datetime.utcnow().isoformat(),
-					}
-					state.last_update = datetime.utcnow()
-					self._save(state)
-					return
+		# More aggressive duplicate prevention - check ALL entries, not just last 5
+		question_lower = question.strip().lower()
+		for i, item in enumerate(state.qna):
+			if item["question"].strip().lower() == question_lower:
+				# Update existing entry instead of adding duplicate
+				state.qna[i] = {
+					"question": question,
+					"answer": answer,
+					"created_at": datetime.utcnow().isoformat(),
+				}
+				state.last_update = datetime.utcnow()
+				self._save(state)
+				return
 		
 		# Add new entry if not duplicate
 		state.qna.append({
@@ -208,6 +206,14 @@ class SessionManager:
 		
 		# Create new session
 		return await self.create_session()
+
+	async def get_latest_session(self) -> Optional[SessionState]:
+		"""Get the most recently updated session. Useful for frontend persistence."""
+		if not self._sessions:
+			return None
+		
+		latest = max(self._sessions.values(), key=lambda s: s.last_update)
+		return latest
 
 
 session_manager = SessionManager()
