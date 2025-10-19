@@ -225,6 +225,13 @@ async def list_sessions():
 	return SessionList(items=items)
 
 
+@router.post("/cleanup")
+async def cleanup_sessions():
+	"""Clean up empty sessions and remove duplicates."""
+	cleaned_count = await session_manager.cleanup_empty_sessions()
+	return {"status": "ok", "cleaned_sessions": cleaned_count}
+
+
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str):
 	deleted = await session_manager.delete_session(session_id)
