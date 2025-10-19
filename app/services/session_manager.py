@@ -87,24 +87,6 @@ class SessionManager:
 
 	async def append_qna(self, session_id: str, question: str, answer: str) -> None:
 		state = await self.get_required(session_id)
-		
-		# Check for duplicate questions in the last 5 entries to prevent spam
-		recent_questions = [item["question"].strip().lower() for item in state.qna[-5:]]
-		if question.strip().lower() in recent_questions:
-			# Update the last similar question instead of adding duplicate
-			for i, item in enumerate(state.qna[-5:]):
-				if item["question"].strip().lower() == question.strip().lower():
-					# Update existing entry
-					state.qna[len(state.qna) - 5 + i] = {
-						"question": question,
-						"answer": answer,
-						"created_at": datetime.utcnow().isoformat(),
-					}
-					state.last_update = datetime.utcnow()
-					self._save(state)
-					return
-		
-		# Add new entry if not duplicate
 		state.qna.append({
 			"question": question,
 			"answer": answer,
@@ -112,6 +94,7 @@ class SessionManager:
 		})
 		state.last_update = datetime.utcnow()
 		self._save(state)
+		print(f"DEBUG: Added Q&A to session {session_id}, total entries: {len(state.qna)}")
 
 	async def set_partial_transcript(self, session_id: str, text: str) -> None:
 		state = await self.get_required(session_id)
@@ -173,6 +156,7 @@ class SessionManager:
 	async def clear_history(self, session_id: str) -> None:
 		"""Clear QnA history for a session but keep the session and profile."""
 		state = await self.get_required(session_id)
+		print(f"DEBUG: Clearing history for session {session_id}, had {len(state.qna)} entries")
 		state.qna.clear()
 		state.last_update = datetime.utcnow()
 		self._save(state)
