@@ -8,6 +8,7 @@ from app.routers.questions import router as questions_router
 from app.routers.ws import router as ws_router
 from app.routers.diagrams import router as diagrams_router
 from app.routers.evaluate import router as evaluate_router
+from app.routers.code_analysis import router as code_analysis_router
 from app.utils.audit import auditor
 from app.services.llm_service import llm_service
 
@@ -42,4 +43,5 @@ async def health() -> JSONResponse:
 app.include_router(questions_router, prefix="/api", tags=["questions"]) 
 app.include_router(diagrams_router, prefix="/api", tags=["diagrams"])
 app.include_router(evaluate_router, prefix="/api", tags=["evaluation"]) 
+app.include_router(code_analysis_router, prefix="/api", tags=["code-analysis"])
 app.include_router(ws_router, tags=["realtime"]) 

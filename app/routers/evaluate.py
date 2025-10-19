@@ -10,6 +10,7 @@ from typing import Dict, Optional
 from app.schemas import EvaluationIn, EvaluationOut, EvaluationScores, StaticSignals
 from app.services.session_manager import session_manager
 from app.services.code_evaluation_service import evaluate_code
+from app.services.code_analysis_service import code_analyzer
 from app.utils.audit import auditor
 
 
@@ -82,6 +83,13 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 	except Exception as e:
 		raise HTTPException(status_code=500, detail=f"LLM evaluation failed: {str(e)}")
 
+	# Run comprehensive code analysis
+	try:
+		code_analysis = code_analyzer.analyze_code(payload.code, payload.language or "python")
+	except Exception as e:
+		# Don't fail the main evaluation if analysis fails
+		code_analysis = None
+
 	# Extract scores JSON from critique text
 	# Look for 'Scores: {...}'
 	scores_dict = {
@@ -136,6 +144,53 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 	# Choose the best available approach content
 	_best_approach = (approach_text or summary or critique_text).strip()
 
+	# Generate comprehensive code analysis markdown
+	analysis_markdown = ""
+	if code_analysis:
+		analysis_markdown = f"""
+
+### 🔍 **Comprehensive Code Analysis**
+
+#### **Execution Flow**
+The code executes in {len(code_analysis.execution_steps)} steps:
+
+"""
+		for i, step in enumerate(code_analysis.execution_steps[:10]):  # Show first 10 steps
+			analysis_markdown += f"**Step {i+1} (Line {step.line_number}):** {step.description}\n"
+			analysis_markdown += f"```\n{step.line_content}\n```\n"
+			if step.variables_changed:
+				analysis_markdown += f"*Variables changed: {', '.join([v.name for v in step.variables_changed])}*\n"
+			analysis_markdown += "\n"
+		
+		if len(code_analysis.execution_steps) > 10:
+			analysis_markdown += f"... and {len(code_analysis.execution_steps) - 10} more steps\n\n"
+		
+		# Variable timeline
+		if code_analysis.variable_timeline:
+			analysis_markdown += "#### **Variable Timeline**\n"
+			for var_name, states in code_analysis.variable_timeline.items():
+				analysis_markdown += f"**{var_name}**: "
+				values = [str(state.value) for state in states]
+				analysis_markdown += " → ".join(values) + "\n"
+			analysis_markdown += "\n"
+		
+		# Complexity analysis
+		complexity = code_analysis.complexity_analysis
+		analysis_markdown += "#### **Complexity Analysis**\n"
+		analysis_markdown += f"- **Time Complexity**: {complexity.get('time_complexity', 'Unknown')}\n"
+		analysis_markdown += f"- **Space Complexity**: {complexity.get('space_complexity', 'Unknown')}\n"
+		analysis_markdown += f"- **Loop Depth**: {complexity.get('loop_depth', 0)}\n\n"
+		
+		# Data flow diagram
+		if code_analysis.data_flow_diagram:
+			analysis_markdown += "#### **Data Flow Visualization**\n"
+			analysis_markdown += f"```mermaid\n{code_analysis.data_flow_diagram}\n```\n\n"
+		
+		# Execution flow diagram
+		if code_analysis.execution_flow_diagram:
+			analysis_markdown += "#### **Execution Flow Visualization**\n"
+			analysis_markdown += f"```mermaid\n{code_analysis.execution_flow_diagram}\n```\n\n"
+
 	resp = EvaluationOut(
 		session_id=payload.session_id,
 		problem=payload.problem,
@@ -152,6 +207,7 @@ async def evaluate(payload: EvaluationIn, request: Request, response: Response):
 ### Approach
 
 {_best_approach}
+{analysis_markdown}
 """,
 	)
 
