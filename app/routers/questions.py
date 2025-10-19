@@ -232,22 +232,6 @@ async def cleanup_sessions():
 	return {"status": "ok", "cleaned_sessions": cleaned_count}
 
 
-@router.get("/session/{session_id}/status")
-async def get_session_status(session_id: str):
-	"""Get detailed session status for debugging."""
-	try:
-		state = await session_manager.get_required(session_id)
-		return {
-			"session_id": session_id,
-			"qna_count": len(state.qna),
-			"last_update": state.last_update.isoformat(),
-			"has_profile": bool(state.profile_text.strip()),
-			"recent_questions": [q["question"] for q in state.qna[-3:]]
-		}
-	except KeyError:
-		raise HTTPException(status_code=404, detail="Session not found")
-
-
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str):
 	deleted = await session_manager.delete_session(session_id)
