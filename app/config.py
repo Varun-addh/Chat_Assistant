@@ -14,7 +14,9 @@ class Settings(BaseSettings):
 	# Server
 	host: str = "0.0.0.0"
 	port: int = 8000
-	cors_allow_origins: List[str] = ["*"]
+	cors_allow_origins: List[str] = [
+		"https://innerviewast.web.app"
+	]
 
 	# Auth
 	api_key: str | None = None  # simple bearer key if provided
