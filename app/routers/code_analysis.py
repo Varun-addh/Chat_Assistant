@@ -173,7 +173,7 @@ flowchart TD
 flowchart TD
     A[Step {step_number}: Execute Line]
     A --> B[Line {step.line_number}: {step.line_content}]
-    B --> C{Condition}
+    B --> C{{Condition}}
     C -->|true| D[Take True Branch]
     C -->|false| E[Take False Branch]
 """.strip()
@@ -182,7 +182,7 @@ flowchart TD
 flowchart TD
     A[Step {step_number}: Execute Line]
     A --> B[Line {step.line_number}: {step.line_content}]
-    B --> C{Loop Condition}
+    B --> C{{Loop Condition}}
     C -->|true| D[Run Body]
     D --> C
     C -->|false| E[Exit Loop]
