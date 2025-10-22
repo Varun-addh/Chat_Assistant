@@ -143,6 +143,60 @@ def _prettify_edge_labels(code: str) -> str:
     return code
 
 
+def _fix_mermaid_syntax_errors(code: str) -> str:
+    """Fix common Mermaid syntax errors to prevent rendering failures.
+    Handles bidirectional arrows, edge labels, and other common issues.
+    """
+    import re as _re
+    
+    # Fix bidirectional arrows: A <--> B becomes A --> B and B --> A
+    def fix_bidirectional_arrows(text):
+        # Find all bidirectional arrows
+        bidirectional_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*<-->\s*([A-Za-z0-9_]+)\s*$', _re.MULTILINE)
+        
+        def replace_bidirectional(match):
+            from_node = match.group(1)
+            to_node = match.group(2)
+            return f"  {from_node} --> {to_node}\n  {to_node} --> {from_node}"
+        
+        return bidirectional_pattern.sub(replace_bidirectional, text)
+    
+    # Fix edge labels: A -- Label --> B becomes A -->|Label| B
+    def fix_edge_labels(text):
+        # Pattern for A -- Label --> B
+        edge_label_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*--\s*([^-\n]+?)\s*-->\s*([A-Za-z0-9_]+)\s*$', _re.MULTILINE)
+        
+        def replace_edge_label(match):
+            from_node = match.group(1).strip()
+            label = match.group(2).strip()
+            to_node = match.group(3).strip()
+            return f"  {from_node} -->|{label}| {to_node}"
+        
+        return edge_label_pattern.sub(replace_edge_label, text)
+    
+    # Fix malformed edges like A --> B -- Label --> C
+    def fix_malformed_edges(text):
+        # Pattern for A --> B -- Label --> C (incorrect)
+        malformed_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*-->\s*([A-Za-z0-9_]+)\s*--\s*([^-\n]+?)\s*-->\s*([A-Za-z0-9_]+)\s*$', _re.MULTILINE)
+        
+        def replace_malformed(match):
+            from_node = match.group(1).strip()
+            middle_node = match.group(2).strip()
+            label = match.group(3).strip()
+            to_node = match.group(4).strip()
+            return f"  {from_node} --> {middle_node}\n  {middle_node} -->|{label}| {to_node}"
+        
+        return malformed_pattern.sub(replace_malformed, text)
+    
+    # Apply all fixes
+    fixed_code = code
+    fixed_code = fix_bidirectional_arrows(fixed_code)
+    fixed_code = fix_edge_labels(fixed_code)
+    fixed_code = fix_malformed_edges(fixed_code)
+    
+    return fixed_code
+
+
 def _add_sequential_step_numbers(code: str) -> str:
     """Add sequential step numbers to edges/arrows to show workflow sequence.
     Numbers appear on the connections between nodes: 1st arrow gets "1", 2nd gets "2", etc.
@@ -199,6 +253,13 @@ async def render_mermaid(payload: dict):
     if len(code) > 40_000:
         raise HTTPException(status_code=413, detail="Diagram too large")
 
+    # Fix common Mermaid syntax errors first
+    try:
+        code = _fix_mermaid_syntax_errors(code)
+    except Exception:
+        # Do not fail rendering if transformation has issues
+        pass
+
     # Attempt to group layer headers into subgraphs before rendering
     try:
         code = _convert_layer_nodes_to_subgraphs(code)
@@ -212,7 +273,7 @@ async def render_mermaid(payload: dict):
     style = (payload.get("style") or "").strip().lower()
     if style == "modern" and not code.lstrip().startswith("%%{init"):
         size = (payload.get("size") or "medium").strip().lower()
-        responsive = (payload.get("responsive") or "true").strip().lower() == "true"
+        responsive = str(payload.get("responsive", "true")).strip().lower() == "true"
         
         if size == "compact":
             font_size = "10px"; padding_val = 8; wrap_w = 240; node_sp = 32; rank_sp = 40; diag_pad = 8
