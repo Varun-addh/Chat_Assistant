@@ -27,11 +27,11 @@ async def _auto_evaluate_if_code(session_id: str, question: str, answer: str) ->
 	
 	# Get the most substantial code block
 	best_code = ""
-	best_lang = "python"
+	best_lang = "python"  # Default to Python for coding questions
 	for lang, code in matches:
 		if len(code.strip()) > len(best_code.strip()):
 			best_code = code.strip()
-			best_lang = lang or "python"
+			best_lang = lang or "python"  # Default to Python if no language specified
 	
 	if not best_code:
 		return
