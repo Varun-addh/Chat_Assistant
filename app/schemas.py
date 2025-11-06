@@ -94,3 +94,27 @@ class EvaluationOut(BaseModel):
 	recommendations: List[str]
 	created_at: datetime
 	markdown: Optional[str] = None
+
+
+# === Model Papers ===
+
+class ModelPaperQuery(BaseModel):
+    topic: str = Field(..., description="Topic or skill to gather interview questions for")
+    limit: int = Field(default=20, ge=1, le=200, description="Max number of Q&A items")
+    include_recent_days: int = Field(default=30, ge=0, le=365, description="Scan recent session history for up-to-date items")
+
+
+class ModelQuestion(BaseModel):
+    question: str
+    answer: str
+    source: Optional[str] = Field(default=None, description="Where the item came from (e.g., session_id or cache)")
+    updated_at: datetime
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Confidence score for ranking")
+    url: Optional[str] = Field(default=None, description="Source page URL (if applicable)")
+    pdf_url: Optional[str] = Field(default=None, description="Direct link to related PDF (if found)")
+
+
+class ModelPaperResponse(BaseModel):
+    topic: str
+    total: int
+    items: List[ModelQuestion]
