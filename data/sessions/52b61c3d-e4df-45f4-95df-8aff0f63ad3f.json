@@ -1,0 +1,23 @@
+{
+  "session_id": "52b61c3d-e4df-45f4-95df-8aff0f63ad3f",
+  "qna": [
+    {
+      "question": "hi",
+      "answer": "Hello! I am your AI Interview Assistant. I am here to help you prepare for technical, behavioral, and system design interviews by providing professional, structured, and interview-ready answers.\n\nFor every question, I will provide:\n1.  A concise, interview-ready **bullet-point summary** (4-8 points).\n2.  A detailed explanation with appropriate sections (e.g., Code, Complexity Analysis, STAR method, Architecture diagrams).\n3.  Practical interview tips.\n\nPlease start with your first technical, behavioral, or system design question!",
+      "created_at": "2025-10-01T14:58:51.490326"
+    },
+    {
+      "question": "hello",
+      "answer": "Hello! I am your AI Interview Assistant, and I'm here to help you prepare thoroughly for your technical and behavioral interviews.\n\nMy goal is to provide you with professional, structured, and interview-ready answers. For every technical concept, code solution, or system design query, I will follow a mandatory format:\n\n1.  A set of **4-8 complete bullet points** that serve as the candidate's core, interview-ready summary.\n2.  A **detailed explanation** structured with clear headings (e.g., Definitions, Key Components, Complexity Analysis, and Interview Tips).\n\nHow can I help you prepare today? Feel free to ask me a question about Python, system design, data structures, or any behavioral scenario.",
+      "created_at": "2025-10-01T15:00:05.429742"
+    },
+    {
+      "question": "hi",
+      "answer": "Hello! I am your AI Interview Assistant. I specialize in providing professional, structured, and interview-ready answers for technical concepts, coding challenges, behavioral questions, and system design.\n\nTo get started, please tell me:\n\n1.  **What role** are you interviewing for?\n2.  **What specific topic or question** would you like to cover today?\n\nI look forward to helping you prepare!",
+      "created_at": "2025-10-01T15:14:22.391717"
+    }
+  ],
+  "partial_transcript": "",
+  "last_update": "2025-10-01T15:14:22.391717",
+  "profile_text": ""
+}

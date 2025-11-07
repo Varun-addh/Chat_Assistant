@@ -1,14 +1,3 @@
-/data/embeddings_cache/
-/data/model_papers/
-/data/staging/
-/data/vector_db/
-
-# Python caches
-__pycache__/
-*.pyc
-
-# Local env files
-.env
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
