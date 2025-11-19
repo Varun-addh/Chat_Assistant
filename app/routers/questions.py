@@ -200,15 +200,15 @@ async def upload_profile(
 
 @router.get("/history/{session_id}", response_model=SessionHistory)
 async def get_history(session_id: str):
-	try:
-		state = await session_manager.get_required(session_id)
-	except KeyError:
-		raise HTTPException(status_code=404, detail="Session not found")
-	items = [
-		QnA(question=i["question"], answer=i["answer"], created_at=datetime.fromisoformat(i["created_at"]))
-		for i in state.qna
-	]
-	return SessionHistory(session_id=session_id, items=items)
+    state = await session_manager.get(session_id)
+    if not state:
+        return SessionHistory(session_id=session_id, items=[])
+
+    items = [
+        QnA(question=i["question"], answer=i["answer"], created_at=datetime.fromisoformat(i["created_at"]))
+        for i in state.qna
+    ]
+    return SessionHistory(session_id=session_id, items=items)
 
 
 @router.get("/sessions", response_model=SessionList)

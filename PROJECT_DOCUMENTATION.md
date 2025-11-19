@@ -152,7 +152,7 @@ WS /ws/stt/{session_id}
 GROQ_API_KEY=your_groq_key
 GROQ_MODEL=llama-3.1-70b-versatile
 GEMINI_API_KEY=your_gemini_key
-GEMINI_MODEL=gemini-pro
+GEMINI_MODEL=models/gemini-3-pro-preview
 
 # Application Settings
 API_KEY=dev-secret
