@@ -412,6 +412,7 @@ CODE_FORWARD_PROMPT = (
 class LLMService:
 	def __init__(self) -> None:
 		self._client: Groq | None = None
+		self._settings = settings  # Will be overridden by factory
 
 	async def evaluate_code_with_critique(self, problem: str, code: str, language: str, conversation_context: str = "") -> str:
 		"""Ask the model to produce a structured evaluation and approach explanation.
@@ -461,8 +462,8 @@ class LLMService:
 		if conversation_context.strip():
 			prompt += f"\n\nCONVERSATION CONTEXT:\n{conversation_context.strip()}\n\nUse this context to provide more relevant feedback based on the ongoing discussion."
 
-		provider = settings.llm_provider
-		max_tokens = min(settings.groq_max_tokens or 2048, 2048)
+		provider = self._settings.llm_provider
+		max_tokens = min(self._settings.groq_max_tokens or 2048, 2048)
 		
 		def _call():
 			if provider == "groq":
@@ -471,13 +472,13 @@ class LLMService:
 					{"role": "user", "content": f"Problem: {problem or 'N/A'}\nLanguage: {language}\n\nCode:\n```{language}\n{code}\n```"},
 				]
 				return client.chat.completions.create(
-					model=settings.groq_model,
+					model=self._settings.groq_model,
 					messages=messages,
 					temperature=0.3,
 					max_tokens=max_tokens,
 				)
 			elif provider == "gemini":
-				gmodel = client.GenerativeModel(settings.gemini_model)
+				gmodel = client.GenerativeModel(self._settings.gemini_model)
 				user_content = f"Problem: {problem or 'N/A'}\nLanguage: {language}\n\nCode:\n```{language}\n{code}\n```"
 				full_prompt = (prompt + "\n\nUser:\n" + user_content).strip()
 				resp = gmodel.generate_content(full_prompt)
@@ -1121,9 +1122,9 @@ class LLMService:
 		)
 
 	def _ensure_client(self):
-		provider = (settings.llm_provider or "groq").lower()
+		provider = (self._settings.llm_provider or "groq").lower()
 		if provider == "groq":
-			api_key = settings.groq_api_key
+			api_key = self._settings.groq_api_key
 			if not api_key:
 				self._client = None
 				return None
@@ -1133,7 +1134,7 @@ class LLMService:
 		elif provider == "gemini":
 			if genai is None:
 				return None
-			api_key = settings.gemini_api_key
+			api_key = self._settings.gemini_api_key
 			if not api_key:
 				return None
 			# For gemini we return a configured module handle to keep usage simple
@@ -1144,11 +1145,11 @@ class LLMService:
 
 	@property
 	def enabled(self) -> bool:
-		provider = (settings.llm_provider or "groq").lower()
+		provider = (self._settings.llm_provider or "groq").lower()
 		if provider == "groq":
-			return bool(settings.groq_api_key)
+			return bool(self._settings.groq_api_key)
 		if provider == "gemini":
-			return bool(settings.gemini_api_key)
+			return bool(self._settings.gemini_api_key)
 		return False
 
 	async def generate_algorithm_frames(self, problem: str, code: str, language: str) -> List[Dict[str, str]]:
@@ -1188,7 +1189,7 @@ class LLMService:
 			f"```{language}\n{code}\n```\n"
 		)
 
-		provider = (settings.llm_provider or "groq").lower()
+		provider = (self._settings.llm_provider or "groq").lower()
 
 		import anyio, json as _json
 		def _call():
@@ -1198,14 +1199,14 @@ class LLMService:
 					{"role": "user", "content": user_payload},
 				]
 				resp = client.chat.completions.create(
-					model=settings.groq_model,
+					model=self._settings.groq_model,
 					messages=messages,
 					temperature=0.2,
-					max_tokens=min(settings.groq_max_tokens or 1024, 1024),
+					max_tokens=min(self._settings.groq_max_tokens or 1024, 1024),
 				)
 				return resp.choices[0].message.content
 			elif provider == "gemini":
-				gmodel = client.GenerativeModel(settings.gemini_model)
+				gmodel = client.GenerativeModel(self._settings.gemini_model)
 				full_prompt = prompt + "\n\nUser:\n" + user_payload
 				resp = gmodel.generate_content(full_prompt)
 				return getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
@@ -2029,20 +2030,20 @@ class LLMService:
 		# Simple questions - shorter responses
 		simple_indicators = ['what is', 'define', 'explain briefly', 'simple', 'basic']
 		if any(indicator in question_lower for indicator in simple_indicators):
-			return settings.groq_max_tokens_simple
+			return self._settings.groq_max_tokens_simple
 		
 		# Code questions - medium responses
 		code_indicators = ['code', 'implement', 'write', 'function', 'class', 'algorithm']
 		if any(indicator in question_lower for indicator in code_indicators):
-			return settings.groq_max_tokens_code
+			return self._settings.groq_max_tokens_code
 		
 		# Complex topics - longer responses
 		complex_indicators = ['architecture', 'design', 'system', 'compare', 'advantages', 'disadvantages', 'best practices']
 		if any(indicator in question_lower for indicator in complex_indicators):
-			return settings.groq_max_tokens_complex
+			return self._settings.groq_max_tokens_complex
 		
 		# Default medium response (average of simple and code)
-		return (settings.groq_max_tokens_simple + settings.groq_max_tokens_code) // 2
+		return (self._settings.groq_max_tokens_simple + self._settings.groq_max_tokens_code) // 2
 
 	def _get_optimal_token_limit(self, question: str, base_limit: int) -> int:
 		"""Get optimal token limit based on question complexity and base config"""
@@ -2051,7 +2052,7 @@ class LLMService:
 		
 		estimated = self._estimate_response_complexity(question)
 		# Cap at complex token limit to prevent excessive token usage
-		return min(estimated, settings.groq_max_tokens_complex * 2)
+		return min(estimated, self._settings.groq_max_tokens_complex * 2)
 
 	def _style_overrides(self, style_mode: Optional[str], tone: Optional[str], layout: Optional[str], variability: Optional[float], seed: Optional[int]) -> str:
 		"""Construct style and tone overrides for varied, professional outputs."""
@@ -2177,12 +2178,12 @@ class LLMService:
 
 		import anyio
 
-		provider = (settings.llm_provider or "groq").lower()
-		model = settings.groq_model if provider == "groq" else settings.gemini_model
-		temperature = settings.answer_temperature
-		top_p = settings.groq_top_p
-		max_tokens = self._get_optimal_token_limit(question, settings.groq_max_tokens)
-		stream = settings.groq_stream
+		provider = (self._settings.llm_provider or "groq").lower()
+		model = self._settings.groq_model if provider == "groq" else self._settings.gemini_model
+		temperature = self._settings.answer_temperature
+		top_p = self._settings.groq_top_p
+		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens)
+		stream = self._settings.groq_stream
 
 		def build_kwargs(stream_flag: bool):
 			# Build message list with optional recent history for contextual follow-ups
@@ -2234,7 +2235,7 @@ class LLMService:
 					return formatted
 			elif provider == "gemini":
 				# Gemini: use the GenerativeModel with non-streaming first
-				model_id = settings.gemini_model
+				model_id = self._settings.gemini_model
 				gmodel = client.GenerativeModel(model_id)
 				messages = [
 					{"role": "system", "content": prompt},
@@ -2253,7 +2254,7 @@ class LLMService:
 
 	async def stream_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None) -> AsyncIterator[str]:
 		client = self._ensure_client()
-		provider = (settings.llm_provider or "groq").lower()
+		provider = (self._settings.llm_provider or "groq").lower()
 		prompt = system_prompt or CODE_FORWARD_PROMPT
 		if profile_text:
 			prompt = (
@@ -2280,9 +2281,9 @@ class LLMService:
 			return
 
 		# Use dynamic token limit for streaming as well
-		max_tokens = self._get_optimal_token_limit(question, settings.groq_max_tokens)
+		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens)
 		# For streaming, use a bit less to ensure faster response
-		max_tokens = min(max_tokens, settings.groq_max_tokens_code)
+		max_tokens = min(max_tokens, self._settings.groq_max_tokens_code)
 
 		def _call_stream():
 			messages: List[Dict[str, str]] = [
@@ -2302,9 +2303,9 @@ class LLMService:
 			messages.append({"role": "user", "content": question})
 			if provider == "groq":
 				return client.chat.completions.create(
-					model=settings.groq_model,
+					model=self._settings.groq_model,
 					messages=messages,
-					temperature=settings.answer_temperature,
+					temperature=self._settings.answer_temperature,
 					max_tokens=max_tokens,
 					stream=True,
 				)
@@ -2324,7 +2325,7 @@ class LLMService:
 		elif provider == "gemini":
 			# Non-streaming fallback: yield once
 			def _one_shot():
-				gmodel = client.GenerativeModel(settings.gemini_model)
+				gmodel = client.GenerativeModel(self._settings.gemini_model)
 				full_prompt = (prompt + "\n\nUser: " + question).strip()
 				resp = gmodel.generate_content(full_prompt)
 				return getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
@@ -2334,4 +2335,27 @@ class LLMService:
 				yield piece
 
 
-llm_service = LLMService()
+
+# Factory to get an LLMService for a specific provider (gemini/groq)
+_llm_service_instances = {}
+def get_llm_service(provider: str = None) -> LLMService:
+	"""
+	Returns an LLMService instance for the given provider ('gemini' or 'groq').
+	If provider is None, uses settings.llm_provider.
+	Caches instances per provider.
+	"""
+	from app.config import settings as _settings
+	key = (provider or _settings.llm_provider or "gemini").lower()
+	if key not in _llm_service_instances:
+		# Patch settings for this instance
+		import copy
+		inst_settings = copy.deepcopy(_settings)
+		inst_settings.llm_provider = key
+		svc = LLMService()
+		# Patch the settings used by this instance
+		svc._settings = inst_settings
+		_llm_service_instances[key] = svc
+	return _llm_service_instances[key]
+
+# Default global instance (uses settings.llm_provider, which should be Gemini for answer card)
+llm_service = get_llm_service("gemini")

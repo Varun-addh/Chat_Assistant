@@ -16,10 +16,12 @@ from app.services.llm_service import llm_service
 from app.services.interview_intelligence_service import (
     interview_intelligence_service,
     base_interview_service,
-    enhanced_interview_service
+    enhanced_interview_service,
+    ultra_production_service
 )
 
-from app.services.interview_intelligence_service import ultra_production_service
+from app.routers.mock_interview import router as mock_interview_router
+from app.services.mock_interview_service import initialize_mock_interview_service
 
 
 configure_logging()
@@ -28,25 +30,34 @@ auditor.configure(settings.analytics_path)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-	"""Manage application lifespan: startup and shutdown."""
-	# Startup - initialize enhanced service first, then share its resources with base
-	await enhanced_interview_service.initialize()
-	# Share vector client and embed model to avoid Qdrant lock conflicts
-	base_interview_service.vector_client = enhanced_interview_service.vector_client
-	base_interview_service.embed_model = enhanced_interview_service.embed_model
-	base_interview_service.collection_name = enhanced_interview_service.collection_name
-	
-	# Share resources with ultra service BEFORE initializing (to avoid Qdrant lock conflict)
-	ultra_production_service.vector_client = enhanced_interview_service.vector_client
-	ultra_production_service.embed_model = enhanced_interview_service.embed_model
-	ultra_production_service.collection_name = enhanced_interview_service.collection_name
-	
-	# Initialize ultra production service (will skip creating new vector client since we shared it)
-	await ultra_production_service.initialize()
-	
-	yield
-	# Shutdown - graceful cleanup (only close enhanced, base and ultra share resources)
-	await enhanced_interview_service.close()
+    """Manage application lifespan: startup and shutdown."""
+    # Startup - initialize enhanced service first, then share its resources with base
+    await enhanced_interview_service.initialize()
+    
+    # Share vector client and embed model to avoid Qdrant lock conflicts
+    base_interview_service.vector_client = enhanced_interview_service.vector_client
+    base_interview_service.embed_model = enhanced_interview_service.embed_model
+    base_interview_service.collection_name = enhanced_interview_service.collection_name
+    
+    # Share resources with ultra service BEFORE initializing (to avoid Qdrant lock conflict)
+    ultra_production_service.vector_client = enhanced_interview_service.vector_client
+    ultra_production_service.embed_model = enhanced_interview_service.embed_model
+    ultra_production_service.collection_name = enhanced_interview_service.collection_name
+    
+    # Initialize ultra production service (will skip creating new vector client since we shared it)
+    await ultra_production_service.initialize()
+    
+    # Initialize mock interview service HERE (inside lifespan, after other services are ready)
+    from app.services.llm_service import get_llm_service
+    initialize_mock_interview_service(
+        llm_service=get_llm_service("groq"),
+        interview_intelligence_service=interview_intelligence_service
+    )
+    
+    yield
+    
+    # Shutdown - graceful cleanup (only close enhanced, base and ultra share resources)
+    await enhanced_interview_service.close()
 
 
 app = FastAPI(
@@ -84,3 +95,8 @@ app.include_router(diagrams_router, prefix="/api", tags=["diagrams"])
 app.include_router(evaluate_router, prefix="/api", tags=["evaluation"]) 
 app.include_router(interview_intelligence, prefix="/api/intelligence", tags=["interview-intelligence"])
 app.include_router(ws_router, tags=["realtime"]) 
+app.include_router(
+    mock_interview_router,
+    prefix="/api/mock-interview",
+    tags=["mock-interview"]
+)

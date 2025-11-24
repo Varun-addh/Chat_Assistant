@@ -37,3 +37,18 @@ __pycache__/
 .eggs/
 pip-wheel-metadata/
 
+# Application data (runtime-generated)
+data/
+
+# Logs
+debug.log
+*.log
+
+# Test/Demo files
+test_*.py
+*_demo.html
+*_tester.html
+
+# Generated diagrams
+*.svg
+
