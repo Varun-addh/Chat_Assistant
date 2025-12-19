@@ -41,15 +41,17 @@ RUN mkdir -p /app/data/history \
              /app/data/qdrant \
     && chmod -R 777 /app/data
 
-# Create and use non-root user for security
-RUN useradd -m appuser && chown -R appuser /app
-USER appuser
+# Create and use non-root user for security (Hugging Face requires UID 1000)
+RUN useradd -m -u 1000 user
+RUN chown -R user:user /app
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
 
-EXPOSE 8000
+EXPOSE 7860
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:7860/health || exit 1
 
 # Production server command
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]
