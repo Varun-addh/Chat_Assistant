@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Header
+from typing import Optional, List
 from fastapi.responses import StreamingResponse
 from datetime import datetime
 
@@ -14,7 +15,7 @@ import asyncio
 router = APIRouter()
 
 
-async def _auto_evaluate_if_code(session_id: str, question: str, answer: str) -> None:
+async def _auto_evaluate_if_code(session_id: str, question: str, answer: str, api_key: Optional[str] = None) -> None:
 	"""Auto-evaluate if the answer contains code blocks."""
 	import re
 	
@@ -47,7 +48,7 @@ async def _auto_evaluate_if_code(session_id: str, question: str, answer: str) ->
 				conversation_context += f"Q: {item.get('question', '')}\nA: {item.get('answer', '')}\n"
 		
 		# Run evaluation
-		await evaluate_code(question, best_code, best_lang, conversation_context)
+		await evaluate_code(question, best_code, best_lang, conversation_context, api_key=api_key)
 		
 		# Log auto-evaluation
 		await auditor.log({
@@ -73,7 +74,19 @@ async def create_session():
 
 
 @router.post("/question")
-async def submit_question(payload: QuestionIn):
+async def submit_question(
+	payload: QuestionIn,
+	x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+	authorization: Optional[str] = Header(None, alias="Authorization")
+):
+	# Extract API key from headers
+	api_key = x_api_key
+	if not api_key and authorization:
+		if authorization.startswith("Bearer "):
+			api_key = authorization.split(" ", 1)[1] if " " in authorization else authorization
+		else:
+			api_key = authorization
+	
 	try:
 		state = await session_manager.get_required(payload.session_id)
 	except KeyError:
@@ -100,6 +113,7 @@ async def submit_question(payload: QuestionIn):
 				layout=payload.layout,
 				variability=payload.variability,
 				seed=payload.seed,
+				api_key=api_key,
 			):
 				collected.append(chunk)
 				yield f"data: {chunk}\n\n"
@@ -114,7 +128,7 @@ async def submit_question(payload: QuestionIn):
 			})
 			
 			# Auto-evaluate if response contains code
-			asyncio.create_task(_auto_evaluate_if_code(state.session_id, payload.question, full_answer))
+			asyncio.create_task(_auto_evaluate_if_code(state.session_id, payload.question, full_answer, api_key))
 			
 			yield "event: end\n\n"
 
@@ -132,6 +146,7 @@ async def submit_question(payload: QuestionIn):
 		layout=payload.layout,
 		variability=payload.variability,
 		seed=payload.seed,
+		api_key=api_key,
 	)
 	await session_manager.append_qna(state.session_id, payload.question, answer)
 	await auditor.log({
@@ -142,7 +157,7 @@ async def submit_question(payload: QuestionIn):
 	})
 	
 	# Auto-evaluate if response contains code
-	asyncio.create_task(_auto_evaluate_if_code(state.session_id, payload.question, answer))
+	asyncio.create_task(_auto_evaluate_if_code(state.session_id, payload.question, answer, api_key))
 	
 	return AnswerOut(answer=answer, created_at=datetime.utcnow())
 

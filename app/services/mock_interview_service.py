@@ -318,7 +318,8 @@ class MockInterviewService:
     async def get_hint(
         self,
         session_id: str,
-        hint_level: int = 1
+        hint_level: int = 1,
+        api_key: Optional[str] = None
     ) -> Optional[str]:
         """
         Get a progressive hint for the current question
@@ -365,7 +366,7 @@ Expected points: {expected_str}
 Provide a {hint_type} without giving away the full answer.
 Keep it under 100 words."""
         
-        hint = await self.llm_service.generate_answer(hint_prompt)
+        hint = await self.llm_service.generate_answer(hint_prompt, api_key=api_key)
         
         logger.info(f"Generated hint level {hint_level} for session {session_id}, question {question_id}")
         
@@ -374,7 +375,8 @@ Keep it under 100 words."""
     async def submit_answer(
         self,
         session_id: str,
-        answer: UserAnswer
+        answer: UserAnswer,
+        api_key: Optional[str] = None
     ) -> EvaluationResult:
         """
         Submit answer and get AI evaluation
@@ -404,7 +406,8 @@ Keep it under 100 words."""
         # Evaluate the answer
         evaluation = await self._evaluate_answer(
             question=current_question,
-            answer=answer
+            answer=answer,
+            api_key=api_key
         )
         
         # Store answer and evaluation
@@ -428,7 +431,8 @@ Keep it under 100 words."""
     async def _evaluate_answer(
         self,
         question: InterviewQuestion,
-        answer: UserAnswer
+        answer: UserAnswer,
+        api_key: Optional[str] = None
     ) -> EvaluationResult:
         """
         Use LLM to evaluate user's answer
@@ -453,7 +457,7 @@ Keep it under 100 words."""
             self.llm_service._settings.groq_max_tokens = 4000  # Increased to 4000 for complete detailed feedback with enhanced fields
             
             try:
-                response = await self.llm_service.generate_answer(prompt)
+                response = await self.llm_service.generate_answer(prompt, api_key=api_key)
             finally:
                 # Restore original setting
                 self.llm_service._settings.groq_max_tokens = original_max_tokens
@@ -578,19 +582,124 @@ CRITICAL RULES:
         
         return prompt
     
+    def _repair_malformed_json(self, text: str) -> str:
+        """Ultra-robust JSON repair that handles all common LLM errors"""
+        import re
+        
+        # Step 1: Extract JSON if embedded in other text
+        if not text.strip().startswith('{'):
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                text = text[start:end+1]
+        
+        # Step 2: Escape control characters (newlines, tabs in string values)
+        # Simple approach: directly replace control chars in the entire text
+        # Then we'll restore structural newlines
+        
+        # First, escape all control characters
+        control_char_map = {
+            '\n': '<<NEWLINE>>',
+            '\r': '<<RETURN>>',
+            '\t': '<<TAB>>',
+            '\b': '<<BACKSPACE>>',
+            '\f': '<<FORMFEED>>'
+        }
+        
+        # Replace control chars with placeholders
+        for char, placeholder in control_char_map.items():
+            text = text.replace(char, placeholder)
+        
+        # Now restore structural JSON formatting (newlines between top-level elements)
+        # These are safe and needed for readability
+        text = text.replace('<<NEWLINE>>  ', '\n  ')  # Indentation
+        text = text.replace('<<NEWLINE>>}', '\n}')    # Closing braces
+        text = text.replace('<<NEWLINE>>{', '\n{')    # Opening braces
+        text = text.replace('{<<NEWLINE>>', '{\n')    # After opening brace
+        text = text.replace(',<<NEWLINE>>', ',\n')    # After commas
+        text = text.replace('[<<NEWLINE>>', '[\n')    # After opening bracket
+        text = text.replace('<<NEWLINE>>]', '\n]')    # Before closing bracket
+        text = text.replace(': <<NEWLINE>>', ': \n')  # After colons
+        
+        # Convert remaining placeholders to escaped versions (these are inside strings)
+        text = text.replace('<<NEWLINE>>', '\\n')
+        text = text.replace('<<RETURN>>', '\\r')
+        text = text.replace('<<TAB>>', '\\t')
+        text = text.replace('<<BACKSPACE>>', '\\b')
+        text = text.replace('<<FORMFEED>>', '\\f')
+
+        
+        # Step 3: Fix trailing backslash-quote pattern: "text\" -> "text"
+        text = re.sub(r'\\"\s*([,\]\}])', r'"\1', text)
+        
+        # Step 4: Fix orphaned array items: [...], "orphan", "next_key":
+        # This is the MOST COMMON error
+        array_fields = ['strengths', 'weaknesses', 'missing_points', 'improvement_suggestions', 
+                       'follow_up_questions', 'key_takeaways', 'recommended_resources']
+        
+        for field in array_fields:
+            # Pattern: "field": [...], "orphan1", "orphan2", "next_field":
+            # Fix: move orphans inside the array
+            pattern = rf'("{field}"\s*:\s*\[[^\]]*\])\s*,\s*((?:"[^"]*"\s*,\s*)+)("[\w_]+":\s*)'
+            
+            def fix_orphans(match):
+                array_part = match.group(1)  # "field": [...]
+                orphans = match.group(2).rstrip(', ')  # "orphan1", "orphan2"
+                next_field = match.group(3)  # "next_field":
+                
+                # Remove closing bracket
+                array_without_close = array_part.rstrip(']').rstrip()
+                # Add comma if array wasn't empty
+                if not array_without_close.endswith('['):
+                    array_without_close += ','
+                # Add orphans and close bracket
+                fixed = f'{array_without_close}{orphans}], {next_field}'
+                return fixed
+            
+            text = re.sub(pattern, fix_orphans, text)
+        
+        # Step 5: Fix incomplete JSON (missing closing braces)
+        open_braces = text.count('{')
+        close_braces = text.count('}')
+        if open_braces > close_braces:
+            text += '}' * (open_braces - close_braces)
+        
+        open_brackets = text.count('[')
+        close_brackets = text.count(']')
+        if open_brackets > close_brackets:
+            text += ']' * (open_brackets - close_brackets)
+        
+        # Step 6: Remove blank lines (JSON doesn't allow them)
+        text = re.sub(r'\n\s*\n+', '\n', text)
+        
+        # Step 7: Fix double commas
+        text = re.sub(r',\s*,', ',', text)
+        
+        # Step 8: Fix trailing commas before closing brackets/braces
+        text = re.sub(r',\s*\]', ']', text)
+        text = re.sub(r',\s*\}', '}', text)
+        
+        # Step 9: Fix missing commas between array items
+        text = re.sub(r'"\s+"', '", "', text)
+        
+        # Step 10: Fix broken nested objects in arrays
+        text = re.sub(r'\}\s+\{', '}, {', text)
+        
+        return text
+    
     def _parse_evaluation_response(
         self,
         response: str,
         question: InterviewQuestion,
         answer: UserAnswer
     ) -> EvaluationResult:
-        """Parse LLM response into EvaluationResult"""
+        """Parse LLM response into EvaluationResult with ultra-robust error handling"""
         
         # Clean response
         response = response.strip()
         
         # Log raw response for debugging
-        logger.debug(f"Raw LLM evaluation response: {response[:500]}...")
+        logger.debug(f"Raw LLM evaluation response (first 500 chars): {response[:500]}")
         
         # Remove markdown code fences
         if "```json" in response:
@@ -600,300 +709,62 @@ CRITICAL RULES:
         
         response = response.strip()
         
-        # FIX: Remove invalid control characters (newlines, tabs in strings)
-        # This is the main fix for "Invalid control character" errors
-        import re
-        import json as json_module
+        # ===== BULLETPROOF JSON REPAIR SYSTEM =====
+        response = self._repair_malformed_json(response)
         
-        # AGGRESSIVE FIX: Replace ALL control characters with escaped versions
-        # This handles cases where the LLM puts literal newlines/tabs in string values
-        def escape_control_chars(text: str) -> str:
-            """Escape all control characters in the text"""
-            # Replace control characters with their escaped equivalents
-            replacements = {
-                '\n': '\\n',
-                '\r': '\\r',
-                '\t': '\\t',
-                '\b': '\\b',
-                '\f': '\\f',
-                '\v': '\\v',
-                '\0': '\\0'
-            }
-            for char, escaped in replacements.items():
-                text = text.replace(char, escaped)
-            return text
-        
-        # Apply to the entire response
-        response = escape_control_chars(response)
-        
-        # Now restore structural newlines (between top-level keys)
-        # These are needed for JSON formatting but shouldn't be inside string values
-        response = response.replace('\\n  ', '\n  ')  # Restore indentation
-        response = response.replace('\\n}', '\n}')    # Restore closing braces
-        response = response.replace('\\n{', '\n{')    # Restore opening braces  
-        response = response.replace('{\\n', '{\n')    # After opening brace
-        response = response.replace(',\\n', ',\n')    # After commas at top level
-        response = response.replace('[\\n', '[\n')    # After opening bracket
-        response = response.replace('\\n]', '\n]')    # Before closing bracket
-        response = response.replace(': \\n', ': \n')  # After colons
-        
-        # CRITICAL FIX: The LLM is generating things like:
-        # "point": "No answer provided\",
-        # This is broken JSON - need to fix dangling backslash-quotes
-        
-        # Remove any backslash before quote-comma or quote-newline patterns
-        response = re.sub(r'\\"\s*,', '",', response)  # Fix: \" , -> " ,
-        response = re.sub(r'\\"\s*\n', '"\n', response)  # Fix: \" \n -> " \n
-        response = re.sub(r'\\"\s*}', '"}', response)  # Fix: \" } -> " }
-        response = re.sub(r'\\"\s*]', '"]', response)  # Fix: \" ] -> " ]
-        
-        # Fix pattern: "text", "other_key": should be "text", \n "other_key":
-        # This happens when the LLM forgets to escape quotes properly
-        response = re.sub(r'([^\\])"(\s*,\s*)"([^"]+)"(\s*:)', r'\1"\2\n"\3"\4', response)
-        
-        # CRITICAL FIX: Remove blank lines between JSON properties
-        # The LLM adds blank lines for readability but JSON doesn't allow them
-        # Pattern: },\n\n"key": -> },\n"key":
-        response = re.sub(r',\n\n+', ',\n', response)  # Remove multiple newlines after commas
-        response = re.sub(r'{\n\n+', '{\n', response)  # Remove blank lines after opening braces
-        response = re.sub(r'\n\n+}', '\n}', response)  # Remove blank lines before closing braces
-        response = re.sub(r'\[\n\n+', '[\n', response)  # Remove blank lines after opening brackets
-        response = re.sub(r'\n\n+]', '\n]', response)  # Remove blank lines before closing brackets
-        
-        # Try to extract JSON if there's extra text
-        if not response.startswith('{'):
-            # Find first { and last }
-            start = response.find('{')
-            end = response.rfind('}')
-            if start != -1 and end != -1 and end > start:
-                response = response[start:end+1]
-        
-        # PRE-PROCESS: Fix broken arrays BEFORE parsing  
-        # Use simple string replacement - much more reliable than regex
-        import re
-        
-        # NEW: Ultra-aggressive fix for the common pattern: ["item"], "item2", "item3"
-        # This fixes the exact error we're seeing
-        array_fields = ['strengths', 'weaknesses', 'missing_points', 'improvement_suggestions', 'follow_up_questions']
-        all_field_names = array_fields + ['correctness', 'completeness', 'clarity', 'confidence', 'technical_depth', 'performance_summary', 'detailed_feedback', 'rating_category']
-        
-        # First pass: Fix the most common pattern where items are outside the array
-        for field in array_fields:
-            # Pattern: "field": [...], "orphan1", "orphan2", "next_field":
-            # We need to move orphan1, orphan2 inside the array
-            pattern = rf'("{field}"\s*:\s*\[[^\]]*\])\s*((?:,\s*"[^"]*")+)\s*,\s*("(?:{"|".join(all_field_names)})")'
-            
-            def fix_orphans(match):
-                array_part = match.group(1)  # "field": [...]
-                orphans = match.group(2)      # , "orphan1", "orphan2"
-                next_field = match.group(3)   # "next_field"
-                
-                # Remove the closing bracket from array
-                array_without_close = array_part.rstrip(']').rstrip()
-                # Add orphans inside the array
-                fixed_array = array_without_close + orphans + ']'
-                # Add comma before next field
-                return fixed_array + ', ' + next_field
-            
-            response = re.sub(pattern, fix_orphans, response)
-        
-        # Fix pattern: ],"orphan" -> ,"orphan"]
-        # Do this repeatedly for each array field
-        max_fixes = 20
-        fixes_made = 0
-        
-        for _ in range(max_fixes):  # Max 20 iterations to prevent infinite loop
-            original = response
-            
-            for field in array_fields:
-                # Look for pattern: "field":[...],orphan
-                # Find the array closing ] and check if there's an orphaned string after it
-                
-                for next_field in all_field_names:
-                    # Pattern: ],"orphan_text","next_field":
-                    # We want to move "orphan_text" before the ]
-                    
-                    old_pattern = f'],"{next_field}":'
-                    # Look backwards from this pattern to find orphaned strings
-                    
-                    if old_pattern in response:
-                        # Find all occurrences
-                        pos = 0
-                        while True:
-                            pos = response.find(old_pattern, pos)
-                            if pos == -1:
-                                break
-                            
-                            # Look backwards for a quoted string
-                            before = response[:pos]
-                            # Find the last quoted string before this position
-                            match = re.search(r'],\s*("(?:[^"]|\\")*")\s*,\s*$', before)
-                            
-                            if match:
-                                orphan_text = match.group(1)
-                                # Check if this orphan comes after one of our array fields
-                                field_check = re.search(f'("{"|".join(array_fields)}"\\s*:\\s*\\[[^\\]]*){re.escape(orphan_text)}', before)
-                                
-                                if field_check:
-                                    # Move the orphan inside the array
-                                    # Replace: ...],[orphan],"next -> ...,orphan],"next
-                                    response = before[:match.start()] + ',' + orphan_text + '],"' + next_field + '":' + response[pos+len(old_pattern):]
-                                    fixes_made += 1
-                                    break
-                            
-                            pos += 1
-            
-            # If no changes were made, we're done
-            if response == original:
-                break
-        
-        if fixes_made > 0:
-            logger.debug(f"Fixed {fixes_made} orphaned array strings")
-        
-        # Also fix plain strings for array fields: "field": "value" -> "field": ["value"]
-        for field in array_fields:
-            pattern = f'("{field}"\\s*:\\s*)"([^"\\[]+)"'
-            if not re.search(f'"{field}"\\s*:\\s*\\[', response):
-                response = re.sub(pattern, r'\1["\2"]', response, count=1)
-        
+        # Try parsing the repaired JSON
         try:
             data = json.loads(response)
+            logger.debug("Successfully parsed JSON on first attempt after repair")
             
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse evaluation JSON: {e}")
-            logger.error(f"Problematic response: {response[:1000]}")
+            logger.warning(f"JSON parse failed after repair: {e}")
+            logger.debug(f"Problematic JSON (first 1000 chars): {response[:1000]}")
             
-            # Try to recover from malformed JSON
-            data = None
-            
-            # Strategy 0: Fix broken arrays more aggressively
-            if 'Expecting' in str(e) and data is None:
-                try:
-                    # Manually find and fix broken arrays
-                    fixed_response = response
-                    for field in array_fields:
-                        # Find each occurrence of the field
-                        field_pattern = f'"{field}"\\s*:\\s*\\['
-                        matches = list(re.finditer(field_pattern, fixed_response))
-                        
-                        for match in reversed(matches):  # Process from end to avoid offset issues
-                            start = match.end()
-                            # Find the matching closing bracket or next field
-                            depth = 1
-                            i = start
-                            in_string = False
-                            array_end = -1
-                            
-                            while i < len(fixed_response) and depth > 0:
-                                char = fixed_response[i]
-                                if char == '"' and (i == 0 or fixed_response[i-1] != '\\\\'):
-                                    in_string = not in_string
-                                elif not in_string:
-                                    if char == '[':
-                                        depth += 1
-                                    elif char == ']':
-                                        depth -= 1
-                                        if depth == 0:
-                                            array_end = i
-                                i += 1
-                            
-                            if array_end > 0:
-                                # Check if there are orphaned strings after the ]
-                                after_array = fixed_response[array_end+1:array_end+100]
-                                orphan_pattern = r'^\\s*,\\s*"([^"]*)"'
-                                orphans = re.findall(orphan_pattern, after_array)
-                                
-                                if orphans:
-                                    # Insert orphaned strings back into the array
-                                    array_content = fixed_response[start:array_end]
-                                    for orphan in orphans:
-                                        if array_content.strip():
-                                            array_content += f', "{orphan}"'
-                                        else:
-                                            array_content = f'"{orphan}"'
-                                    
-                                    # Remove orphaned strings from after the array
-                                    after_cleaned = re.sub(r'^(\\s*,\\s*"[^"]*")+', '', after_array)
-                                    
-                                    # Reconstruct
-                                    fixed_response = (
-                                        fixed_response[:start] +
-                                        array_content +
-                                        ']' +
-                                        after_cleaned +
-                                        fixed_response[array_end+len(after_array)+1:]
-                                    )
+            # FALLBACK 1: Try to fix the specific error location
+            try:
+                # Extract the error position
+                error_pos = e.pos if hasattr(e, 'pos') else None
+                if error_pos:
+                    # Show context around the error
+                    start = max(0, error_pos - 100)
+                    end = min(len(response), error_pos + 100)
+                    context = response[start:end]
+                    logger.debug(f"Error context: ...{context}...")
                     
-                    data = json.loads(fixed_response)
-                    logger.warning("Recovered from broken arrays using aggressive repair")
-                except Exception as repair_err:
-                    logger.debug(f"Aggressive array repair failed: {repair_err}")
-            
-            # Strategy 1: If unterminated string, truncate to last complete field
-            if 'Unterminated string' in str(e) or ('Expecting' in str(e) and data is None):
-                lines = response.split('\n')
-                # Try progressively removing lines from the end
-                for i in range(len(lines)-1, max(0, len(lines)-15), -1):
-                    truncated = '\n'.join(lines[:i])
-                    # Remove trailing comma and incomplete content
-                    truncated = truncated.rstrip()
-                    if truncated.endswith(','):
-                        truncated = truncated[:-1]
-                    # Remove incomplete string if present
-                    if truncated.count('"') % 2 != 0:
-                        # Odd number of quotes - remove last incomplete string
-                        last_quote = truncated.rfind('"')
-                        if last_quote > 0:
-                            # Find the field name before this quote
-                            before_quote = truncated[:last_quote]
-                            last_colon = before_quote.rfind(':')
-                            if last_colon > 0:
-                                truncated = truncated[:last_colon-1].rstrip(',') if last_colon > 0 else truncated[:last_quote]
-                    # Add closing brace if missing
-                    if truncated.count('{') > truncated.count('}'):
-                        truncated = truncated.rstrip(',') + '\n}'
-                    try:
-                        data = json.loads(truncated)
-                        logger.warning(f"Recovered from truncated JSON by removing {len(lines)-i} lines")
-                        break
-                    except:
-                        continue
-            
-            # Strategy 2: Try to repair common issues
-            if data is None:
-                try:
-                    import re
-                    repaired = response
-                    # Add closing brace if missing
-                    if repaired.count('{') > repaired.count('}'):
-                        repaired = repaired + '}'
-                    data = json.loads(repaired)
-                    logger.warning("Recovered from JSON by adding closing brace")
-                except:
-                    pass
-            
-            # Strategy 3: Fix string values that should be arrays
-            if data is None:
-                try:
-                    import re
-                    # Convert string values to arrays for list fields
-                    # Pattern: "field":"value" -> "field":["value"]
-                    array_fields = ['strengths', 'weaknesses', 'missing_points', 'improvement_suggestions', 'follow_up_questions']
-                    repaired = response
-                    for field in array_fields:
-                        # Match "field":"value" or "field":"value1","value2" patterns
-                        pattern = f'("{field}"\s*:\s*)"([^"]+)"'
-                        repaired = re.sub(pattern, r'\1["\2"]', repaired)
-                    data = json.loads(repaired)
-                    logger.warning("Recovered from JSON by converting strings to arrays")
-                except Exception as repair_error:
-                    logger.debug(f"Array repair failed: {repair_error}")
-                    pass
-            
-            # If still failed, fall back to basic evaluation
-            if data is None:
-                logger.error(f"Could not recover from JSON error, using basic evaluation")
-                return self._basic_evaluation(question, answer)
+                    # Try to fix common issues at error position
+                    char_at_error = response[error_pos] if error_pos < len(response) else 'EOF'
+                    
+                    # Fix unterminated string
+                    if 'Unterminated string' in str(e):
+                        # Find the last quote before error and add closing quote
+                        last_quote = response.rfind('"', 0, error_pos)
+                        if last_quote != -1:
+                            response = response[:error_pos] + '"' + response[error_pos:]
+                    
+                    # Fix expecting delimiter
+                    elif 'Expecting' in str(e) and 'delimiter' in str(e):
+                        # Missing comma or colon
+                        if char_at_error in ['"', '{', '[']:
+                            response = response[:error_pos] + ',' + response[error_pos:]
+                        elif char_at_error.isalpha():
+                            response = response[:error_pos] + ':' + response[error_pos:]
+                    
+                    # Try parsing again
+                    data = json.loads(response)
+                    logger.info("Successfully recovered from JSON error with targeted fix")
+                    
+            except Exception:
+                # FALLBACK 2: Use regex to extract key fields
+                logger.warning("Attempting regex extraction of key fields")
+                data = self._extract_fields_with_regex(response)
+                
+                if data:
+                    logger.info("Successfully extracted fields using regex")
+                else:
+                    # FALLBACK 3: Use basic evaluation
+                    logger.error("All parsing attempts failed, using basic evaluation")
+                    return self._basic_evaluation(question, answer)
         
         # Build EvaluationResult from parsed data
         try:
@@ -979,6 +850,55 @@ CRITICAL RULES:
             logger.error(f"Failed to build EvaluationResult from data: {e}")
             logger.error(f"Data: {data}")
             return self._basic_evaluation(question, answer)
+    
+    def _extract_fields_with_regex(self, text: str) -> Optional[Dict]:
+        """Extract evaluation fields using regex as last resort"""
+        import re
+        
+        try:
+            data = {}
+            
+            # Extract numeric scores
+            for field in ['correctness', 'completeness', 'clarity', 'confidence', 'technical_depth']:
+                pattern = rf'"{field}"\s*:\s*([0-9.]+)'
+                match = re.search(pattern, text)
+                if match:
+                    data[field] = float(match.group(1))
+                else:
+                    data[field] = 5.0  # Default
+            
+            # Extract string fields
+            for field in ['performance_summary', 'detailed_feedback', 'rating_category', 'model_answer']:
+                pattern = rf'"{field}"\s*:\s*"([^"]+)"'
+                match = re.search(pattern, text)
+                if match:
+                    data[field] = match.group(1).replace('\\n', '\n')
+                else:
+                    data[field] = "No data available"
+            
+            # Extract array fields
+            for field in ['strengths', 'weaknesses', 'missing_points', 'improvement_suggestions', 
+                         'follow_up_questions', 'key_takeaways', 'recommended_resources']:
+                pattern = rf'"{field}"\s*:\s*\[(.*?)\]'
+                match = re.search(pattern, text, re.DOTALL)
+                if match:
+                    # Extract quoted strings from array
+                    items = re.findall(r'"([^"]+)"', match.group(1))
+                    data[field] = items if items else []
+                else:
+                    data[field] = []
+            
+            # Extract nested objects (simplified - just get first if exists)
+            data['detailed_strengths'] = []
+            data['detailed_weaknesses'] = []
+            data['answer_comparisons'] = []
+            
+            logger.info(f"Regex extraction recovered {len(data)} fields")
+            return data
+            
+        except Exception as e:
+            logger.error(f"Regex extraction failed: {e}")
+            return None
     
     def _basic_evaluation(
         self,

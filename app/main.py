@@ -23,6 +23,10 @@ from app.services.interview_intelligence_service import (
 from app.routers.mock_interview import router as mock_interview_router
 from app.services.mock_interview_service import initialize_mock_interview_service
 
+# Practice Mode imports
+from app.routers.practice_mode import router as practice_router, init_practice_mode
+from app.config_practice_mode import get_practice_config
+
 
 configure_logging()
 auditor.configure(settings.analytics_path)
@@ -54,9 +58,28 @@ async def lifespan(app: FastAPI):
         interview_intelligence_service=interview_intelligence_service
     )
     
+    # Initialize Practice Mode
+    if settings.gemini_api_key and settings.practice_mode_enabled:
+        init_practice_mode(
+            gemini_api_key=settings.gemini_api_key,
+            gemini_model=settings.gemini_model,
+            config=get_practice_config()
+        )
+        print("✅ Practice Mode initialized successfully!")
+    else:
+        if not settings.gemini_api_key:
+            print("⚠️  Practice Mode not initialized (missing GEMINI_API_KEY)")
+        else:
+            print("⚠️  Practice Mode disabled in settings")
+    
     yield
     
-    # Shutdown - graceful cleanup (only close enhanced, base and ultra share resources)
+    # Shutdown - graceful cleanup
+    # Clean up practice mode TTS resources
+    from app.routers.practice_mode import cleanup_practice_mode
+    cleanup_practice_mode()
+    
+    # Close interview intelligence services (only close enhanced, base and ultra share resources)
     await enhanced_interview_service.close()
 
 
@@ -66,15 +89,14 @@ app = FastAPI(
 	lifespan=lifespan,
 )
 
-# CORS
+# CORS Middleware
 app.add_middleware(
-	CORSMiddleware,
-	allow_origins=settings.cors_allow_origins,
-	# Wildcard origins require credentials to be False per CORS spec
-	allow_credentials=False if settings.cors_allow_origins == ["*"] else True,
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-	expose_headers=["*"],
+    expose_headers=["*"],
     max_age=3600,
 )
 
@@ -88,9 +110,8 @@ async def health() -> JSONResponse:
 	})
 
 # Routers
-app.include_router(history_router, prefix="/api/history_tabs", tags=["history-tabs"])
-app.include_router(questions_router, prefix="/api", tags=["questions"]) 
-app.include_router(history_router, prefix="/api/intel-history", tags=["intel-history"])
+app.include_router(history_router, prefix="/api/history", tags=["history"])
+app.include_router(questions_router, prefix="/api", tags=["questions"])
 app.include_router(diagrams_router, prefix="/api", tags=["diagrams"])
 app.include_router(evaluate_router, prefix="/api", tags=["evaluation"]) 
 app.include_router(interview_intelligence, prefix="/api/intelligence", tags=["interview-intelligence"])
@@ -100,3 +121,4 @@ app.include_router(
     prefix="/api/mock-interview",
     tags=["mock-interview"]
 )
+app.include_router(practice_router)  # Practice Mode router

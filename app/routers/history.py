@@ -105,9 +105,23 @@ async def get_history(
         all_tabs = await history.get_all_tabs()
         total = len(all_tabs)
         
+        # Filter out any empty/placeholder tabs (defensive, should not be needed if backend is correct)
+        def is_placeholder_tab(tab):
+            # Consider a tab a placeholder if ALL fields are empty/default
+            return (
+                not tab.get('tab_id') and
+                not tab.get('query') and
+                not tab.get('questions') and
+                not tab.get('created_at') and
+                not tab.get('metadata') and
+                tab.get('question_count', 0) == 0
+            )
+
+        filtered_tabs = [tab for tab in tabs if not is_placeholder_tab(tab)]
+
         return HistoryListResponse(
-            tabs=[HistoryTabResponse(**tab) for tab in tabs],
-            total=total,
+            tabs=[HistoryTabResponse(**tab) for tab in filtered_tabs],
+            total=len(filtered_tabs),
             offset=offset,
             limit=limit
         )
@@ -123,10 +137,11 @@ async def get_history_tab(request: Request, tab_id: str):
     Get specific history tab by ID
     
     Path Parameters:
-    - tab_id: Unique tab identifier
+    - tab_id: Unique tab identifier (session_id)
     
     Returns:
         Single history tab with all questions
+        If tab doesn't exist, returns empty tab with session_id
     """
     try:
         history = get_history_manager(request)
@@ -135,8 +150,10 @@ async def get_history_tab(request: Request, tab_id: str):
         tab = await history.get_tab(tab_id)
         
         if not tab:
+            # Return 404 if tab not found (do NOT return empty placeholder)
+            logger.info(f"Tab {tab_id} not found, returning 404")
             raise HTTPException(status_code=404, detail=f"Tab {tab_id} not found")
-        
+
         return HistoryTabResponse(**tab.to_dict())
     
     except HTTPException:

@@ -414,12 +414,12 @@ class LLMService:
 		self._client: Groq | None = None
 		self._settings = settings  # Will be overridden by factory
 
-	async def evaluate_code_with_critique(self, problem: str, code: str, language: str, conversation_context: str = "") -> str:
+	async def evaluate_code_with_critique(self, problem: str, code: str, language: str, conversation_context: str = "", api_key: Optional[str] = None) -> str:
 		"""Ask the model to produce a structured evaluation and approach explanation.
 
 		Returns markdown text with sections: Summary, Strengths, Weaknesses, Scores JSON, Recommendations.
 		"""
-		client = self._ensure_client()
+		client = self._ensure_client(api_key)
 		if client is None:
 			raise Exception("LLM client not available. Please configure GEMINI_API_KEY or GROQ_API_KEY.")
 
@@ -462,8 +462,15 @@ class LLMService:
 		if conversation_context.strip():
 			prompt += f"\n\nCONVERSATION CONTEXT:\n{conversation_context.strip()}\n\nUse this context to provide more relevant feedback based on the ongoing discussion."
 
-		provider = self._settings.llm_provider
-		max_tokens = min(self._settings.groq_max_tokens or 2048, 2048)
+		# Detect provider from API key if provided
+		provider = self._settings.llm_provider or "groq"
+		if api_key:
+			if api_key.startswith("gsk_"):
+				provider = "groq"
+			elif api_key.startswith("AIza"):
+				provider = "gemini"
+
+		max_tokens = self._settings.groq_max_tokens or 8000
 		
 		def _call():
 			if provider == "groq":
@@ -1121,8 +1128,32 @@ class LLMService:
 			"- Focus on role-aligned highlights: current role, key strengths, relevant projects, impact.\n"
 		)
 
-	def _ensure_client(self):
+	def _ensure_client(self, api_key: Optional[str] = None):
 		provider = (self._settings.llm_provider or "groq").lower()
+		
+		# If API key is provided, detect provider from key prefix
+		if api_key:
+			if api_key.startswith("gsk_"):
+				return Groq(api_key=api_key)
+			elif api_key.startswith("AIza"):
+				if genai is None:
+					return None
+				# WARNING: genai.configure is global and not thread-safe for diverse keys.
+				# Proceeding with this limitation as per current architecture.
+				genai.configure(api_key=api_key)
+				return genai
+			
+			# Fallback to globally configured provider if prefix not recognized
+			if provider == "groq":
+				return Groq(api_key=api_key)
+			elif provider == "gemini":
+				if genai is None:
+					return None
+				genai.configure(api_key=api_key)
+				return genai
+			else:
+				return None
+
 		if provider == "groq":
 			api_key = self._settings.groq_api_key
 			if not api_key:
@@ -1202,7 +1233,7 @@ class LLMService:
 					model=self._settings.groq_model,
 					messages=messages,
 					temperature=0.2,
-					max_tokens=min(self._settings.groq_max_tokens or 1024, 1024),
+					max_tokens=self._settings.groq_max_tokens or 8000,
 				)
 				return resp.choices[0].message.content
 			elif provider == "gemini":
@@ -2114,8 +2145,15 @@ class LLMService:
 			"\n- Do not force the earlier template sections if brevity or narrative works better for this question."
 		)
 
-	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None) -> str:
-		client = self._ensure_client()
+	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None, api_key: Optional[str] = None) -> str:
+		client = self._ensure_client(api_key)
+		provider = (self._settings.llm_provider or "groq").lower()
+		if api_key:
+			if api_key.startswith("gsk_"):
+				provider = "groq"
+			elif api_key.startswith("AIza"):
+				provider = "gemini"
+
 		if client is None:
 			return question  # mock: echo when no key
 
@@ -2178,7 +2216,6 @@ class LLMService:
 
 		import anyio
 
-		provider = (self._settings.llm_provider or "groq").lower()
 		model = self._settings.groq_model if provider == "groq" else self._settings.gemini_model
 		temperature = self._settings.answer_temperature
 		top_p = self._settings.groq_top_p
@@ -2219,42 +2256,55 @@ class LLMService:
 			return kwargs
 
 		def _call() -> str:
-			if provider == "groq":
-				if stream:
-					stream_resp = client.chat.completions.create(**build_kwargs(True))
-					parts: list[str] = []
-					for chunk in stream_resp:
-						parts.append(getattr(chunk.choices[0].delta, "content", None) or "")
-					raw_text = "".join(parts).strip()
-					formatted = self._format_response(raw_text)
+			try:
+				if provider == "groq":
+					if stream:
+						stream_resp = client.chat.completions.create(**build_kwargs(True))
+						parts: list[str] = []
+						for chunk in stream_resp:
+							parts.append(getattr(chunk.choices[0].delta, "content", None) or "")
+						raw_text = "".join(parts).strip()
+						formatted = self._format_response(raw_text)
+						return formatted
+					else:
+						resp = client.chat.completions.create(**build_kwargs(False))
+						raw_text = resp.choices[0].message.content.strip()
+						formatted = self._format_response(raw_text)
+						return formatted
+				elif provider == "gemini":
+					# Gemini: use the GenerativeModel with non-streaming first
+					model_id = self._settings.gemini_model
+					gmodel = client.GenerativeModel(model_id)
+					messages = [
+						{"role": "system", "content": prompt},
+						{"role": "user", "content": question},
+					]
+					# Join to a single prompt: system + user, keeping system first
+					full_prompt = (prompt + "\n\nUser: " + question).strip()
+					resp = gmodel.generate_content(full_prompt)
+					raw_text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+					formatted = self._format_response((raw_text or "").strip())
 					return formatted
 				else:
-					resp = client.chat.completions.create(**build_kwargs(False))
-					raw_text = resp.choices[0].message.content.strip()
-					formatted = self._format_response(raw_text)
-					return formatted
-			elif provider == "gemini":
-				# Gemini: use the GenerativeModel with non-streaming first
-				model_id = self._settings.gemini_model
-				gmodel = client.GenerativeModel(model_id)
-				messages = [
-					{"role": "system", "content": prompt},
-					{"role": "user", "content": question},
-				]
-				# Join to a single prompt: system + user, keeping system first
-				full_prompt = (prompt + "\n\nUser: " + question).strip()
-				resp = gmodel.generate_content(full_prompt)
-				raw_text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
-				formatted = self._format_response((raw_text or "").strip())
-				return formatted
-			else:
-				return question
+					return question
+			except Exception as e:
+				raise e
 
 		return await anyio.to_thread.run_sync(_call)
 
-	async def stream_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None) -> AsyncIterator[str]:
-		client = self._ensure_client()
+	async def stream_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None, api_key: Optional[str] = None) -> AsyncIterator[str]:
+		client = self._ensure_client(api_key)
 		provider = (self._settings.llm_provider or "groq").lower()
+		if api_key:
+			if api_key.startswith("gsk_"):
+				provider = "groq"
+			elif api_key.startswith("AIza"):
+				provider = "gemini"
+
+		if client is None:
+			yield ""
+			return
+
 		prompt = system_prompt or CODE_FORWARD_PROMPT
 		if profile_text:
 			prompt = (
@@ -2279,6 +2329,7 @@ class LLMService:
 		if client is None:
 			yield ""
 			return
+		
 
 		# Use dynamic token limit for streaming as well
 		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens)
@@ -2325,10 +2376,13 @@ class LLMService:
 		elif provider == "gemini":
 			# Non-streaming fallback: yield once
 			def _one_shot():
-				gmodel = client.GenerativeModel(self._settings.gemini_model)
-				full_prompt = (prompt + "\n\nUser: " + question).strip()
-				resp = gmodel.generate_content(full_prompt)
-				return getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+				try:
+					gmodel = client.GenerativeModel(self._settings.gemini_model)
+					full_prompt = (prompt + "\n\nUser: " + question).strip()
+					resp = gmodel.generate_content(full_prompt)
+					return getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+				except Exception as e:
+					raise e
 			import anyio as _anyio
 			text_once = await _anyio.to_thread.run_sync(_one_shot)
 			for piece in (text_once or ""):

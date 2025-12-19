@@ -35,7 +35,12 @@ class HybridSearchEngine:
     def __init__(self, qdrant_client: QdrantClient, collection_name: str):
         self.qdrant_client = qdrant_client
         self.collection_name = collection_name
-        self.embeddings = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')
+        import os
+        MODEL_PATH = str((__file__ and __file__) and (os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/models/all-MiniLM-L6-v2'))))
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["SENTENCE_TRANSFORMERS_HOME"] = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/models'))
+        self.embeddings = HuggingFaceEmbeddings(model_name=MODEL_PATH)
         
         # BM25 for keyword search
         self.bm25_retriever: Optional[BM25Retriever] = None
@@ -679,7 +684,7 @@ class QueryExpansion:
     def __init__(self, llm_service):
         self.llm = llm_service
     
-    async def expand_query(self, query: str) -> List[str]:
+    async def expand_query(self, query: str, api_key: Optional[str] = None) -> List[str]:
         """
         Generate related queries to improve coverage
         
@@ -712,7 +717,7 @@ Requirements:
 - No trailing commas
 - No markdown formatting"""
             
-            response = await self.llm.generate_answer(prompt)
+            response = await self.llm.generate_answer(prompt, api_key=api_key)
             
             if not response or not response.strip():
                 return [query]

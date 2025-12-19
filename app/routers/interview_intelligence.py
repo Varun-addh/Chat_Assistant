@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from typing import List, Optional
 from pydantic import BaseModel, Field
 import logging
@@ -15,7 +15,7 @@ from app.services.interview_intelligence_service import interview_intelligence_s
 from app.utils.audit import auditor
 
 from app.services.interview_intelligence_service import ultra_production_service
-from app.services.history_manager import HistoryManager
+from app.services.history_manager import default_history_manager
 from fastapi import WebSocket, WebSocketDisconnect
 import time
 from app.config import settings
@@ -25,6 +25,355 @@ logger = logging.getLogger(__name__)
 
 import re
 from typing import Optional
+
+
+def auto_format_code_blocks(text: str) -> str:
+    """
+    World-class code block formatter with precision detection.
+    Only wraps ACTUAL code, never regular text or explanations.
+    
+    Strategy:
+    1. Detect explicit code markers (standalone language names)
+    2. Identify continuous code blocks (multiple consecutive code lines)
+    3. Require minimum 2-3 lines of code to avoid false positives
+    4. Stop immediately when hitting regular text
+    5. Preserve existing markdown code blocks
+    """
+    if not text or not text.strip():
+        return text
+    
+    # Don't re-process if already has code blocks
+    if '```' in text:
+        return text
+    
+    lines = text.split('\n')
+    result = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip().lower()
+        
+        # CASE 1: Explicit standalone language marker (python, java, sql, etc.)
+        if _is_language_marker(stripped) and i + 1 < len(lines):
+            # Peek ahead - next line should be actual code
+            next_line = lines[i + 1].strip()
+            if next_line and _is_definite_code(next_line):
+                lang = _normalize_language(stripped)
+                result.append(f'```{lang}')
+                i += 1
+                
+                # Collect code lines
+                code_lines = []
+                while i < len(lines):
+                    current = lines[i]
+                    
+                    # Stop on blank line followed by text or another language marker
+                    if not current.strip():
+                        if i + 1 < len(lines):
+                            peek = lines[i + 1].strip()
+                            if peek and (_is_language_marker(peek.lower()) or _is_section_header(peek) or _is_prose(peek)):
+                                break
+                        code_lines.append(current)
+                        i += 1
+                        continue
+                    
+                    # Stop if we hit a section header or obvious prose
+                    if _is_section_header(current.strip()) or _is_prose(current.strip()):
+                        break
+                    
+                    code_lines.append(current)
+                    i += 1
+                
+                # Add code and close block
+                result.extend(code_lines)
+                result.append('```')
+                continue
+            else:
+                # False alarm - not actually a code block
+                result.append(line)
+                i += 1
+                continue
+        
+        # CASE 2: Multi-line code block (no explicit marker)
+        # Look ahead to see if we have 3+ consecutive code lines
+        if _is_definite_code(line.strip()):
+            # Count consecutive code lines
+            code_count = 0
+            temp_i = i
+            while temp_i < len(lines) and temp_i < i + 10:  # Look ahead max 10 lines
+                if _is_definite_code(lines[temp_i].strip()) or not lines[temp_i].strip():
+                    if lines[temp_i].strip():  # Don't count blank lines
+                        code_count += 1
+                    temp_i += 1
+                else:
+                    break
+            
+            # Only wrap if we have 3+ lines of code (avoid false positives)
+            if code_count >= 3:
+                lang = _detect_language_from_code(line)
+                result.append(f'```{lang}')
+                
+                # Collect the code block
+                while i < len(lines):
+                    current = lines[i]
+                    
+                    # Stop on blank line followed by non-code
+                    if not current.strip():
+                        if i + 1 < len(lines):
+                            peek = lines[i + 1].strip()
+                            if peek and not _is_definite_code(peek):
+                                result.append(current)
+                                i += 1
+                                break
+                        result.append(current)
+                        i += 1
+                        continue
+                    
+                    # Stop if we hit obvious non-code
+                    if _is_section_header(current.strip()) or _is_prose(current.strip()):
+                        break
+                    
+                    # Stop if not code anymore
+                    if not _is_definite_code(current.strip()):
+                        break
+                    
+                    result.append(current)
+                    i += 1
+                
+                result.append('```')
+                continue
+        
+        # CASE 3: Regular text - add as-is
+        result.append(line)
+        i += 1
+    
+    return '\n'.join(result)
+
+
+def _is_language_marker(text: str) -> bool:
+    """Check if text is a standalone language marker."""
+    language_markers = {
+        'python', 'java', 'javascript', 'typescript', 'sql', 
+        'cpp', 'c++', 'csharp', 'c#', 'bash', 'shell', 
+        'go', 'rust', 'ruby', 'php', 'swift', 'kotlin',
+        'r', 'matlab', 'scala', 'perl', 'html', 'css'
+    }
+    return text in language_markers
+
+
+def _normalize_language(lang: str) -> str:
+    """Normalize language name for code block."""
+    lang_map = {
+        'c++': 'cpp',
+        'c#': 'csharp',
+        'shell': 'bash',
+        'typescript': 'typescript',
+        'javascript': 'javascript'
+    }
+    return lang_map.get(lang, lang)
+
+
+def _is_definite_code(line: str) -> bool:
+    """
+    STRICT check: Is this definitely a line of code?
+    Must have strong code indicators, not just any text.
+    """
+    if not line or len(line.strip()) < 2:
+        return False
+    
+    stripped = line.strip()
+    
+    # Definitely NOT code (prose indicators)
+    prose_indicators = [
+        'example ', 'this is', 'this function', 'the above', 'the code',
+        'you can', 'we can', 'to use', 'how to', 'what is',
+        'when you', 'if you', 'best practice', 'common mistake',
+        'note:', 'important:', 'tip:', 'warning:', 'output:',
+        'as mde', 'as shown', 'for example', 'such as',
+        'negative sampling', 'performance', 'real-world', 'follow-up'
+    ]
+    
+    for indicator in prose_indicators:
+        if indicator in stripped.lower():
+            return False
+    
+    # Definitely code (strong indicators)
+    definite_code_patterns = [
+        # Imports
+        r'^(import|from)\s+\w+(\.\w+)*',
+        r'^import\s+\w+\.\w+',
+        
+        # Function/class definitions
+        r'^def\s+\w+\s*\(',
+        r'^class\s+\w+[\s\(:]',
+        r'^function\s+\w+\s*\(',
+        r'^(public|private|protected|static)\s+(class|void|int|String|function)',
+        
+        # Variable assignments with clear syntax
+        r'^\w+\s*=\s*[{\[\(\'\"]',  # x = {, [, (, ', "
+        r'^\w+\s*=\s*\w+\(',  # x = func()
+        r'^\w+\s*=\s*\d+',  # x = 123
+        r'^\w+\s*=\s*[\'"]',  # x = "string"
+        r'^(const|let|var)\s+\w+\s*=',
+        
+        # Method calls
+        r'^\w+\.\w+\(',  # obj.method(
+        r'^\w+\[\s*[\'\"]',  # dict['key'] or array[0]
+        
+        # Control structures
+        r'^(if|for|while|switch|try|catch|except|finally)\s*[\(\:]',
+        r'^(return|yield|break|continue)\s+',
+        r'^(elif|else|endif)\s*:',
+        
+        # SQL
+        r'^(SELECT|FROM|WHERE|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\s+',
+        
+        # Special Python/R syntax
+        r'^@\w+',  # Decorators
+        r'^\w+\s*<-\s*',  # R assignment
+        
+        # TensorFlow/ML
+        r'^model\.',
+        r'^tf\.',
+        r'^np\.',
+        r'^pd\.',
+        r'^plt\.',
+        
+        # Print/output statements
+        r'^(print|console\.log|echo|printf)\s*\(',
+        
+        # Comments (only if they're inline with code structure)
+        r'^#\s*(TODO|FIXME|NOTE|HACK)',
+    ]
+    
+    for pattern in definite_code_patterns:
+        if re.match(pattern, stripped, re.IGNORECASE):
+            return True
+    
+    # Additional checks: Has typical code punctuation
+    # But exclude single words or short phrases
+    if len(stripped.split()) == 1:
+        return False
+    
+    # Check for code-like structure (operators, parentheses, brackets)
+    code_chars = ['(', ')', '{', '}', '[', ']', '=', ';', '::', '->', '=>', '::']
+    has_code_char = any(char in stripped for char in code_chars)
+    
+    # Must have both code chars AND look like assignment/call
+    if has_code_char:
+        # But not if it's just a sentence with parentheses
+        if ' = ' in stripped or '(' in stripped or '[' in stripped:
+            # Exclude prose-like patterns
+            if not re.search(r'\b(is|are|the|a|an|and|or|to|for|this|that|with|from)\b', stripped.lower()):
+                return True
+    
+    return False
+
+
+def _is_section_header(text: str) -> bool:
+    """Check if text is a section header (markdown or caps)."""
+    if not text:
+        return False
+    
+    # Markdown headers
+    if text.startswith('#'):
+        return True
+    
+    # All caps headers
+    if text.isupper() and len(text.split()) <= 6:
+        return True
+    
+    # Common section headers
+    headers = [
+        'example', 'output:', 'best practice', 'common mistake',
+        'real-world application', 'follow-up', 'explanation',
+        'how it works', 'summary', 'approach', 'solution',
+        'practical', 'note:', 'tip:', 'warning:'
+    ]
+    
+    text_lower = text.lower()
+    for header in headers:
+        if text_lower.startswith(header):
+            return True
+    
+    return False
+
+
+def _is_prose(text: str) -> bool:
+    """
+    Check if text is regular prose (explanation, not code).
+    Prose has normal sentence structure.
+    """
+    if not text or len(text.strip()) < 10:
+        return False
+    
+    text_lower = text.lower()
+    
+    # Prose indicators (words common in explanations but rare in code)
+    prose_words = [
+        'this is', 'this function', 'the above', 'the code', 'the model',
+        'you can', 'we can', 'we use', 'it is', 'they are',
+        'to use', 'to create', 'to calculate', 'to prevent',
+        'how to', 'what is', 'when you', 'if you', 'why',
+        'because', 'since', 'although', 'however', 'therefore',
+        'for example', 'such as', 'like', 'similar to',
+        'best practice', 'common mistake', 'important to',
+        'remember', 'always', 'never', 'should', 'must',
+        'negative sampling', 'gives auc', 'but model', 'versus',
+        'cold-start', 'pre-train', 'initial weights', 'embedding layers'
+    ]
+    
+    # Check if text contains prose indicators
+    for word in prose_words:
+        if word in text_lower:
+            return True
+    
+    # Check for sentence-like structure (ends with period, has articles)
+    if text.endswith('.') or text.endswith(':') or text.endswith('?'):
+        articles = ['the ', 'a ', 'an ', 'this ', 'that ', 'these ', 'those ']
+        if any(article in text_lower for article in articles):
+            return True
+    
+    return False
+
+
+def _detect_language_from_code(line: str) -> str:
+    """Detect programming language from a code line."""
+    line_lower = line.lower()
+    
+    # Python indicators
+    if any(x in line_lower for x in ['import ', 'def ', 'from ', 'print(', '__init__', 'self.', 'elif']):
+        return 'python'
+    
+    # JavaScript/TypeScript
+    if any(x in line_lower for x in ['const ', 'let ', 'var ', 'function ', '=>', 'console.log', 'require(']):
+        return 'javascript'
+    
+    # Java/C#
+    if any(x in line_lower for x in ['public class', 'private ', 'protected ', 'void ', 'static ', 'new ']):
+        if 'using system' in line_lower or 'namespace' in line_lower:
+            return 'csharp'
+        return 'java'
+    
+    # SQL
+    if any(x in line_lower for x in ['select ', 'from ', 'where ', 'insert ', 'update ', 'create table']):
+        return 'sql'
+    
+    # C/C++
+    if any(x in line_lower for x in ['#include', 'using namespace', 'std::', 'int main(']):
+        return 'cpp'
+    
+    # Bash/Shell
+    if any(x in line_lower for x in ['#!/bin/', 'echo ', 'cd ', 'ls ', 'grep ', 'awk ']):
+        return 'bash'
+    
+    # R
+    if '<-' in line or any(x in line_lower for x in ['library(', 'ggplot(', 'data.frame(']):
+        return 'r'
+    
+    # Default to Python (most common in data science/ML)
+    return 'python'
 
 def format_coding_answer_for_interview_tab(
     answer: str,
@@ -36,18 +385,20 @@ def format_coding_answer_for_interview_tab(
 ) -> str:
     """
     Format answer for Interview Intelligence tab.
-    ABSOLUTE FIX: Prevents ALL duplicate code blocks.
+    ABSOLUTE FIX: Prevents ALL duplicate code blocks + auto-formats code examples.
     """
     if not is_coding:
-        return answer or ""
+        # For non-coding questions, still apply auto-formatting for any code examples
+        formatted = auto_format_code_blocks(answer or "")
+        return formatted
     
     text = (answer or "").strip()
     if not text and not code_solution:
         return ""
     
-    # If answer already has good structure, return as-is
+    # If answer already has good structure, apply auto-formatting and return
     if _has_interview_structure(text):
-        return text
+        return auto_format_code_blocks(text)
     
     # Parse sections
     sections = _parse_markdown_sections(text)
@@ -55,12 +406,7 @@ def format_coding_answer_for_interview_tab(
     # Build formatted output
     parts = []
     
-    # 1. APPROACH SUMMARY
-    approach = _extract_approach_summary(sections, text)
-    if approach:
-        parts.append(f"**Approach:** {approach}\n")
-    
-    # 2. CODE SOLUTION SECTION
+    # 1. CODE SOLUTION SECTION (if exists)
     # Always add code from code_solution parameter, never from answer text
     if code_solution:
         lang = (language or "python").lower()
@@ -77,24 +423,36 @@ def format_coding_answer_for_interview_tab(
         
         parts.append("")  # Blank line
     
-    # 3. EXPLANATION - AGGRESSIVELY REMOVE ALL CODE
-    # This is where the duplicate was coming from
-    explanation = _extract_explanation_only(sections, text)
-    if explanation:
-        parts.append(f"## How It Works\n\n{explanation}")
-    
-    # 4. ADDITIONAL SECTIONS - ALSO REMOVE ALL CODE
-    if sections.get('edge_cases'):
-        edge = _remove_all_code_aggressive(sections['edge_cases'])
-        if edge.strip():
-            parts.append(f"\n## Edge Cases\n\n{edge}")
-    
-    if sections.get('optimization'):
-        opt = _remove_all_code_aggressive(sections['optimization'])
-        if opt.strip():
-            parts.append(f"\n## Optimization Tips\n\n{opt}")
-    
-    return "\n".join(parts)
+    # 2. EXPLANATION - Format with bullet points and structure
+    if text:
+        # Parse markdown sections for explanation, approach, etc.
+        sections = _parse_markdown_sections(text)
+        explanation = sections.get('explanation', '')
+        approach = sections.get('approach', '')
+        summary = sections.get('summary', '')
+        # Format explanation with bullets if possible
+        formatted_explanation = ''
+        if explanation:
+            # Try to extract bullet points
+            bullets = re.findall(r'^[-*•]\s*(.+)$', explanation, re.MULTILINE)
+            if bullets:
+                formatted_explanation = '\n'.join([f'- {b.strip()}' for b in bullets])
+            else:
+                # Fallback: split into sentences as bullets
+                sentences = re.split(r'(?<=[.!?])\s+', explanation)
+                formatted_explanation = '\n'.join([f'- {s.strip()}' for s in sentences if len(s.strip()) > 10])
+        # Add summary and approach if present
+        if summary:
+            parts.append(f'**Summary:**\n{summary.strip()}')
+        if approach:
+            parts.append(f'**Approach:**\n{approach.strip()}')
+        if formatted_explanation:
+            parts.append(f'**Explanation:**\n{formatted_explanation}')
+        else:
+            parts.append(text)
+    # CRITICAL: Apply auto-formatting to catch any remaining unformatted code
+    final_output = "\n".join(parts)
+    return auto_format_code_blocks(final_output)
 
 
 def _extract_explanation_only(sections: dict, full_text: str) -> str:
@@ -329,6 +687,16 @@ def _extract_approach_summary(sections: dict, full_text: str) -> str:
     return ""
 
 
+def clean_history_metadata(metadata: dict) -> dict:
+    """
+    Remove fields that shouldn't be shown in history sidebar.
+    """
+    cleaned = dict(metadata)
+    # Remove avg_credibility to declutter the UI
+    cleaned.pop('avg_credibility', None)
+    return cleaned
+
+
 def apply_formatting_to_questions(questions: list) -> list:
     """
     Apply formatting to a list of question dictionaries.
@@ -402,7 +770,8 @@ class EnhancedSearchResponse(BaseModel):
 async def _search_and_build_response(
     query: str,
     limit: int,
-    refresh: bool = False
+    refresh: bool = False,
+    api_key: Optional[str] = None
 ) -> SearchQuestionsResponse:
     """Helper to search and format response"""
     results = await interview_intelligence_service.search_questions(
@@ -410,6 +779,7 @@ async def _search_and_build_response(
         limit=limit,
         use_cache=not refresh,
         force_refresh=refresh,
+        api_key=api_key
     )
 
     question_objects = [
@@ -468,13 +838,22 @@ async def get_topics():
 @router.get("/questions/{topic}", response_model=InterviewQuestionsResponse)
 async def get_questions_by_topic(
     topic: str,
+
     limit: int = Query(default=50, ge=1, le=100),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """Get interview questions for a specific topic."""
+    api_key = x_api_key
+    if not api_key and authorization:
+        if authorization.startswith("Bearer "):
+            api_key = authorization.split(" ")[1]
+
     try:
         questions = await interview_intelligence_service.get_questions_by_topic(
             topic,
-            limit=limit
+            limit=limit,
+            api_key=api_key
         )
         
         if not questions:
@@ -540,6 +919,8 @@ async def search_questions(
         default=False,
         description="Generate fresh questions instead of using cache"
     ),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """
     Search for interview questions using natural language.
@@ -571,8 +952,13 @@ async def search_questions(
             detail="Search query cannot be empty"
         )
     
+    api_key = x_api_key
+    if not api_key and authorization:
+        if authorization.startswith("Bearer "):
+            api_key = authorization.split(" ")[1]
+
     try:
-        return await _search_and_build_response(q, limit, refresh)
+        return await _search_and_build_response(q, limit, refresh, api_key=api_key)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -581,7 +967,11 @@ async def search_questions(
 
 
 @router.post("/search", response_model=SearchQuestionsResponse)
-async def search_questions_post(payload: InterviewSearchRequest):
+async def search_questions_post(
+    payload: InterviewSearchRequest,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
     """
     Search endpoint accepting JSON payload.
     
@@ -598,8 +988,13 @@ async def search_questions_post(payload: InterviewSearchRequest):
     limit = payload.limit or 20
     refresh = bool(payload.refresh)
 
+    api_key = x_api_key
+    if not api_key and authorization:
+        if authorization.startswith("Bearer "):
+            api_key = authorization.split(" ")[1]
+
     try:
-        return await _search_and_build_response(query, limit, refresh)
+        return await _search_and_build_response(query, limit, refresh, api_key=api_key)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -660,8 +1055,15 @@ async def search_with_verification(
     min_credibility: float = Query(default=0.0),
     company: Optional[str] = Query(default=None),
     refresh: bool = Query(default=False),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """Enhanced search with verification."""
+    api_key = x_api_key
+    if not api_key and authorization:
+        if authorization.startswith("Bearer "):
+            api_key = authorization.split(" ")[1]
+
     try:
         logger.info(f"Enhanced search: q={q}, limit={limit}")
         
@@ -671,7 +1073,8 @@ async def search_with_verification(
             verified_only=verified_only,
             min_credibility=min_credibility,
             company=company,
-            force_refresh=refresh
+            force_refresh=refresh,
+            api_key=api_key
         )
         
         logger.info(f"Got {len(questions)} questions")
@@ -696,6 +1099,22 @@ async def search_with_verification(
             "results": {"total": metadata.total, "verified": metadata.verified}
         })
         
+        # Save to history
+        await default_history_manager.initialize()
+        tab_id = await default_history_manager.save_search(
+            query=q,
+            questions=formatted_questions,
+            metadata=clean_history_metadata({
+                'limit': limit,
+                'verified_only': verified_only,
+                'min_credibility': min_credibility,
+                'company': company,
+                'refresh': refresh,
+                'enhanced': True
+            })
+        )
+        logger.info(f"💾 Enhanced search saved to history: tab_id={tab_id}")
+        
         return EnhancedSearchResponse(
             query=q,
             questions=formatted_questions,
@@ -710,8 +1129,17 @@ async def search_with_verification(
 
 
 @router.post("/search/enhanced", response_model=EnhancedSearchResponse)
-async def search_with_verification_post(request: EnhancedSearchRequest):
+async def search_with_verification_post(
+    request: EnhancedSearchRequest,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
     """POST version of enhanced search."""
+    api_key = x_api_key
+    if not api_key and authorization:
+        if authorization.startswith("Bearer "):
+            api_key = authorization.split(" ")[1]
+
     try:
         questions = await enhanced_interview_service.search_questions(
             query=request.query,
@@ -719,7 +1147,8 @@ async def search_with_verification_post(request: EnhancedSearchRequest):
             verified_only=request.verified_only,
             min_credibility=request.min_credibility,
             company=request.company,
-            force_refresh=request.refresh
+            force_refresh=request.refresh,
+            api_key=api_key
         )
         
         # APPLY FORMATTING:
@@ -731,6 +1160,22 @@ async def search_with_verification_post(request: EnhancedSearchRequest):
             min_credibility=request.min_credibility
         )
         metadata = SearchMetadata(**metadata_dict)
+        
+        # Save to history
+        await default_history_manager.initialize()
+        tab_id = await default_history_manager.save_search(
+            query=request.query,
+            questions=formatted_questions,
+            metadata=clean_history_metadata({
+                'limit': request.limit,
+                'verified_only': request.verified_only,
+                'min_credibility': request.min_credibility,
+                'company': request.company,
+                'refresh': request.refresh,
+                'enhanced': True
+            })
+        )
+        logger.info(f"💾 Enhanced search (POST) saved to history: tab_id={tab_id}")
         
         return EnhancedSearchResponse(
             query=request.query,
@@ -1036,8 +1481,15 @@ async def ultra_production_search(
     enable_query_expansion: bool = Query(default=True),
     user_id: Optional[str] = Query(default=None),
     refresh: bool = Query(default=False),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """🚀 Ultra Production Search."""
+    api_key = x_api_key
+    if not api_key and authorization:
+        if authorization.startswith("Bearer "):
+            api_key = authorization.split(" ")[1]
+
     try:
         start_time = time.time()
         
@@ -1050,7 +1502,8 @@ async def ultra_production_search(
             enable_reranking=enable_reranking,
             enable_query_expansion=enable_query_expansion,
             user_id=user_id,
-            force_refresh=refresh
+            force_refresh=refresh,
+            api_key=api_key
         )
         
         # APPLY FORMATTING:
@@ -1063,6 +1516,21 @@ async def ultra_production_search(
         )
         
         elapsed = time.time() - start_time
+        
+        # Save to history
+        await default_history_manager.initialize()
+        tab_id = await default_history_manager.save_search(
+            query=q,
+            questions=formatted_questions,
+            metadata=clean_history_metadata({
+                'verified_only': verified_only,
+                'min_credibility': min_credibility,
+                'company': company,
+                'total_results': len(formatted_questions),
+                **metadata
+            })
+        )
+        logger.info(f"💾 Ultra-production search saved to history: tab_id={tab_id}")
         
         return {
             "query": q,
@@ -1261,8 +1729,9 @@ async def websocket_search(websocket: WebSocket):
             
             # Stream each result with a small delay for visual effect
             for idx, question in enumerate(formatted_questions):
-                # DEBUG: Log source field
-                logger.info(f"📤 Sending question #{idx+1}: source='{question.get('source', 'MISSING')}', question='{question.get('question', '')[:50]}...'")
+                # DEBUG: Log source field and answer length
+                answer_preview = question.get('answer', '')[:100] if question.get('answer') else 'MISSING'
+                logger.info(f"📤 Sending question #{idx+1}: source='{question.get('source', 'MISSING')}', question='{question.get('question', '')[:50]}...', answer preview: {answer_preview}...")
                 
                 await websocket.send_json({
                     'type': 'result',
@@ -1285,20 +1754,20 @@ async def websocket_search(websocket: WebSocket):
                 min_credibility
             )
             
-            # Save to history
-            history = HistoryManager(user_id="default")
-            await history.initialize()
+            # Save to history using global singleton
+            await default_history_manager.initialize()
             
-            tab_id = await history.save_search(
+            tab_id = await default_history_manager.save_search(
                 query=query,
                 questions=formatted_questions,
-                metadata={
+                metadata=clean_history_metadata({
                     'verified_only': verified_only,
                     'min_credibility': min_credibility,
                     'company': company,
                     'total_results': len(formatted_questions),
+                    'enhanced': True,  # Mark WebSocket searches as enhanced
                     **metadata
-                }
+                })
             )
             
             logger.info(f"💾 Saved to history: tab_id={tab_id}")

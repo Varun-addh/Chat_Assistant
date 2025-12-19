@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import logging
@@ -163,9 +163,9 @@ class HistoryManager:
         try:
             # Create backup first
             if self.history_file.exists():
-                async with aiofiles.open(self.history_file, 'r') as src:
+                async with aiofiles.open(self.history_file, 'r', encoding='utf-8') as src:
                     content = await src.read()
-                    async with aiofiles.open(self.backup_file, 'w') as dst:
+                    async with aiofiles.open(self.backup_file, 'w', encoding='utf-8') as dst:
                         await dst.write(content)
             
             # Write new history
@@ -205,7 +205,7 @@ class HistoryManager:
             tab_id=tab_id,
             query=query,
             questions=questions,
-            created_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
             metadata=metadata or {}
         )
         

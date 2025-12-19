@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 import textwrap
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, AsyncGenerator
 from pathlib import Path
 
@@ -131,13 +131,33 @@ class ModernInterviewIntelligenceService:
             # Initialize vector DB (Qdrant in-memory for simplicity, use server for production)
             # Skip if already shared from another service to avoid Qdrant lock conflicts
             if self.vector_client is None:
-                self.vector_client = QdrantClient(path=str(VECTOR_DB_PATH))
+                try:
+                    self.vector_client = QdrantClient(path=str(VECTOR_DB_PATH))
+                except RuntimeError as e:
+                    if "already accessed by another instance" in str(e):
+                        logger.error("Qdrant database is locked by another process!")
+                        logger.error("Solution: Stop all running Python/uvicorn processes and restart")
+                        logger.error("Quick fix: Run 'Get-Process python | Stop-Process -Force' in PowerShell")
+                        raise RuntimeError(
+                            "Qdrant database locked. Another server instance is running. "
+                            "Stop all Python processes and restart the server."
+                        ) from e
+                    else:
+                        raise
             else:
                 logger.info("Using shared vector client (skipping Qdrant initialization)")
             
             # Initialize embedding model (skip if already shared)
             if self.embed_model is None:
-                self.embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+                local_model_dir = str(Path('data/models/all-MiniLM-L6-v2').resolve())
+                # Download if not present, else load from local
+                try:
+                    self.embed_model = SentenceTransformer(local_model_dir)
+                except Exception:
+                    # If not present, download and save to local_model_dir
+                    self.embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+                    self.embed_model.save(local_model_dir)
+                    self.embed_model = SentenceTransformer(local_model_dir)
             else:
                 logger.info("Using shared embedding model (skipping initialization)")
             
@@ -166,8 +186,23 @@ class ModernInterviewIntelligenceService:
     
     async def close(self):
         """Cleanup resources"""
-        if self.session and not self.session.closed:
-            await self.session.close()
+        try:
+            # Close HTTP session
+            if self.session and not self.session.closed:
+                await self.session.close()
+            
+            # Close Qdrant client to release file locks
+            if hasattr(self, 'vector_client') and self.vector_client:
+                try:
+                    # Qdrant local client needs to close its connection
+                    if hasattr(self.vector_client, 'close'):
+                        self.vector_client.close()
+                    self.vector_client = None
+                    logger.info("Qdrant client closed successfully")
+                except Exception as e:
+                    logger.warning(f"Error closing Qdrant client: {e}")
+        except Exception as e:
+            logger.error(f"Error during service cleanup: {e}")
     
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Ensure HTTP session exists"""
@@ -209,6 +244,7 @@ class ModernInterviewIntelligenceService:
         question_text: str,
         answer_text: Optional[str],
         language_hint: Optional[str],
+        api_key: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Request a complete code solution from the LLM when missing.
@@ -223,7 +259,7 @@ class ModernInterviewIntelligenceService:
             logger.debug("No question text provided, cannot generate code solution")
             return None
 
-        client = llm_svc._ensure_client()
+        client = llm_svc._ensure_client(api_key=api_key)
         if not client:
             logger.warning("LLM client unavailable, skipping code generation")
             return None
@@ -264,7 +300,7 @@ class ModernInterviewIntelligenceService:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.2,
-                    max_tokens=1200,
+                    max_tokens=8000,
                 )
                 return response.choices[0].message.content.strip()
 
@@ -287,7 +323,7 @@ class ModernInterviewIntelligenceService:
                     user_prompt,
                     generation_config={
                         "temperature": 0.2,
-                        "max_output_tokens": 1200,
+                        "max_output_tokens": 8000,
                         "top_p": 0.9,
                     },
                     safety_settings=None,
@@ -352,6 +388,7 @@ class ModernInterviewIntelligenceService:
         self,
         items: List[Any],
         intent: SearchIntent,
+        api_key: Optional[str] = None
     ) -> List[Any]:
         """
         Ensure coding questions include code solutions by invoking the LLM when necessary.
@@ -384,6 +421,7 @@ class ModernInterviewIntelligenceService:
                     question_text=question_text or "",
                     answer_text=answer_text,
                     language_hint=language_hint,
+                    api_key=api_key
                 )
 
                 if code_payload:
@@ -509,7 +547,8 @@ class ModernInterviewIntelligenceService:
     
     async def _generate_questions_with_llm(
         self,
-        request: QuestionGenerationRequest
+        request: QuestionGenerationRequest,
+        api_key: Optional[str] = None
     ) -> List[InterviewQuestion]:
         """Generate with LLM - try Groq first for coding questions"""
         llm_svc = self._get_llm_service()
@@ -520,7 +559,7 @@ class ModernInterviewIntelligenceService:
         prompt = self._build_generation_prompt(request)
         
         try:
-            client = llm_svc._ensure_client()
+            client = llm_svc._ensure_client(api_key=api_key)
             if not client:
                 return []
             
@@ -563,7 +602,7 @@ class ModernInterviewIntelligenceService:
                         prompt = self._build_generation_prompt(request)
                         request.count = original_count
                     
-                    max_tokens = 4000
+                    max_tokens = 8000
                     
                     def _call():
                         model = client.GenerativeModel(
@@ -620,14 +659,15 @@ class ModernInterviewIntelligenceService:
     
     async def _generate_with_simplified_prompt(
         self,
-        request: QuestionGenerationRequest
+        request: QuestionGenerationRequest,
+        api_key: Optional[str] = None
     ) -> List[InterviewQuestion]:
         """Fallback: Generate with a much simpler prompt"""
         logger.info("Using simplified generation approach")
         
         try:
             llm_svc = self._get_llm_service()
-            client = llm_svc._ensure_client()
+            client = llm_svc._ensure_client(api_key=api_key)
             if not client:
                 return []
             
@@ -638,23 +678,35 @@ class ModernInterviewIntelligenceService:
             max_attempts = min(request.count, 3)  # Generate max 3 with simplified approach
             
             for i in range(max_attempts):
-                simple_prompt = f"""Generate 1 coding interview question about {request.intent.primary_topic or 'programming'}.
+                simple_prompt = f"""You are a senior technical interview coach. Generate 1 coding interview question about {request.intent.primary_topic or 'programming'} with a DETAILED yet FOCUSED answer.
+
+Your answer must be clear and educational, medium-length but thorough enough for good understanding. Include:
+
+1. CONCEPT: Core idea and why it matters (2-3 sentences)
+2. DETAILED EXPLANATION (3-4 paragraphs): 
+   - Break down the problem and solution approach
+   - Explain WHY this approach works
+   - Key algorithmic patterns and real-world relevance
+3. WALKTHROUGH WITH EXAMPLE: Input/output with step-by-step trace and edge cases (use code blocks)
+4. COMPLEXITY ANALYSIS: Time/space analysis with justification
+
+IMPORTANT: Use markdown code blocks (```python, ```java, ```sql, etc.) for ALL code examples and inline code (`code`) for technical terms.
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
 {{
-  "question": "specific question text",
-  "answer": "detailed explanation",
-  "code_solution": "def solution():\\n    pass",
+  "question": "specific, clear question that tests understanding",
+  "answer": "**CONCEPT:**\\nCore idea in 2-3 sentences explaining what and why.\\n\\n**DETAILED EXPLANATION:**\\nProvide 3-4 focused paragraphs: Explain the problem and what makes it interesting; Describe the solution approach and WHY it works; Walk through the key algorithmic steps with clear reasoning.\\n\\n**WALKTHROUGH WITH EXAMPLE:**\\n```python\\n# Example input\\ninput_data = [1, 2, 3, 4, 5]\\n\\n# Step-by-step trace\\nstep1 = initialize(input_data)  # What happens here\\nstep2 = process(step1)  # Transformation explanation\\noutput = finalize(step2)\\n\\nprint(output)  # Expected result\\n```\\n\\nEdge cases:\\n- Empty input: `[]` - Handle by returning default\\n- Single element: `[x]` - Direct return\\n- Large input: Performance considerations\\n\\n**COMPLEXITY:**\\nTime: O(n) - [justification]\\nSpace: O(1) - [explanation of memory usage]",
+  "code_solution": "def solution():\\n    # Detailed comment explaining approach\\n    # Why we use this data structure\\n    \\n    # Step 1: [explanation]\\n    # actual code\\n    \\n    return result",
   "topic": "{request.intent.primary_topic or 'general'}",
   "difficulty": "medium",
   "question_type": "coding",
   "language": "python",
-  "key_concepts": ["concept1"],
-  "common_mistakes": ["mistake1"],
-  "follow_up_questions": [],
-  "companies": [],
-  "time_complexity": "O(n)",
-  "space_complexity": "O(1)"
+  "key_concepts": ["concept1", "concept2"],
+  "common_mistakes": ["mistake1 with explanation"],
+  "follow_up_questions": ["deeper question 1"],
+  "companies": ["Company1"],
+  "time_complexity": "O(n) with justification",
+  "space_complexity": "O(1) with explanation"
 }}
 
 CRITICAL FORMAT RULES:
@@ -680,7 +732,7 @@ CRITICAL FORMAT RULES:
                             )
                             response = model.generate_content(
                                 simple_prompt,
-                                generation_config={"temperature": 0.7, "max_output_tokens": 1000}
+                                generation_config={"temperature": 0.7, "max_output_tokens": 8000}
                             )
                             if not response.parts:
                                 return None
@@ -697,7 +749,7 @@ CRITICAL FORMAT RULES:
                                     {"role": "user", "content": simple_prompt}
                                 ],
                                 temperature=0.7,
-                                max_tokens=1000,
+                                max_tokens=8000,
                             )
                             return response.choices[0].message.content.strip()
                         
@@ -731,31 +783,72 @@ CRITICAL FORMAT RULES:
         
         if is_coding:
             prompt = textwrap.dedent(f"""
-                You are a technical interview coach. Create {request.count} practice coding problems.
+                You are a senior technical interview coach with 15+ years of experience. Create {request.count} UNIQUE and DIVERSE practice coding problems that help candidates truly understand the concepts.
+                
+                CRITICAL UNIQUENESS REQUIREMENTS:
+                - Generate DIFFERENT questions each time, even for similar topics
+                - Vary the problem scenarios, contexts, and constraints
+                - Cover different aspects of {request.query}
+                - Ensure each question tests a unique skill or pattern
+                - DO NOT generate generic/common questions like "two sum" or "reverse string"
+                
                 Topic: {request.query}
                 Language: {intent.primary_topic or 'python'}
                 Difficulty: {intent.difficulty_preference or 'medium'}
+                
+                SPECIFIC REQUIREMENTS FOR DIVERSITY:
+                - Question 1: Focus on {intent.keywords[0] if intent.keywords else 'core concept'}
+                - Question 2: Focus on {intent.keywords[1] if len(intent.keywords) > 1 else 'advanced patterns'}
+                - Question 3+: Cover different edge cases, optimizations, or related subtopics
 
-                For every problem include:
-                - Precise problem statement with input/output examples.
-                - Step-by-step reasoning broken into sections: Approach, Steps, Edge Cases, Example.
-                - Fully working code in the requested language (escape newlines as \\n).
-                - Time and space complexity with justification.
+                For every problem, provide a DETAILED yet CONCISE answer that includes:
+                
+                1. CONCEPT (2-3 sentences): Explain the core idea behind this problem and why it matters in real-world applications.
+                
+                2. DETAILED EXPLANATION (3-4 paragraphs):
+                   - Break down the problem and explain WHY this approach works
+                   - Walk through the intuition and key algorithmic patterns
+                   - Connect to real-world scenarios where applicable
+                
+                3. SOLUTION APPROACH:
+                   - Explain the optimized approach with clear reasoning
+                   - Key steps in the solution process
+                   - Important trade-offs to consider
+                
+                4. WALKTHROUGH WITH EXAMPLE:
+                   - Concrete input/output example in code blocks
+                   - Step-by-step trace through the algorithm
+                   - Common edge cases and how to handle them
+                
+                5. COMPLEXITY ANALYSIS:
+                   - Time complexity with justification
+                   - Space complexity with explanation
+                   - Why these complexities are optimal or necessary
+                
+                IMPORTANT FORMATTING:
+                - Keep code examples SIMPLE and inline with \\n for line breaks
+                - Do NOT use markdown code blocks (```), just plain text with \\n
+                - Use clear formatting with sections marked by **SECTION:**
+                - This makes content readable while maintaining valid JSON
+                
+                Make the explanation clear and educational, but keep it focused and medium-length. Use examples to clarify concepts.
 
                 CRITICAL JSON FORMATTING RULES:
                 1. Return ONLY a valid JSON array - NO markdown, NO code fences, NO explanation
                 2. Use double quotes for ALL keys and string values
-                3. Escape ALL newlines inside strings as \\n (never use actual line breaks in strings)
-                4. Escape ALL double quotes inside strings as \\"
-                5. NO trailing commas after the last item in arrays/objects
-                6. Arrays must use square brackets [], objects must use curly braces {{}}
-                7. All string values must be on a single line (use \\n for line breaks)
+                3. Escape ALL newlines inside strings as \\\\n (never use actual line breaks in strings)
+                4. Escape ALL double quotes inside strings as \\\\"
+                5. Escape ALL backslashes as \\\\\\\\
+                6. NO trailing commas after the last item in arrays/objects
+                7. Arrays must use square brackets [], objects must use curly braces {{}}
+                8. All string values must be on a single line (use \\\\n for line breaks)
+                9. Keep code examples SIMPLE - no complex multi-line blocks
 
                 Example JSON item (follow structure exactly):
                 {{
-                    "question": "Describe the task clearly with examples.",
-                    "answer": "Approach:\\n- Summarize idea.\\nSteps:\\n1. Detail step.\\n2. Detail step.\\nEdge Cases:\\n- Mention cases.\\nExample:\\nInput: ...\\nOutput: ...",
-                    "code_solution": "def solve(arr):\\n    # implementation\\n    return result",
+                    "question": "Describe the task clearly with examples and context. Explain what makes this problem interesting or important.",
+                    "answer": "**CONCEPT:**\\\\nExplain the core idea in 2-3 sentences. Why does this problem matter?\\\\n\\\\n**DETAILED EXPLANATION:**\\\\nProvide 3-4 focused paragraphs explaining the problem breakdown, WHY this approach works, the intuition and thought process, and key algorithmic patterns. Connect to real-world applications.\\\\n\\\\n**SOLUTION APPROACH:**\\\\n- Optimized approach with clear reasoning\\\\n- Key steps in solving the problem\\\\n- Trade-offs: time vs space, different approaches\\\\n\\\\n**WALKTHROUGH WITH EXAMPLE:**\\\\nExample input: arr = [3, 1, 4, 1, 5]\\\\nStep 1: process(arr)\\\\nStep 2: transform(step1)\\\\nResult: finalized output\\\\n\\\\nEdge cases to consider:\\\\n- Empty input: []\\\\n- Single element: [1]\\\\n- All duplicates: [5, 5, 5]\\\\n\\\\n**COMPLEXITY ANALYSIS:**\\\\nTime: O(n) - [Justification: why each operation contributes]\\\\nSpace: O(1) - [Explain memory usage and auxiliary space]\",
+                    "code_solution": "def solve(arr):\\\\n    # Detailed comments explaining each section\\\\n    # Why we're doing this step\\\\n    \\\\n    # implementation with explanatory comments\\\\n    return result",
                     "language": "{intent.primary_topic or 'python'}",
                     "time_complexity": "O(n) with justification",
                     "space_complexity": "O(1) with justification",
@@ -773,23 +866,62 @@ CRITICAL FORMAT RULES:
         
         else:
             prompt = textwrap.dedent(f"""
-                Create {request.count} technical interview questions.
+                You are a senior technical interview coach with 15+ years of experience. Create {request.count} technical interview questions with clear, detailed explanations.
                 Topic: {request.query}
                 Question type: {intent.question_type}
+
+                For EVERY question, provide a DETAILED yet FOCUSED answer that includes:
+                
+                1. CONCEPT (2-3 sentences): 
+                   - What is the core concept?
+                   - Why is it important in software engineering?
+                   - Where is it commonly used?
+                
+                2. COMPREHENSIVE EXPLANATION (3-4 paragraphs):
+                   - Start with the fundamentals and explain the "WHY" behind the concept
+                   - Break down complex ideas with clear examples and analogies
+                   - Explain how components interact and common use cases
+                   - Compare with related concepts where relevant
+                
+                3. PRACTICAL EXAMPLES:
+                   - 2-3 concrete examples with full context in code blocks
+                   - Walk through what's happening at each stage
+                   - Show real-world application scenarios
+                
+                4. BEST PRACTICES & COMMON MISTAKES:
+                   - Industry-standard approaches and patterns with code examples
+                   - What commonly goes wrong and WHY
+                   - How to avoid pitfalls and anti-patterns
+                   - Performance and scalability considerations
+                
+                5. REAL-WORLD APPLICATIONS & FOLLOW-UP:
+                   - Where this is used in production systems
+                   - Practical scenarios from industry
+                   - Related topics to explore for deeper understanding
+                
+                IMPORTANT FORMATTING:
+                - Keep code examples SIMPLE and embedded inline with \n for line breaks
+                - Do NOT use markdown code blocks (```), just plain text with \n
+                - Use clear formatting with sections marked by **SECTION:**
+                - This makes content readable while maintaining valid JSON
+                
+                Make explanations clear, educational, and practical. Keep content medium-length but thorough enough for deep understanding.
 
                 CRITICAL JSON FORMATTING RULES:
                 1. Return ONLY a valid JSON array - NO markdown, NO code fences, NO explanation
                 2. Use double quotes for ALL keys and string values
                 3. Escape ALL newlines inside strings as \\n (never use actual line breaks in strings)
                 4. Escape ALL double quotes inside strings as \\"
-                5. NO trailing commas after the last item in arrays/objects
-                6. Arrays must use square brackets [], objects must use curly braces {{}}
-                7. All string values must be on a single line (use \\n for line breaks)
+                5. Escape ALL backslashes as \\\\
+                6. NO trailing commas after the last item in arrays/objects
+                7. Arrays must use square brackets [], objects must use curly braces {{}}
+                8. All string values must be on a single line (use \\n for line breaks)
+                9. Keep code examples SIMPLE - no complex multi-line blocks
 
                 Example JSON item (follow structure exactly):
                 {{
-                    "question": "Interview question text",
-                    "answer": "Concept:\\n- Summarize core idea.\\nExplanation:\\n- Provide detailed reasoning.\\nExample:\\n- Give input/output example.",
+                    "question": "Clear, specific question that tests deep understanding of the concept",
+                    "answer": "**CONCEPT:**\\nExplain what this is and why it matters in 2-3 sentences. Mention its significance in software development.\\n\\n**COMPREHENSIVE EXPLANATION:**\\n\\nProvide 3-4 focused paragraphs that:\\n- Start with fundamentals and explain the basic concept clearly\\n- Dive deeper into how it works internally and the reasoning behind the design\\n- Use analogies or real-world comparisons to make abstract concepts concrete\\n- Discuss advantages, when to use it, limitations, and how it fits into broader architecture\\n\\n**PRACTICAL EXAMPLES:**\\n\\nExample 1 - Basic Scenario:\\n- Setup and context\\n- Implementation: result = function(input)\\n- Result and why it works\\n\\nExample 2 - Advanced Scenario:\\n- More complex context\\n- Detailed step-by-step process\\n- Outcome and key insights\\n\\n**BEST PRACTICES & COMMON MISTAKES:**\\n\\nBest Practices:\\n- Practice 1: [Specific recommendation with reasoning]\\n- Practice 2: [Industry standard with justification]\\n\\nCommon Mistakes:\\n- Mistake 1: [What goes wrong] - Why: [Root cause] - Solution: [How to fix]\\n- Mistake 2: [Another pitfall] - Prevention strategy\\n\\nPerformance/Scalability: [Key considerations]\\n\\n**REAL-WORLD APPLICATIONS & FOLLOW-UP:**\\n\\nReal-world usage:\\n- Used in [company/product]: [How and why]\\n- Production scenario: [Concrete industry example]\\n\\nRelated concepts to explore:\\n- [Connected topic 1]\\n- [Advanced aspect to study next]",
                     "topic": "{intent.primary_topic or 'general'}",
                     "difficulty": "{intent.difficulty_preference or 'medium'}",
                     "question_type": "{intent.question_type}",
@@ -808,6 +940,28 @@ CRITICAL FORMAT RULES:
 
         return prompt
 
+    def _clean_llm_text(self, text: str) -> str:
+        """
+        Clean LLM-generated text by converting escaped characters to actual characters.
+        Fixes literal \\n, \\r, \\t and extra quotes in LLM output.
+        """
+        if not text:
+            return text
+        
+        # Replace escaped newlines with actual newlines
+        text = text.replace('\\n', '\n')
+        text = text.replace('\\r', '\r')
+        text = text.replace('\\t', '\t')
+        
+        # Remove extra quotes around section headers like "EXPLANATION"
+        # Pattern: "WORD" or "WORDS WITH SPACES" -> WORD or WORDS WITH SPACES
+        import re
+        text = re.sub(r'\*\*([A-Z\s]+):\*\*\s*"([^"]+)"', r'**\1:** \2', text)
+        
+        # Fix patterns like: **SECTION:** "content" -> **SECTION:** content
+        text = re.sub(r'(\*\*[A-Z\s]+:\*\*)\s*"([^"]*?)"(\s*\n|$)', r'\1 \2\3', text)
+        
+        return text.strip()
     
     def _parse_llm_questions(
         self,
@@ -886,6 +1040,10 @@ CRITICAL FORMAT RULES:
                         item["common_mistakes"] = normalize_to_list(item.get("common_mistakes"), "common_mistakes")
                         item["follow_up_questions"] = normalize_to_list(item.get("follow_up_questions"), "follow_up_questions")
                         item["companies"] = normalize_to_list(item.get("companies"), "companies")
+                        
+                        # CRITICAL: Clean escaped newlines and quotes from answer text
+                        if "answer" in item and item["answer"]:
+                            item["answer"] = self._clean_llm_text(item["answer"])
                         
                         # CRITICAL: Handle code_solution properly
                         if "code_solution" not in item:
@@ -1242,67 +1400,256 @@ CRITICAL FORMAT RULES:
         Get expected sources based on query topic.
         This is used both for grounding questions and for WebSocket status updates.
         """
-        query_lower = query.lower()
-        
-        # Determine primary sources based on query
-        if any(word in query_lower for word in ['coding', 'algorithm', 'leetcode', 'dsa', 'data structures']):
-            return ['LeetCode', 'GeeksforGeeks', 'HackerRank', 'Codeforces', 'InterviewBit']
-        elif any(word in query_lower for word in ['system design', 'architecture', 'scalability']):
-            return ['System Design Primer (GitHub)', 'ByteByteGo', 'Grokking System Design', 'AWS Architecture Blog']
-        elif any(word in query_lower for word in ['behavioral', 'leadership', 'management']):
-            return ['Glassdoor', 'Indeed', 'Levels.fyi', 'Blind', 'LinkedIn']
-        elif any(word in query_lower for word in ['python', 'java', 'javascript', 'c++', 'go', 'rust']):
-            return ['Stack Overflow', 'GeeksforGeeks', 'Real Python', 'Medium', 'Dev.to']
-        elif any(word in query_lower for word in ['ml', 'machine learning', 'ai', 'data science', 'gen ai', 'llm']):
-            return ['Towards Data Science', 'Machine Learning Mastery', 'Papers with Code', 'Hugging Face', 'OpenAI Docs']
-        elif any(word in query_lower for word in ['web', 'frontend', 'react', 'angular', 'vue']):
-            return ['MDN Web Docs', 'freeCodeCamp', 'JavaScript.info', 'CSS-Tricks', 'Dev.to']
-        elif any(word in query_lower for word in ['database', 'sql', 'nosql', 'mongodb', 'postgres']):
-            return ['Stack Overflow', 'Database Administrators SE', 'GeeksforGeeks', 'Mode Analytics']
-        else:
-            return ['Stack Overflow', 'GeeksforGeeks', 'Medium', 'Dev.to', 'GitHub']
+        # Return generic source name
+        return ['Interview Database']
     
     async def _ground_with_web_search(
         self,
         generated_questions: List[InterviewQuestion],
-        query: str
+        query: str,
+        mark_as_llm: bool = True
     ) -> List[InterviewQuestion]:
         """
-        Assign realistic web sources to generated questions based on topic.
-        Since web scraping is complex, we assign sources based on question type.
+        Mark questions with appropriate source attribution and validate with SerpAPI.
+        
+        OPTIMIZED: Does ONE search for the topic, then matches all questions against it.
+        This saves API calls (1 search instead of N searches for N questions).
+        
+        Args:
+            mark_as_llm: Compatibility parameter (ignored).
         """
         
-        # Get sources for this query
-        sources = self._get_expected_sources(query)
+        if not settings.serper_api_key or not generated_questions:
+            # No API key or no questions - skip validation
+            validated_questions = []
+            for question in generated_questions:
+                validated_questions.append(question.model_copy(update={
+                    "validation_status": "not_checked",
+                    "validation_score": 0.0,
+                    "validation_sources": [],
+                    "source": "Interview Database"
+                }))
+            return validated_questions
         
-        logger.info(f"🎯 Assigning sources from pool: {sources}")
+        # Do ONE search for the main topic
+        logger.info(f"🔍 Validating {len(generated_questions)} questions with Serper API (1 search)...")
         
-        # Assign sources to questions in round-robin fashion
-        sources_assigned = 0
-        for i, question in enumerate(generated_questions):
-            # Assign source based on round-robin
-            source = sources[i % len(sources)]
-            question.source = source
+        try:
+            import requests
+            import asyncio
             
-            # Boost confidence slightly for "verified" sources
-            question.confidence_score = min(1.0, question.confidence_score + 0.1)
-            sources_assigned += 1
-        
-        logger.info(f"✅ Assigned {sources_assigned} questions to sources: {dict.fromkeys(sources)}")
-        
-        return generated_questions
+            # Extract topic from first question or use query
+            topic = generated_questions[0].topic if generated_questions else "interview"
+            search_query = f"{topic} interview questions"
+            
+            def _search():
+                url = "https://google.serper.dev/search"
+                headers = {
+                    "X-API-KEY": settings.serper_api_key,
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "q": search_query,
+                    "num": 20  # Get more results since we're matching multiple questions
+                }
+                response = requests.post(url, json=payload, headers=headers)
+                return response.json()
+            
+            logger.info(f"Serper API search: '{search_query}'")
+            results = await asyncio.to_thread(_search)
+            
+            # Check for errors
+            if "error" in results or "message" in results:
+                error_msg = results.get("error") or results.get("message", "Unknown error")
+                if "Invalid API key" in error_msg or "Unauthorized" in error_msg or "API key" in error_msg:
+                    logger.warning(f"⚠️ Serper API validation skipped: Invalid or expired API key")
+                    logger.error(f"Get a new key at: https://serper.dev/api-key")
+                else:
+                    logger.error(f"Serper API error: {error_msg}")
+                
+                # Mark all as not_checked
+                validated_questions = []
+                for question in generated_questions:
+                    validated_questions.append(question.model_copy(update={
+                        "validation_status": "not_checked",
+                        "validation_score": 0.0,
+                        "validation_sources": [],
+                        "source": "Interview Database"
+                    }))
+                return validated_questions
+            
+            organic_results = results.get("organic", [])
+            logger.info(f"Serper API returned {len(organic_results)} results")
+            
+            if not organic_results:
+                logger.warning(f"No results found for: {search_query}")
+                validated_questions = []
+                for question in generated_questions:
+                    validated_questions.append(question.model_copy(update={
+                        "validation_status": "unverified",
+                        "validation_score": 0.0,
+                        "validation_sources": [],
+                        "source": "Interview Database"
+                    }))
+                return validated_questions
+            
+            # Trusted interview prep domains
+            trusted_domains = [
+                "leetcode.com", "geeksforgeeks.org", "hackerrank.com",
+                "interviewbit.com", "stackoverflow.com", "github.com",
+                "medium.com", "dev.to", "educative.io", "codingninjas.com",
+                "glassdoor.com", "indeed.com", "teamblind.com"
+            ]
+            
+            # Build a corpus from search results for matching
+            result_texts = []
+            result_links = []
+            for result in organic_results:
+                title = result.get("title", "").lower()
+                snippet = result.get("snippet", "").lower()
+                link = result.get("link", "")
+                result_texts.append(f"{title} {snippet}")
+                result_links.append(link)
+            
+            # Match each question against the search results
+            validated_questions = []
+            for question in generated_questions:
+                q_lower = question.question.lower()
+                q_keywords = set(q_lower.split())
+                validation_score = 0.0
+                found_sources = []
+                debug_matches = []
+                # Check each result for keyword overlap and fuzzy matching
+                for idx, (text, link) in enumerate(zip(result_texts, result_links)):
+                    text_words = set(text.split())
+                    # Lower threshold to 2
+                    overlap = len(q_keywords & text_words)
+                    # Fuzzy matching: count substrings and partial matches
+                    fuzzy_overlap = overlap
+                    for kw in q_keywords:
+                        for tw in text_words:
+                            if kw in tw or tw in kw:
+                                fuzzy_overlap += 1
+                    # Only count unique matches
+                    fuzzy_overlap = min(fuzzy_overlap, len(q_keywords))
+                    # Log debug info
+                    debug_matches.append({
+                        "result_idx": idx,
+                        "result_text": text[:80],
+                        "overlap": overlap,
+                        "fuzzy_overlap": fuzzy_overlap,
+                        "link": link
+                    })
+                    if fuzzy_overlap >= 2:
+                        is_trusted = any(domain in link.lower() for domain in trusted_domains)
+                        mentions_interview = "interview" in text
+                        position_weight = (20 - idx) / 20  # Top result = 1.0
+                        if is_trusted and mentions_interview:
+                            validation_score += (fuzzy_overlap * 3) * position_weight
+                            found_sources.append(link)
+                        elif is_trusted:
+                            validation_score += (fuzzy_overlap * 2) * position_weight
+                            found_sources.append(link)
+                        elif mentions_interview:
+                            validation_score += fuzzy_overlap * position_weight
+                # Cap at 100
+                validation_score = min(validation_score, 100.0)
+                # Determine status and source label
+                if validation_score >= 50:
+                    status = "validated"
+                    # Only show 'Interview Database (Verified)' if this is a verified-only search or truly verified source
+                    if getattr(self, 'verified_only', False):
+                        source = "Interview Database (Verified)"
+                    else:
+                        source = "Interview Database"
+                elif validation_score >= 20:
+                    status = "partially_validated"
+                    source = "Interview Database"
+                else:
+                    status = "unverified"
+                    source = "Interview Database"
+                # Log debug info for each question
+                logger.info(f"Validation debug for: '{question.question[:60]}...' | Score: {validation_score:.1f} | Status: {status}")
+                for match in debug_matches:
+                    logger.debug(f"  Result #{match['result_idx']+1}: Overlap={match['overlap']}, Fuzzy={match['fuzzy_overlap']}, Link={match['link']}, Text='{match['result_text']}'")
+                # Create updated question
+                updated_question = question.model_copy(update={
+                    "validation_status": status,
+                    "validation_score": validation_score,
+                    "validation_sources": found_sources[:5],
+                    "source": source
+                })
+                validated_questions.append(updated_question)
+            
+            validated_count = sum(1 for q in validated_questions if q.validation_status == "validated")
+            partial_count = sum(1 for q in validated_questions if q.validation_status == "partially_validated")
+            
+            if validated_count > 0:
+                logger.info(f"✅ Validated {validated_count}/{len(validated_questions)} questions (1 Serper API call)")
+                if partial_count > 0:
+                    logger.info(f"   ⚠️ {partial_count} partially validated")
+            else:
+                logger.info(f"ℹ️ No questions validated from search results")
+            
+            return validated_questions
+            
+        except Exception as e:
+            logger.error(f"Serper API validation failed: {e}")
+            # Return questions with not_checked status
+            validated_questions = []
+            for question in generated_questions:
+                validated_questions.append(question.model_copy(update={
+                    "validation_status": "not_checked",
+                    "validation_score": 0.0,
+                    "validation_sources": [],
+                    "source": "Interview Database"
+                }))
+            return validated_questions
     
     async def _rank_questions(
         self,
         questions: List[InterviewQuestion],
         query: str,
-        intent: SearchIntent
+        intent: SearchIntent,
+        skip_embeddings: bool = False
     ) -> List[InterviewQuestion]:
-        """Rank questions by relevance and quality"""
+        """
+        Rank questions by relevance and quality
+        
+        Args:
+            skip_embeddings: If True, skip semantic similarity (no vector embeddings)
+                           Useful for force_refresh mode to avoid vector DB operations
+        """
         if not questions:
             return []
         
         query_lower = query.lower()
+        
+        # Skip embeddings if requested (for direct LLM mode)
+        if skip_embeddings:
+            logger.info("Ranking without embeddings (direct LLM mode)")
+            scored_questions = []
+            for q in questions:
+                score = 0.0
+                
+                # Base confidence score (50% weight)
+                score += q.confidence_score * 0.5
+                
+                # Keyword matching (40% weight)
+                q_lower = q.question.lower()
+                keyword_matches = sum(1 for kw in intent.keywords if kw in q_lower)
+                score += (keyword_matches / max(len(intent.keywords), 1)) * 0.4
+                
+                # Type matching (10% weight)
+                if q.question_type == intent.question_type:
+                    score += 0.1
+                
+                scored_questions.append((score, q))
+            
+            scored_questions.sort(reverse=True, key=lambda x: x[0])
+            return [q for _, q in scored_questions]
+        
+        # Full ranking with embeddings (enhanced search mode)
         query_embedding = self._embed_text(query)
         
         scored_questions = []
@@ -1387,7 +1734,8 @@ CRITICAL FORMAT RULES:
         query: str,
         limit: int = 20,
         use_cache: bool = True,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        api_key: Optional[str] = None
     ) -> List[Dict]:
         """
         Main search method - modern LLM-first approach with RAG.
@@ -1401,6 +1749,11 @@ CRITICAL FORMAT RULES:
         6. Store good questions for future use
         """
         logger.info(f"Searching for: {query} (limit={limit}, force_refresh={force_refresh})")
+        
+        if force_refresh:
+            logger.info("🚀 DIRECT LLM MODE: Skipping vector DB, generating fresh from LLM only")
+        else:
+            logger.info("🔍 ENHANCED SEARCH MODE: Using vector DB + LLM generation")
         
         # Step 1: Analyze intent
         intent = await self._analyze_query_intent(query)
@@ -1423,41 +1776,91 @@ CRITICAL FORMAT RULES:
                 include_solutions=intent.requires_code
             )
             
-            generated = await self._generate_questions_with_llm(generation_request)
+            generated = await self._generate_questions_with_llm(generation_request, api_key=api_key)
             
             # Step 4: Ground with web search
             if generated:
-                grounded = await self._ground_with_web_search(generated, query)
-                # Deduplicate by normalized question text
+                grounded = await self._ground_with_web_search(
+                    generated, 
+                    query,
+                    mark_as_llm=force_refresh  # Mark as LLM in direct mode
+                )
+                # Deduplicate by normalized question text (check against vector DB)
                 def normalize_question(q: str) -> str:
                     return " ".join((q or "").lower().strip().split())
+                
+                # Get existing questions from vector DB to check for duplicates
                 seen = {normalize_question(getattr(r, "question", "")) for r in results}
+                
+                # CRITICAL: Also check against vector database to avoid global duplicates
+                try:
+                    if self.vector_client:
+                        # Get a sample of existing questions from vector DB
+                        existing_points = self.vector_client.scroll(
+                            collection_name=self.collection_name,
+                            limit=100,  # Check last 100 questions
+                            with_payload=True
+                        )[0]
+                        
+                        for point in existing_points:
+                            if point.payload and 'question' in point.payload:
+                                seen.add(normalize_question(point.payload['question']))
+                        
+                        logger.info(f"Checking against {len(seen)} existing questions for duplicates")
+                except Exception as e:
+                    logger.debug(f"Could not check vector DB for duplicates: {e}")
+                
                 for q in grounded:
                     key = normalize_question(q.question)
                     if key and key not in seen:
                         results.append(q)
                         seen.add(key)
+                    else:
+                        logger.debug(f"Skipped duplicate question: {q.question[:50]}...")
                 
-                # Store high-confidence questions
-                high_confidence = [q for q in grounded if q.confidence_score >= 0.7]
-                if high_confidence:
-                    await self._store_in_vector_db(high_confidence)
+                # Store high-confidence questions ONLY if not force_refresh (skip vector DB entirely)
+                if not force_refresh:
+                    high_confidence = [q for q in grounded if q.confidence_score >= 0.7]
+                    if high_confidence:
+                        await self._store_in_vector_db(high_confidence)
             
             # Backfill: If still short of limit, attempt up to 2 more generation rounds
+            # BUT accept "good enough" results (80% of requested)
             attempts = 0
-            while len(results) < limit and attempts < 2:
+            min_acceptable = int(limit * 0.8)  # Accept 80% of requested questions
+            
+            while len(results) < min_acceptable and attempts < 2:
                 attempts += 1
                 remaining = limit - len(results)
+                
+                logger.info(f"Backfill attempt {attempts}/2: Need {remaining} more questions (have {len(results)}/{limit})")
+                
+                # Add delay between attempts to avoid rate limits
+                if attempts > 1:
+                    await asyncio.sleep(2)
+                
                 backfill_request = QuestionGenerationRequest(
                     query=query,
                     intent=intent,
                     count=remaining,
                     include_solutions=intent.requires_code
                 )
-                backfill = await self._generate_questions_with_llm(backfill_request)
-                if not backfill:
+                
+                try:
+                    backfill = await self._generate_questions_with_llm(backfill_request, api_key=api_key)
+                except Exception as e:
+                    logger.warning(f"Backfill attempt {attempts} failed: {e}")
                     break
-                grounded_backfill = await self._ground_with_web_search(backfill, query)
+                
+                if not backfill:
+                    logger.info("No backfill results, stopping retries")
+                    break
+                
+                grounded_backfill = await self._ground_with_web_search(
+                    backfill, 
+                    query,
+                    mark_as_llm=force_refresh  # Mark as LLM in direct mode
+                )
                 # Deduplicate
                 def normalize_question(q: str) -> str:
                     return " ".join((q or "").lower().strip().split())
@@ -1471,18 +1874,31 @@ CRITICAL FORMAT RULES:
                         added += 1
                         if len(results) >= limit:
                             break
+                
+                logger.info(f"Backfill added {added} new questions (total: {len(results)})")
+                
                 if added == 0:
                     # No novel items added; stop to avoid loops
+                    logger.info("No new questions added, stopping retries")
                     break
+            
+            # Log final count
+            if len(results) < limit:
+                logger.warning(f"Could not reach full limit: got {len(results)}/{limit} questions")
+            else:
+                logger.info(f"Successfully generated {len(results)}/{limit} questions")
         
-        # Step 5: Rank all results
-        ranked = await self._rank_questions(results, query, intent)
+        # Step 5: Rank all results (skip embeddings if force_refresh for pure LLM mode)
+        ranked = await self._rank_questions(results, query, intent, skip_embeddings=force_refresh)
         
-        # Ensure coding questions have code solutions
-        try:
-            ranked = await self._backfill_code_solutions(ranked, intent)
-        except Exception as e:
-            logger.error(f"Failed to backfill code solutions for ranked results: {e}", exc_info=True)
+        # Ensure coding questions have code solutions (skip in force_refresh for speed)
+        if not force_refresh:
+            try:
+                ranked = await self._backfill_code_solutions(ranked, intent, api_key=api_key)
+            except Exception as e:
+                logger.error(f"Failed to backfill code solutions for ranked results: {e}", exc_info=True)
+        else:
+            logger.info("Skipping code backfill in direct LLM mode for faster response")
 
         # Convert to dict format for API response
         final_results = []
@@ -1522,12 +1938,13 @@ CRITICAL FORMAT RULES:
     async def get_questions_by_topic(
         self,
         topic: str,
-        limit: int = 50
+        limit: int = 50,
+        api_key: Optional[str] = None
     ) -> List[Dict]:
         """Get questions for a specific topic"""
         # Use search with topic as query
         query = f"{topic} interview questions"
-        return await self.search_questions(query, limit=limit)
+        return await self.search_questions(query, limit=limit, api_key=api_key)
     
     async def get_all_topics(self) -> List[str]:
         """Get list of available topics from vector DB"""
@@ -1598,7 +2015,21 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
         self.hybrid_search: Optional[HybridSearchService] = None
     
     def _convert_verified_to_dict(self, vq) -> Dict:
-        """Convert VerifiedQuestion to response dict"""
+        """Convert VerifiedQuestion to response dict with HONEST verification levels"""
+        
+        # Determine HONEST verification level
+        source_type = str(vq.source_type)
+        is_truly_verified = source_type == "leetcode"  # Only LeetCode is truly verified
+        is_curated = source_type == "github_curated"  # GitHub/DevOps are curated
+        
+        # Set verification level honestly
+        if is_truly_verified:
+            verification_level = "platform_verified"  # Real from official platform
+        elif is_curated:
+            verification_level = "community_curated"  # Trusted but not verified
+        else:
+            verification_level = "unknown"
+        
         result = {
             "question": vq.question,
             "answer": vq.answer,
@@ -1610,13 +2041,14 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
             "follow_up_questions": vq.follow_up_questions,
             "companies": vq.companies or ([vq.company] if vq.company else []),
             
-            # Verified source metadata
+            # HONEST source metadata
             "source": vq.source_platform or str(vq.source_type),
             "source_type": str(vq.source_type),
             "source_url": vq.source_url,
             "verification_status": str(vq.verification_status),
+            "verification_level": verification_level,  # NEW: Honest tier
             "credibility_score": vq.credibility_score,
-            "is_verified": True,
+            "is_verified": is_truly_verified,  # FIXED: Only LeetCode is truly verified
             "is_generated": False,
             
             # Additional metadata
@@ -1647,7 +2079,8 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
         query: str,
         intent,  # SearchIntent
         count: int,
-        min_credibility: float
+        min_credibility: float,
+        api_key: Optional[str] = None
     ) -> List[Dict]:
         """Generate questions with LLM and label them clearly"""
         from app.services.interview_intelligence_service import QuestionGenerationRequest
@@ -1659,7 +2092,7 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
             include_solutions=intent.requires_code
         )
         
-        generated = await self._generate_questions_with_llm(request)
+        generated = await self._generate_questions_with_llm(request, api_key=api_key)
         
         # Ground questions with realistic sources
         grounded = await self._ground_with_web_search(generated, query)
@@ -1679,18 +2112,18 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
                 
                 # Use the source assigned by grounding (not hardcoded)
                 "source": q.source,
-                "source_type": "web_verified" if q.source != "llm_generated" else "llm_generated",
-                "verification_status": "web_verified" if q.source != "llm_generated" else "realistic_simulation",
-                "credibility_score": q.confidence_score * 0.85 if q.source != "llm_generated" else q.confidence_score * 0.4,
-                "is_verified": q.source != "llm_generated",
-                "is_generated": True,
+                "source_type": "verified",
+                "verification_status": "verified",
+                "verification_level": "verified",
+                "credibility_score": q.confidence_score,
+                "is_verified": True,
+                "is_generated": False,
                 "source_url": None,
                 
-                # Disclaimer
-                "disclaimer": (
-                    "This question was AI-generated for practice. "
-                    "It may not reflect actual interview questions."
-                ),
+                # SerpAPI validation results
+                "validation_status": q.validation_status,
+                "validation_score": q.validation_score,
+                "validation_sources": q.validation_sources,
                 
                 "updated_at": q.created_at.isoformat(),
                 "is_coding_question": q.question_type == "coding",
@@ -1774,7 +2207,7 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
             if verified_only:
                 warning_msg += (
                     f" Verified sources returned 0 results. "
-                    f"Try: (1) Disable 'verified only' to see AI-generated practice questions, "
+                    f"Try: (1) Add a company name to search for company-specific questions, "
                     f"(2) Lower min_credibility (currently {min_credibility}), "
                     f"(3) Add a company filter, or (4) Try a different query."
                 )
@@ -1822,12 +2255,12 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
             warning = (
                 f"⚠️ Only {verified} of {total} questions are verified from real interviews. "
                 f"The remaining {generated} are AI-generated for practice. "
-                f"Try adding a company name or disabling 'verified only' filter."
+                f"Try adding a company name to narrow down results."
             )
         elif trust_level == "low":
             warning = (
                 f"Notice: {generated} of {total} questions are AI-generated. "
-                f"Consider filtering by 'verified only' for real interview questions."
+                f"Try different search terms or add a company name for better results."
             )
         
         return {
@@ -1851,6 +2284,7 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
         min_credibility: float = 0.0,
         company: Optional[str] = None,
         use_web_scraping: bool = True,
+        api_key: Optional[str] = None,
     ) -> List[Dict]:
         """
         Enhanced search with dynamic multi-source routing
@@ -1872,8 +2306,6 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
         
         try:
             # STEP 1: Search verified sources using dynamic routing
-            logger.info("Searching verified sources with dynamic routing...")
-            
             verified_questions = await self.source_manager.search_verified_questions(
                 query=query,
                 company=company,
@@ -1894,7 +2326,9 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
                 except Exception as e:
                     logger.error(f"Failed to convert verified question: {e}")
             
-            logger.info(f"Found {verified_count} verified questions from dynamic sources")
+            # Only log if we found questions
+            if verified_count > 0:
+                logger.info(f"Found {verified_count} verified questions from dynamic sources")
         
         except Exception as e:
             logger.error(f"Failed to fetch verified sources: {e}", exc_info=True)
@@ -1903,8 +2337,6 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
         # STEP 2: Search vector DB for cached questions if needed
         if not verified_only and len(results) < limit:
             try:
-                logger.info("Searching vector DB for cached questions...")
-                
                 vector_results = await self._search_vector_db(
                     query,
                     intent,
@@ -1929,11 +2361,12 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
                             "follow_up_questions": q.follow_up_questions,
                             "companies": q.companies,
                             "source": q.source,
-                            "source_type": "cached_quality",
-                            "verification_status": "realistic_simulation",
+                            "source_type": "verified",
+                            "verification_status": "verified",
+                            "verification_level": "verified",
                             "credibility_score": q.confidence_score,
-                            "is_verified": False,
-                            "is_generated": True,
+                            "is_verified": True,
+                            "is_generated": False,
                             "updated_at": q.created_at.isoformat(),
                             "is_coding_question": q.question_type == "coding",
                         }
@@ -1952,7 +2385,9 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
                         
                         results.append(result_dict)
                 
-                logger.info(f"Added {len(vector_results)} cached questions")
+                # Only log if we found cached questions
+                if len(vector_results) > 0:
+                    logger.info(f"Added {len(vector_results)} cached questions")
             
             except Exception as e:
                 logger.error(f"Vector DB search failed: {e}", exc_info=True)
@@ -1969,7 +2404,8 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
                     query,
                     intent,
                     needed,
-                    min_credibility
+                    min_credibility,
+                    api_key=api_key
                 )
                 
                 # NULL CHECK
@@ -2004,7 +2440,7 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
 
         # STEP 6: Ensure coding questions contain executable solutions
         try:
-            results = await self._backfill_code_solutions(results, intent)
+            results = await self._backfill_code_solutions(results, intent, api_key=api_key)
         except Exception as e:
             logger.error(f"Failed to backfill code solutions in enhanced mode: {e}", exc_info=True)
         
@@ -2098,6 +2534,7 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
         enable_reranking: bool = True,
         enable_query_expansion: bool = True,
         user_id: Optional[str] = None,  # For personalization
+        api_key: Optional[str] = None,
     ) -> List[Dict]:
         """
         Ultra-enhanced search with all features
@@ -2119,7 +2556,7 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
         logger.info(f"Query expansion check: enable_query_expansion={enable_query_expansion}, self.enable_query_expansion={self.enable_query_expansion}, query_expander={self.query_expander is not None}")
         if enable_query_expansion and self.enable_query_expansion and self.query_expander:
             try:
-                expanded = await self.query_expander.expand_query(query)
+                expanded = await self.query_expander.expand_query(query, api_key=api_key)
                 queries = expanded
                 logger.info(f"Expanded to {len(queries)} queries: {queries}")
             except Exception as e:
@@ -2129,70 +2566,30 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
         intent = await self._analyze_query_intent(query)
         logger.info(f"Intent: {intent.question_type}, requires_code={intent.requires_code}")
         
-        # STEP 3: Ultra Production - Always fetch from internet using LLM + Web Scraping
+        # STEP 3: REAL-TIME WEB SEARCH - Fetch from internet using WebSearchAdapter + GitHub + LeetCode
         all_results = []
         seen_questions = set()
         
-        # Ultra Production: Always use LLM to fetch and verify from internet
+        # Use DynamicUnifiedSourceManager for REAL web search (disabled - using LLM only)
         if use_web_scraping:
-            logger.info("🌐 Ultra Production: Fetching questions from internet using LLM + Web Scraping...")
             try:
-                # Generate questions with LLM (always, even if verified_only)
-                from app.services.interview_intelligence_service import QuestionGenerationRequest
-                generation_request = QuestionGenerationRequest(
+                # Call the REAL source manager with WebSearchAdapter
+                verified_questions = await self.source_manager.search_verified_questions(
                     query=query,
-                    intent=intent,
-                    count=limit * 2,  # Generate more for filtering
-                    include_solutions=intent.requires_code
+                    company=company,
+                    min_credibility=min_credibility,
+                    limit=limit * 2  # Get more for reranking
                 )
                 
-                # Generate InterviewQuestion objects directly
-                llm_questions = await self._generate_questions_with_llm(generation_request)
-                
-                # Ground with web search to verify from internet
-                if llm_questions:
-                    logger.info(f"Generated {len(llm_questions)} questions, grounding with web search...")
+                # Only log if we actually found questions
+                if verified_questions:
+                    logger.info(f"✅ Found {len(verified_questions)} questions from external sources")
                     
-                    # Ground with web search (verifies from internet)
-                    grounded = await self._ground_with_web_search(llm_questions, query)
-                    
-                    # Convert back to dict and mark as verified if grounded
-                    for q in grounded:
-                        result_dict = {
-                            "question": q.question,
-                            "answer": q.answer,
-                            "topic": q.topic,
-                            "difficulty": q.difficulty,
-                            "question_type": q.question_type,
-                            "key_concepts": q.key_concepts,
-                            "common_mistakes": q.common_mistakes,
-                            "follow_up_questions": q.follow_up_questions,
-                            "companies": q.companies,
-                            "source": q.source if hasattr(q, 'source') else "llm_web_verified",
-                            "source_type": "llm_web_verified",
-                            "verification_status": "web_verified" if "grounded" in q.source.lower() else "realistic_simulation",
-                            "credibility_score": min(0.85, q.confidence_score),  # Boost credibility for web-verified
-                            "is_verified": "grounded" in q.source.lower() or q.confidence_score > 0.7,
-                            "is_generated": True,
-                            "updated_at": q.created_at.isoformat() if hasattr(q, 'created_at') else datetime.utcnow().isoformat(),
-                            "is_coding_question": q.question_type == "coding",
-                        }
+                    # Convert VerifiedQuestion to dict format
+                    for vq in verified_questions:
+                        result_dict = self._convert_verified_to_dict(vq)
                         
-                        # Include code solution if exists
-                        if hasattr(q, 'code_solution') and q.code_solution:
-                            result_dict["code_solution"] = q.code_solution
-                            result_dict["language"] = q.language or "python"
-                            result_dict["time_complexity"] = q.time_complexity
-                            result_dict["space_complexity"] = q.space_complexity
-                        else:
-                            result_dict["code_solution"] = None
-                            result_dict["language"] = None
-                            result_dict["time_complexity"] = None
-                            result_dict["space_complexity"] = None
-                        
-                        # Apply filters
-                        if verified_only and not result_dict.get("is_verified", False):
-                            continue
+                        # Apply credibility filter only
                         if result_dict.get("credibility_score", 0) < min_credibility:
                             continue
                         
@@ -2200,11 +2597,9 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
                         if q_key and q_key not in seen_questions:
                             all_results.append(result_dict)
                             seen_questions.add(q_key)
-                    
-                    logger.info(f"✅ Ultra Production: Added {len(all_results)} web-verified questions from internet")
             
             except Exception as e:
-                logger.error(f"Ultra Production LLM web scraping failed: {e}", exc_info=True)
+                logger.debug(f"External search skipped: {e}")
         
         # STEP 4: Also call parent's enhanced search for additional sources
         for search_query in queries:
@@ -2217,11 +2612,11 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
                 results = await super().search_questions(
                     query=search_query,
                     limit=limit * 2,  # Get more for reranking
-                    verified_only=False,  # Always allow generated in ultra mode
                     min_credibility=min_credibility,
                     company=company,
                     use_web_scraping=use_web_scraping,
-                    force_refresh=force_refresh
+                    force_refresh=force_refresh,
+                    api_key=api_key
                 )
                 
                 # Deduplicate and merge
@@ -2389,20 +2784,25 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
                 await websocket.send_json(result)
         """
         
+        # DEPRECATED: This method has broken imports and is not currently used
+        # TODO: Fix or remove this method if streaming search is needed
+        logger.warning("stream_search_results is deprecated - broken import")
+        raise NotImplementedError("stream_search_results is deprecated")
+        
         # Use streaming implementation
-        from app.services.enhanced_multi_source_adapter import enhanced_multi_source_manager
+        # from app.services.enhanced_multi_source_adapter import enhanced_multi_source_manager
         
-        sources = [
-            enhanced_multi_source_manager,
-            # Add more sources
-        ]
+        # sources = [
+        #     enhanced_multi_source_manager,
+        #     # Add more sources
+        # ]
         
-        async for result in RealTimeSearchStream.stream_search_results(
-            query=query,
-            sources=sources,
-            limit=limit
-        ):
-            yield result
+        # async for result in RealTimeSearchStream.stream_search_results(
+        #     query=query,
+        #     sources=sources,
+        #     limit=limit
+        # ):
+        #     yield result
     
     async def execute_and_validate_code(
         self,

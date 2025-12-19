@@ -3,6 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 import httpx
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.utils.security import verify_api_key
 
@@ -337,15 +340,15 @@ async def render_mermaid(payload: dict):
     
     # Try mermaid.ink first (more reliable)
     try:
-        print(f"DEBUG: Trying mermaid.ink")
-        print(f"DEBUG: Code: {code[:100]}...")
+        logger.debug(f"Trying mermaid.ink")
+        logger.debug(f"Code: {code[:100]}...")
         
         # mermaid.ink uses base64 encoded diagram in URL
         encoded_code = base64.b64encode(code.encode('utf-8')).decode('ascii')
         url = f"https://mermaid.ink/svg/{encoded_code}"
         
         resp = requests.get(url, timeout=10)
-        print(f"DEBUG: mermaid.ink response: {resp.status_code}")
+        logger.debug(f"mermaid.ink response: {resp.status_code}")
         
         if resp.status_code == 200 and resp.text.strip().startswith("<svg"):
             svg = resp.text
@@ -353,13 +356,13 @@ async def render_mermaid(payload: dict):
             raise Exception(f"mermaid.ink failed: {resp.status_code}")
             
     except Exception as exc:
-        print(f"DEBUG: mermaid.ink failed: {exc}")
+        logger.error(f"mermaid.ink failed: {exc}")
         # Fallback to Kroki with shorter timeout
         try:
-            print(f"DEBUG: Trying Kroki as fallback")
+            logger.debug(f"Trying Kroki as fallback")
             url = "https://kroki.io/mermaid/svg"
             resp = requests.post(url, data=code.encode("utf-8"), headers=headers, timeout=5)
-            print(f"DEBUG: Kroki response: {resp.status_code}")
+            logger.debug(f"Kroki response: {resp.status_code}")
             
             if resp.status_code != 200:
                 error_text = resp.text[:200] if resp.text else "No error details"
@@ -370,7 +373,7 @@ async def render_mermaid(payload: dict):
                 raise Exception("Invalid SVG from Kroki")
                 
         except Exception as kroki_exc:
-            print(f"DEBUG: Both services failed. Kroki error: {kroki_exc}")
+            logger.error(f"Both services failed. Kroki error: {kroki_exc}")
             raise HTTPException(status_code=502, detail=f"All rendering services failed. Last error: {str(kroki_exc)}")
 
     # Final sanity check

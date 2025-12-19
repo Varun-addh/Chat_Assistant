@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, AliasChoices
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 
@@ -146,3 +146,376 @@ class SearchQuestionsResponse(BaseModel):
 	query: str = Field(..., description="The search query")
 	questions: List[InterviewQuestion] = Field(..., description="Matching interview questions")
 	count: int = Field(..., description="Number of results returned")
+
+
+# ===== Practice Mode Schemas =====
+from enum import Enum
+
+
+class QuestionDifficulty(str, Enum):
+	"""Question difficulty levels."""
+	EASY = "easy"
+	MEDIUM = "medium"
+	HARD = "hard"
+
+
+class QuestionType(str, Enum):
+	"""Question delivery and response type."""
+	VOICE = "voice"              # Voice-based Q&A (behavioral, verbal technical)
+	CODING = "coding"            # Code editor with execution (write actual code)
+	SYSTEM_DESIGN = "system_design"  # Whiteboard/diagram-based
+
+
+class InterviewRound(str, Enum):
+	"""Interview round types - mirrors real company interview processes."""
+	HR_SCREENING = "hr_screening"
+	TECHNICAL_ROUND_1 = "technical_round_1"
+	TECHNICAL_ROUND_2 = "technical_round_2"
+	SYSTEM_DESIGN = "system_design"
+	BEHAVIORAL = "behavioral"
+	MANAGERIAL = "managerial"
+	MACHINE_LEARNING = "machine_learning"
+	DATA_ENGINEERING = "data_engineering"
+	FRONTEND_SPECIALIST = "frontend_specialist"
+	BACKEND_SPECIALIST = "backend_specialist"
+	DEVOPS = "devops"
+	SECURITY = "security"
+	FULL_INTERVIEW = "full_interview"
+
+
+class RoundConfig(BaseModel):
+	"""Configuration for a specific interview round."""
+	round_type: InterviewRound = Field(..., description="Type of interview round")
+	name: str = Field(..., description="Display name (e.g., 'Technical Round 1')")
+	description: str = Field(..., description="What this round focuses on")
+	duration_minutes: int = Field(..., description="Typical duration in minutes")
+	question_count: int = Field(..., description="Number of questions in this round")
+	difficulty: QuestionDifficulty = Field(..., description="Base difficulty level")
+	question_time_limit: int = Field(..., description="Average time per question in seconds")
+	categories: List[str] = Field(..., description="Question categories for this round")
+
+
+class UserProfile(BaseModel):
+	"""User profile for adaptive interview customization."""
+	domain: str = Field(..., description="Primary domain (e.g., 'Python Backend', 'Data Science', 'Frontend React')")
+	experience_years: int = Field(..., ge=0, le=50, description="Years of experience (0-50)")
+	skills: List[str] = Field(..., min_items=1, description="List of skills (e.g., ['Python', 'AWS', 'Docker'])")
+	job_role: Optional[str] = Field(default=None, description="Target job role (e.g., 'Senior Engineer', 'Tech Lead')")
+	company_preference: Optional[str] = Field(default=None, description="Target company (e.g., 'Google', 'Meta', 'Amazon', 'Microsoft', 'Netflix', 'Apple', 'Startup', 'Enterprise')")
+	interview_focus: Optional[List[str]] = Field(default=None, description="Specific areas to focus on")
+	target_round: Optional[InterviewRound] = Field(default=None, description="Specific interview round to practice")
+
+
+class PracticeInterviewQuestion(BaseModel):
+	"""Individual interview question for practice mode."""
+	id: int = Field(..., description="Question sequence number (1-based, e.g., 1, 2, 3, ...)")
+	text: str = Field(..., description="Question text")
+	difficulty: QuestionDifficulty = Field(..., description="Question difficulty")
+	time_limit: int = Field(default=90, description="Time limit in seconds")
+	category: str = Field(..., description="Question category (e.g., behavioral, technical)")
+	
+	# NEW: Question type determines UI/UX
+	question_type: QuestionType = Field(default=QuestionType.VOICE, description="How the question is answered (voice/coding/whiteboard)")
+	
+	# Coding question specific fields
+	programming_language: Optional[str] = Field(default=None, description="For coding questions: Python, JavaScript, SQL, etc.")
+	code_template: Optional[str] = Field(default=None, description="For coding questions: starter code template")
+	test_cases: Optional[List[Dict[str, Any]]] = Field(default=None, description="For coding questions: input/output test cases")
+	
+	# Answer evaluation criteria
+	key_points: Optional[List[str]] = Field(default=None, description="Key concepts that should be covered")
+	expected_answer_template: Optional[str] = Field(default=None, description="Template/guideline for ideal answer")
+	evaluation_criteria: Optional[List[str]] = Field(default=None, description="What to look for when evaluating")
+	round_type: Optional[InterviewRound] = Field(default=None, description="Which interview round this question belongs to")
+
+
+class SpeechMetrics(BaseModel):
+	"""Speech analytics metrics extracted from audio."""
+	filler_count: int = Field(..., description="Number of filler words detected")
+	wpm: float = Field(..., description="Words per minute")
+	longest_silence: float = Field(..., description="Longest pause duration in seconds")
+	confidence_score: float = Field(..., ge=0, le=10, description="Confidence score based on pitch variance (1-10)")
+	overtalked: bool = Field(..., description="Whether answer exceeded time limit by >10%")
+	duration: float = Field(..., description="Total duration in seconds")
+	filler_words: List[str] = Field(default_factory=list, description="List of detected filler words")
+	pause_count: int = Field(default=0, description="Number of significant pauses (>2s)")
+	pitch_variance: float = Field(default=0.0, description="Raw pitch variance value")
+	silence_removed: Optional[float] = Field(default=None, description="Seconds of silence removed by VAD filter")
+
+
+class MicroFeedback(BaseModel):
+	"""Micro-feedback provided after each answer with AI-powered correctness evaluation."""
+	# Delivery Feedback (existing)
+	delivery_tips: List[str] = Field(..., max_items=2, description="1-2 short delivery tips")
+	pace_feedback: str = Field(..., description="Speaking pace feedback")
+	overall_note: str = Field(..., description="Overall feedback note")
+	speech_quality: Optional[str] = Field(default=None, description="Speech quality assessment")
+	
+	# Content Evaluation (NEW - AI-powered)
+	correctness_score: Optional[int] = Field(default=None, ge=0, le=100, description="Answer correctness (0-100%)")
+	technical_accuracy: Optional[str] = Field(default=None, description="Technical accuracy assessment (Excellent/Good/Fair/Poor)")
+	key_points_covered: Optional[List[str]] = Field(default=None, description="Key concepts mentioned correctly")
+	key_points_missed: Optional[List[str]] = Field(default=None, description="Important points not mentioned")
+	strengths: Optional[List[str]] = Field(default=None, max_items=2, description="What was good in the answer")
+	improvement_areas: Optional[List[str]] = Field(default=None, max_items=2, description="What could be better")
+	actionable_suggestions: Optional[List[str]] = Field(default=None, max_items=2, description="Specific tips to improve")
+	is_correct: Optional[bool] = Field(default=None, description="Overall correctness (true if score >= 70%)")
+	
+	# Deprecated field (keep for backward compatibility)
+	content_relevance: Optional[str] = Field(default=None, description="[Deprecated] Use correctness_score instead")
+	timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AnswerSubmission(BaseModel):
+	"""Submitted answer with transcript and metrics."""
+	question_id: int = Field(..., description="Question ID")
+	transcript: str = Field(..., description="Transcribed answer text")
+	metrics: SpeechMetrics = Field(..., description="Speech analytics")
+	micro_feedback: MicroFeedback = Field(..., description="Immediate feedback")
+	audio_duration: float = Field(..., description="Audio duration in seconds")
+	submitted_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class EvaluationStrengths(BaseModel):
+	"""Strengths identified in the evaluation."""
+	items: List[str] = Field(..., min_items=2, max_items=3, description="2-3 specific strengths")
+
+
+class EvaluationImprovements(BaseModel):
+	"""Areas to improve identified in the evaluation."""
+	items: List[str] = Field(..., min_items=2, max_items=3, description="2-3 specific improvement areas")
+
+
+class MetricsSummary(BaseModel):
+	"""Aggregated metrics summary."""
+	total_fillers: int = Field(..., description="Total filler words across all answers")
+	avg_wpm: float = Field(..., description="Average words per minute")
+	longest_pause: float = Field(..., description="Longest pause duration")
+	avg_confidence: float = Field(..., description="Average confidence score")
+	total_duration: float = Field(..., description="Total interview duration in seconds")
+	overtalked_count: int = Field(default=0, description="Number of questions where overtalking occurred")
+
+
+class ActionPlan(BaseModel):
+	"""Action plan for improvement."""
+	steps: List[str] = Field(..., min_items=2, max_items=3, description="2-3 concrete action steps")
+
+
+class EvaluationReport(BaseModel):
+	"""Final evaluation report generated by Gemini Pro."""
+	strengths: EvaluationStrengths = Field(..., description="Identified strengths")
+	improvements: EvaluationImprovements = Field(..., description="Areas to improve")
+	metrics_summary: MetricsSummary = Field(..., description="Aggregated metrics")
+	action_plan: ActionPlan = Field(..., description="Concrete action steps")
+	practice_recommendation: str = Field(..., description="Estimated practice sessions needed")
+	generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PracticeSession(BaseModel):
+	"""Complete practice interview session."""
+	session_id: str = Field(..., description="Unique session identifier")
+	started_at: datetime = Field(default_factory=datetime.utcnow)
+	completed_at: Optional[datetime] = None
+	current_question_index: int = Field(default=0, description="Current question index (0-4)")
+	questions: List[PracticeInterviewQuestion] = Field(default_factory=list)
+	answers: List[AnswerSubmission] = Field(default_factory=list)
+	evaluation_report: Optional[EvaluationReport] = None
+	is_complete: bool = Field(default=False)
+	audio_files: List[str] = Field(default_factory=list, description="Generated TTS audio filenames")
+	pending_next_question: bool = Field(default=False, description="True if waiting for feedback acknowledgment")
+
+
+# API Request/Response Models for Practice Mode
+class StartInterviewRequest(BaseModel):
+	"""Request to start a new practice interview."""
+	difficulty: QuestionDifficulty = Field(default=QuestionDifficulty.MEDIUM)
+	category: str = Field(default="behavioral", description="Interview category")
+	question_count: int = Field(default=5, ge=1, le=10, description="Number of questions (1-10, default: 5)")
+	# NEW: User profile for adaptive interviews
+	user_profile: Optional[UserProfile] = Field(default=None, description="User profile for intelligent question generation")
+	# NEW: Round-based interview
+	round_type: Optional[InterviewRound] = Field(default=None, description="Specific interview round to practice")
+
+
+class RoundSelectionRequest(BaseModel):
+	"""Request to start a round-based interview."""
+	round_type: InterviewRound = Field(..., description="Interview round to practice")
+	domain: str = Field(..., description="Primary domain (REQUIRED): e.g., 'Python', 'Java', 'Data Engineering', 'Machine Learning', 'Frontend', 'DevOps'")
+	experience_years: int = Field(default=2, ge=0, le=30, description="Years of experience in the domain")
+	user_profile: Optional[UserProfile] = Field(default=None, description="Optional: Complete user profile (overrides domain/experience if provided)")
+	company_specific: Optional[str] = Field(default=None, description="Optional: Make it company-specific (e.g., 'Google', 'Amazon')")
+
+
+class RoundSelectionResponse(BaseModel):
+	"""Response with available rounds and their configurations."""
+	rounds: List[RoundConfig] = Field(..., description="Available interview rounds")
+	recommended_round: Optional[InterviewRound] = Field(default=None, description="Recommended round based on user profile")
+	recommended_sequence: Optional[List[InterviewRound]] = Field(default=None, description="Suggested round progression")
+
+
+class QuickStartRequest(BaseModel):
+	"""🚀 AI Quick Start - Zero-click conversational onboarding."""
+	voice_input: Optional[str] = Field(default=None, description="Voice/text input from user")
+	context: Optional[str] = Field(default=None, description="Additional context (resume, LinkedIn, etc.)")
+	auto_mode: bool = Field(default=True, description="Let AI decide everything")
+	session_memory: bool = Field(default=True, description="Use previous session data")
+	question_count: Optional[int] = Field(default=None, ge=3, le=10, description="Number of questions (3-10). If not provided, AI decides.")
+	target_company: Optional[str] = Field(default=None, description="Specific target company (e.g., 'Google', 'Meta', 'Amazon', 'Microsoft'). If not provided, AI infers from voice_input.")
+	# NEW: Round-based selection
+	target_round: Optional[InterviewRound] = Field(default=None, description="Specific interview round to practice")
+
+
+class ConversationalResponse(BaseModel):
+	"""Response from AI conversational agent."""
+	ai_message: str = Field(..., description="AI's conversational response")
+	needs_clarification: bool = Field(default=False, description="Needs more info from user")
+	ready_to_start: bool = Field(default=False, description="Ready to begin interview")
+	suggested_profile: Optional[UserProfile] = Field(default=None, description="Inferred user profile")
+	session_id: Optional[str] = Field(default=None, description="Session ID if started")
+	first_question: Optional[PracticeInterviewQuestion] = Field(default=None, description="First question if started")
+	tts_audio_url: Optional[str] = Field(default=None, description="Audio URL if started")
+	total_questions: Optional[int] = Field(default=None, description="Total number of questions if started")
+	progress: Optional[str] = Field(default=None, description="Progress indicator if started (e.g., '1/5')")
+
+
+class StartInterviewResponse(BaseModel):
+	"""Response after starting an interview."""
+	session_id: str
+	first_question: PracticeInterviewQuestion
+	tts_audio_url: str
+	total_questions: int = Field(..., description="Total number of questions in this interview")
+	progress: str = Field(..., description="Progress indicator (e.g., '1/5')")
+	message: str = "Interview session started successfully"
+
+
+class SubmitAnswerResponse(BaseModel):
+	"""Response after submitting an answer."""
+	transcript: str
+	metrics: SpeechMetrics
+	micro_feedback: MicroFeedback
+	next_question: Optional[PracticeInterviewQuestion] = None
+	tts_audio_url: Optional[str] = None
+	complete: bool = Field(default=False)
+	evaluation_report: Optional[EvaluationReport] = None
+	progress: str = Field(..., description="Progress indicator (e.g., '2/5')")
+	# NEW: UI flow control
+	requires_acknowledgment: bool = Field(default=True, description="User must acknowledge feedback before proceeding")
+	current_question_id: int = Field(..., description="Question ID that was just answered")
+
+
+class AcknowledgeFeedbackRequest(BaseModel):
+	"""Request to acknowledge feedback and get next question."""
+	session_id: str = Field(
+		..., 
+		description="Session identifier",
+		validation_alias=AliasChoices("session_id", "sessionId")
+	)
+	question_id: int = Field(
+		..., 
+		description="Question ID that was just answered",
+		validation_alias=AliasChoices("question_id", "questionId")
+	)
+	feedback_read: bool = Field(
+		default=True, 
+		description="Confirmation that user read the feedback",
+		validation_alias=AliasChoices("feedback_read", "feedbackRead")
+	)
+
+
+class NextQuestionResponse(BaseModel):
+	"""Response with next question after feedback acknowledgment."""
+	next_question: Optional[PracticeInterviewQuestion] = Field(None, description="Next question if interview not complete")
+	tts_audio_url: Optional[str] = Field(None, description="Audio URL for next question")
+	complete: bool = Field(default=False, description="True if interview is complete")
+	evaluation_report: Optional[EvaluationReport] = Field(None, description="Final evaluation if complete")
+	progress: str = Field(..., description="Updated progress (e.g., '3/5')")
+
+
+# Code Submission Models (for coding questions)
+class SubmitCodeRequest(BaseModel):
+	"""Request to submit code for a coding question."""
+	session_id: str = Field(..., description="Session identifier", validation_alias=AliasChoices("session_id", "sessionId"))
+	question_id: int = Field(..., description="Question ID", validation_alias=AliasChoices("question_id", "questionId"))
+	code: str = Field(..., description="User's code solution")
+	programming_language: str = Field(..., description="Language: Python, JavaScript, SQL, etc.", validation_alias=AliasChoices("programming_language", "programmingLanguage"))
+	time_taken: int = Field(..., description="Time taken in seconds", validation_alias=AliasChoices("time_taken", "timeTaken"))
+
+
+class CodeTestResult(BaseModel):
+	"""Individual test case result."""
+	test_case_id: int = Field(..., description="Test case number")
+	input_data: str = Field(..., description="Test input")
+	expected_output: str = Field(..., description="Expected output")
+	actual_output: Optional[str] = Field(None, description="User's code output")
+	passed: bool = Field(..., description="Test passed or failed")
+	error: Optional[str] = Field(None, description="Error message if failed")
+
+
+class CodeEvaluationFeedback(BaseModel):
+	"""Feedback on code quality and approach."""
+	correctness_score: int = Field(..., ge=0, le=100, description="Code correctness (0-100%)")
+	approach_quality: str = Field(..., description="Quality of approach: excellent/good/needs_improvement")
+	time_complexity: Optional[str] = Field(None, description="Big-O time complexity analysis")
+	space_complexity: Optional[str] = Field(None, description="Big-O space complexity analysis")
+	strengths: List[str] = Field(default_factory=list, description="What the code does well")
+	improvements: List[str] = Field(default_factory=list, description="Areas for improvement")
+	best_practices: List[str] = Field(default_factory=list, description="Coding best practices followed/missed")
+	alternative_approaches: Optional[str] = Field(None, description="Other ways to solve this problem")
+
+
+class SubmitCodeResponse(BaseModel):
+	"""Response after code submission."""
+	test_results: List[CodeTestResult] = Field(..., description="Results from running test cases")
+	all_tests_passed: bool = Field(..., description="True if all test cases passed")
+	code_feedback: CodeEvaluationFeedback = Field(..., description="AI evaluation of code quality")
+	complete: bool = Field(default=False, description="True if interview is complete")
+	next_question: Optional[PracticeInterviewQuestion] = Field(None, description="Next question if not complete")
+	evaluation_report: Optional[EvaluationReport] = Field(None, description="Final evaluation if complete")
+	progress: str = Field(..., description="Progress indicator")
+	requires_acknowledgment: bool = Field(default=True, description="User must acknowledge feedback")
+
+
+# Configuration Models for Practice Mode
+class TTSConfig(BaseModel):
+	"""TTS service configuration."""
+	model_config = {"protected_namespaces": ()}
+	
+	engine: str = Field(default="coqui", description="TTS engine: 'coqui' or 'piper'")
+	tts_model_name: str = Field(default="tts_models/en/ljspeech/tacotron2-DDC", description="TTS model name")
+	sample_rate: int = Field(default=22050)
+	max_generation_time: float = Field(default=2.0, description="Max TTS generation time in seconds")
+
+
+class STTConfig(BaseModel):
+	"""STT service configuration."""
+	model_config = {"protected_namespaces": ()}
+	
+	stt_model_size: str = Field(default="base", description="faster-whisper model size")
+	device: str = Field(default="cpu", description="Device: 'cpu' or 'cuda'")
+	compute_type: str = Field(default="int8", description="Compute type for faster-whisper")
+	max_transcription_time: float = Field(default=3.0, description="Max STT time in seconds")
+
+
+class SpeechAnalyticsConfig(BaseModel):
+	"""Speech analytics configuration."""
+	filler_words: List[str] = Field(
+		default_factory=lambda: [
+			"um", "uh", "like", "you know", "basically", 
+			"actually", "sort of", "kind of", "literally", "so"
+		]
+	)
+	significant_pause_threshold: float = Field(default=2.0, description="Pause threshold in seconds")
+	silence_top_db: int = Field(default=40, description="Silence detection threshold")
+	overtalk_threshold: float = Field(default=1.1, description="Overtalk multiplier (110%)")
+	ideal_wpm_min: int = Field(default=140, description="Ideal WPM minimum")
+	ideal_wpm_max: int = Field(default=160, description="Ideal WPM maximum")
+
+
+class PracticeModeConfig(BaseModel):
+	"""Overall practice mode configuration."""
+	tts: TTSConfig = Field(default_factory=TTSConfig)
+	stt: STTConfig = Field(default_factory=STTConfig)
+	analytics: SpeechAnalyticsConfig = Field(default_factory=SpeechAnalyticsConfig)
+	audio_storage_path: str = Field(default="data/practice_audio")
+	session_timeout_minutes: int = Field(default=30)
+	max_concurrent_sessions: int = Field(default=100)
