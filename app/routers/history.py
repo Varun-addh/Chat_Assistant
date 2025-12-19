@@ -102,26 +102,27 @@ async def get_history(
         )
         
         # Get total count
+        # Get all tabs for total count calculation
         all_tabs = await history.get_all_tabs()
-        total = len(all_tabs)
         
-        # Filter out any empty/placeholder tabs (defensive, should not be needed if backend is correct)
+        # Helper to detect empty/placeholder sessions
         def is_placeholder_tab(tab):
-            # Consider a tab a placeholder if ALL fields are empty/default
             return (
-                not tab.get('tab_id') and
-                not tab.get('query') and
-                not tab.get('questions') and
-                not tab.get('created_at') and
-                not tab.get('metadata') and
-                tab.get('question_count', 0) == 0
+                not tab.get('tab_id') or
+                (not tab.get('query') and not tab.get('questions'))
             )
 
-        filtered_tabs = [tab for tab in tabs if not is_placeholder_tab(tab)]
+        # Calculate total count of valid tabs
+        valid_all_tabs = [t for t in all_tabs if not is_placeholder_tab(t)]
+        total_valid = len(valid_all_tabs)
+        
+        # Paginated results (already fetched)
+        # Filter placeholders from this page
+        filtered_page_tabs = [tab for tab in tabs if not is_placeholder_tab(tab)]
 
         return HistoryListResponse(
-            tabs=[HistoryTabResponse(**tab) for tab in filtered_tabs],
-            total=len(filtered_tabs),
+            tabs=[HistoryTabResponse(**tab) for tab in filtered_page_tabs],
+            total=total_valid,
             offset=offset,
             limit=limit
         )

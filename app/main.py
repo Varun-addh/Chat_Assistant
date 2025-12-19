@@ -22,6 +22,7 @@ from app.services.interview_intelligence_service import (
 
 from app.routers.mock_interview import router as mock_interview_router
 from app.services.mock_interview_service import initialize_mock_interview_service
+from app.services.history_manager import default_history_manager
 
 # Practice Mode imports
 from app.routers.practice_mode import router as practice_router, init_practice_mode
@@ -57,6 +58,9 @@ async def lifespan(app: FastAPI):
         llm_service=get_llm_service("groq"),
         interview_intelligence_service=interview_intelligence_service
     )
+    
+    # Initialize history manager
+    await default_history_manager.initialize()
     
     # Initialize Practice Mode
     if settings.gemini_api_key and settings.practice_mode_enabled:

@@ -812,6 +812,27 @@ async def _search_and_build_response(
         "refresh": refresh,
     })
 
+    # SAVE TO HISTORY: Ensure search is persisted for the history sidebar
+    try:
+        from app.services.history_manager import default_history_manager
+        await default_history_manager.initialize()
+        
+        # Convert Pydantic objects to dicts for storage
+        history_questions = [q.dict() for q in question_objects]
+        
+        tab_id = await default_history_manager.save_search(
+            query=query,
+            questions=history_questions,
+            metadata={
+                "search_type": "standard",
+                "refresh": refresh,
+                "count": len(history_questions)
+            }
+        )
+        logger.info(f"💾 Standard search saved to history: tab_id={tab_id}")
+    except Exception as e:
+        logger.error(f"Failed to save standard search to history: {e}")
+
     return SearchQuestionsResponse(
         query=query,
         questions=question_objects,

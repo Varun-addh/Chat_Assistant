@@ -86,19 +86,26 @@ class HistoryManager:
         self.backup_file = HISTORY_DIR / f"{user_id}_history.backup.jsonl"
         self._tabs: Dict[str, HistoryTab] = {}
         self._loaded = False
+        self._lock = asyncio.Lock()  # Prevent concurrent writes
     
     async def initialize(self):
         """Load history from disk"""
         if self._loaded:
             return
         
-        try:
-            await self._load_from_disk()
-            self._loaded = True
-            logger.info(f"History initialized for user {self.user_id}: {len(self._tabs)} tabs")
-        except Exception as e:
-            logger.error(f"Failed to load history: {e}")
-            self._tabs = {}
+        async with self._lock:
+            # Check again inside lock to avoid double loading
+            if self._loaded:
+                return
+            
+            try:
+                await self._load_from_disk()
+                self._loaded = True
+                logger.info(f"💾 History initialized for user {self.user_id}: {len(self._tabs)} tabs")
+            except Exception as e:
+                logger.error(f"❌ Failed to load history: {e}")
+                self._tabs = {}
+                self._loaded = True # Mark as loaded even if empty to avoid retry loops
     
     async def _load_from_disk(self):
         """Load history from JSONL file"""
@@ -159,25 +166,30 @@ class HistoryManager:
             logger.error(f"Backup restoration failed: {e}")
     
     async def _save_to_disk(self):
-        """Save all tabs to disk"""
-        try:
-            # Create backup first
-            if self.history_file.exists():
-                async with aiofiles.open(self.history_file, 'r', encoding='utf-8') as src:
-                    content = await src.read()
-                    async with aiofiles.open(self.backup_file, 'w', encoding='utf-8') as dst:
-                        await dst.write(content)
+        """Save all tabs to disk with locking"""
+        async with self._lock:
+            try:
+                # Ensure parent directory exists
+                HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+                
+                # Create backup first
+                if self.history_file.exists():
+                    async with aiofiles.open(self.history_file, 'r', encoding='utf-8') as src:
+                        content = await src.read()
+                        async with aiofiles.open(self.backup_file, 'w', encoding='utf-8') as dst:
+                            await dst.write(content)
+                
+                # Write new history atomicaly (write to temp file then rename is better, 
+                # but for now we just use a lock + backup)
+                async with aiofiles.open(self.history_file, 'w', encoding='utf-8') as f:
+                    for tab in self._tabs.values():
+                        line = json.dumps(tab.to_dict(), ensure_ascii=False)
+                        await f.write(line + '\n')
+                
+                logger.debug(f"✅ Saved {len(self._tabs)} tabs to disk for {self.user_id}")
             
-            # Write new history
-            async with aiofiles.open(self.history_file, 'w', encoding='utf-8') as f:
-                for tab in self._tabs.values():
-                    line = json.dumps(tab.to_dict(), ensure_ascii=False)
-                    await f.write(line + '\n')
-            
-            logger.debug(f"Saved {len(self._tabs)} tabs to disk")
-        
-        except Exception as e:
-            logger.error(f"Failed to save history: {e}")
+            except Exception as e:
+                logger.error(f"❌ Failed to save history for {self.user_id}: {e}", exc_info=True)
     
     async def save_search(
         self,
