@@ -479,10 +479,7 @@ Generate {count} realistic interview questions that:
 6. **IMPORTANT**: Vary difficulty appropriately - mix of easy/medium/hard based on the interview level
 
 QUESTION MIX (distribute across these types):
-{self._get_round_question_mix(round_type, profile.domain) if round_type else f"""- Behavioral/Situational: Real scenarios they've likely faced at this level
-- Technical Deep-Dive: {profile.domain}-specific technical questions
-- Problem-Solving: Relevant to their actual tech stack
-- System Design (if senior+): Architecture decisions in their domain"""}
+{self._get_round_question_mix(round_type, profile.domain) if round_type else f"- Behavioral/Situational: Real scenarios they've likely faced at this level\\n- Technical Deep-Dive: {profile.domain}-specific technical questions\\n- Problem-Solving: Relevant to their actual tech stack\\n- System Design (if senior+): Architecture decisions in their domain"}
 
 CRITICAL REQUIREMENTS:
 - Make questions SPECIFIC to {profile.domain} and {skills_str}
