@@ -1,0 +1,68 @@
+# FastAPI + core deps
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+httpx
+requests
+python-multipart
+websockets
+orjson
+markdown
+pdfminer.six
+python-docx
+PyPDF2
+aiohttp
+beautifulsoup4
+lxml
+groq
+google-generativeai
+aiofiles
+
+# Embeddings (CPU)
+torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+sentence-transformers==2.2.2
+huggingface_hub==0.17.3
+
+# LangChain minimal
+langchain-community==0.2.6
+langchain-text-splitters==0.2.2
+
+# Vector DB
+qdrant-client==1.9.1
+
+# Reranking + BM25
+cohere
+rank-bm25
+
+# Additional dependencies for Docker builds and runtime
+starlette
+jinja2
+numpy
+scipy
+Pillow
+python-dotenv
+pytest
+matplotlib
+networkx
+joblib
+scikit-learn
+sentencepiece
+
+# Practice Mode Dependencies
+# Local STT (faster-whisper) - compatible with Python 3.12
+faster-whisper>=1.0.0
+
+# Local TTS - Using pyttsx3 (cross-platform) and gTTS as alternatives
+pyttsx3>=2.90  # Offline TTS (Windows SAPI, macOS NSSpeechSynthesizer, Linux espeak)
+gtts>=2.5.0  # Google Text-to-Speech (requires internet but simple)
+pydub>=0.25.0  # Audio processing for TTS
+
+# Speech Analytics
+librosa>=0.10.0
+soundfile>=0.12.0
+audioread>=3.0.0
+anyio
+
+# Piper TTS (optional, alternative to Coqui)
+# piper-tts==1.2.0  # Uncomment if using Piper instead of Coqui

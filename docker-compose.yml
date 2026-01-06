@@ -1,0 +1,33 @@
+services:
+  web:
+    # image: interviewppv/interview_prep:dev  # Use Docker Hub image
+    build: .  # Build locally with updated requirements.txt
+    container_name: interview_ast_web
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      # Prefer local Kroki renderer if available (avoids relying on external services)
+      - KROKI_URL=http://kroki:8000/mermaid/svg
+    volumes:
+      - ./app:/app/app
+      - ./data/history:/app/data/history
+      - ./data/models:/app/data/models
+      - ./data/curated:/app/data/curated            
+      - ./data/vector_db:/app/data/vector_db        
+      - ./data/qdrant:/app/data/qdrant              # only if Qdrant is used
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  kroki:
+    image: yuzutech/kroki:latest
+    container_name: interview_ast_kroki
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+

@@ -1,0 +1,75 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+.env
+# testing
+/coverage
+
+# production
+/build
+
+# misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+
+# Python
+.venv/
+venv/
+.env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Application data (runtime-generated)
+data/
+
+# PDF files (binary files not allowed on Hugging Face)
+*.pdf
+
+# Logs
+debug.log
+*.log
+
+# Pytest
+.pytest_cache/
+
+# Test/Demo files (local testing scripts only)
+test_*.py
+*_demo.html
+*_tester.html
+*_integration.html
+
+# Generated diagrams and backups
+*.svg
+*.zip
+*.backup
+*.tmp
+
+# IDEs
+.vscode/
+.idea/
+
+# Temporary files
+temp_view.txt
+test_request.json
+quick_test.py
+demo_comparison.py
+
+
