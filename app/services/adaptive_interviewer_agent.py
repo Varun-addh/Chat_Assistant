@@ -458,6 +458,12 @@ CONTENT_RELEVANCE: <assessment>"""
         round_context = self._get_round_specific_context(round_type) if round_type else ""
         round_focus = self._get_round_focus(round_type) if round_type else "general interview questions"
         
+        # Prepare fallback question mix (outside f-string to avoid backslash issues)
+        fallback_mix = f"""- Behavioral/Situational: Real scenarios they've likely faced at this level
+- Technical Deep-Dive: {profile.domain}-specific technical questions
+- Problem-Solving: Relevant to their actual tech stack
+- System Design (if senior+): Architecture decisions in their domain"""
+        
         prompt = f"""You are a senior technical interviewer conducting a {interview_level} interview{role_context}{company_context}.
 
 CANDIDATE PROFILE:
@@ -479,7 +485,7 @@ Generate {count} realistic interview questions that:
 6. **IMPORTANT**: Vary difficulty appropriately - mix of easy/medium/hard based on the interview level
 
 QUESTION MIX (distribute across these types):
-{self._get_round_question_mix(round_type, profile.domain) if round_type else f"- Behavioral/Situational: Real scenarios they've likely faced at this level\\n- Technical Deep-Dive: {profile.domain}-specific technical questions\\n- Problem-Solving: Relevant to their actual tech stack\\n- System Design (if senior+): Architecture decisions in their domain"}
+{self._get_round_question_mix(round_type, profile.domain) if round_type else fallback_mix}
 
 CRITICAL REQUIREMENTS:
 - Make questions SPECIFIC to {profile.domain} and {skills_str}
