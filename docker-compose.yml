@@ -19,10 +19,11 @@ services:
       - ./data/vector_db:/app/data/vector_db        
       - ./data/qdrant:/app/data/qdrant              # only if Qdrant is used
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      start_period: 300s
+      retries: 5
 
   kroki:
     image: yuzutech/kroki:latest

@@ -101,6 +101,13 @@ class SessionManager:
 			logging.getLogger(__name__).info(f"🔄 Session cache synced for {self.user_id}: +{loaded_count} new, -{len(to_remove)} deleted")
 
 	def _save(self, state: SessionState) -> None:
+		# 🚫 CRITICAL FIX: Don't save empty sessions to disk to prevent accumulation
+		# Only save sessions that have actual content (Q&A, title, or profile)
+		has_content = (state.qna and len(state.qna) > 0) or state.custom_title or state.profile_text
+		if not has_content:
+			print(f"⏭️ Skipping save of empty session {state.session_id} (no content yet)")
+			return
+		
 		path = self._session_path(state.session_id)
 		try:
 			# Ensure directory exists before saving
@@ -143,7 +150,8 @@ class SessionManager:
 			session_id = str(uuid.uuid4())
 			state = SessionState(session_id=session_id)
 			self._sessions[session_id] = state
-			self._save(state)
+			# Don't save empty session to disk - will be saved when content is added
+			print(f"📝 Created new session {session_id} in memory (will save when content added)")
 			
 			# Update debounce tracking
 			self._last_session_creation = current_time
@@ -217,6 +225,29 @@ class SessionManager:
 		# Reload from disk first to catch sessions created/updated by other workers
 		self._load_all()
 		
+		# 🧹 CLEANUP: Delete old empty sessions from disk and memory
+		sessions_to_delete = []
+		for session_id, s in self._sessions.items():
+			has_content = (s.qna and len(s.qna) > 0) or s.custom_title or s.profile_text
+			is_recent = (datetime.utcnow() - s.last_update).total_seconds() < 300  # 5 minutes
+			
+			# Mark old empty sessions for deletion
+			if not has_content and not is_recent:
+				sessions_to_delete.append(session_id)
+		
+		# Delete marked sessions from disk and memory
+		for session_id in sessions_to_delete:
+			session_path = self._session_path(session_id)
+			try:
+				if session_path.exists():
+					session_path.unlink()
+					print(f"🗑️ Deleted old empty session: {session_id}")
+			except Exception as e:
+				print(f"⚠️ Failed to delete session {session_id}: {e}")
+			# Remove from memory
+			if session_id in self._sessions:
+				del self._sessions[session_id]
+		
 		items: List[dict] = []
 		for s in self._sessions.values():
 			# Determine title: Custom title > First question > "New Chat"
@@ -227,16 +258,6 @@ class SessionManager:
 					first_q = s.qna[0].get("question", "")
 					title = (first_q[:50] + "...") if len(first_q) > 50 else first_q
 			
-			# 🧹 Cleanup: Skip old empty sessions to keep the sidebar clean
-			has_content = (s.qna and len(s.qna) > 0) or s.custom_title or s.profile_text
-			
-			# We only show empty sessions if they are very recent (e.g. just created by the user)
-			# or if they have actual content.
-			is_recent = (datetime.utcnow() - s.last_update).total_seconds() < 300 # 5 minutes
-			
-			if not has_content and not is_recent:
-				continue
-
 			items.append({
 				"session_id": s.session_id,
 				"title": title,

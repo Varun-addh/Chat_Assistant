@@ -100,7 +100,8 @@ class LocalTTSService:
             return True
             
         except Exception as e:
-            logger.error(f"Failed to initialize pyttsx3: {e}")
+            logger.warning(f"Failed to initialize pyttsx3: {e}")
+            logger.info("TTS will use fallback mode (gTTS or mock) - This is expected in Docker without eSpeak/SAPI")
             return False
     
     def cleanup(self):
@@ -430,12 +431,18 @@ class LocalTTSService:
     
     def warmup(self):
         """Warm up the TTS engine with a test synthesis."""
-        # Only initialize pyttsx3 if it's the selected engine
-        if self.config.engine in ["pyttsx3", "offline"]:
-            if not self._initialized and PYTTSX3_AVAILABLE:
-                self._init_pyttsx3()
-        
-        logger.info("TTS warmup complete")
+        try:
+            # Only initialize pyttsx3 if it's the selected engine
+            if self.config.engine in ["pyttsx3", "offline"]:
+                if not self._initialized and PYTTSX3_AVAILABLE:
+                    success = self._init_pyttsx3()
+                    if not success:
+                        logger.info("TTS pyttsx3 initialization skipped - fallback mode active")
+            
+            logger.info("TTS warmup complete")
+        except Exception as e:
+            logger.warning(f"TTS warmup had issues (non-critical): {e}")
+            logger.info("TTS will operate in fallback mode")
     
     def get_engine_info(self) -> dict:
         """Get information about the TTS engine."""

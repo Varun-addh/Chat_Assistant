@@ -1758,7 +1758,7 @@ class LLMService:
 		return '\n'.join(formatted_lines)
 
 	def _strip_latex_math(self, text: str) -> str:
-		"""Remove LaTeX math markers ($...$, \(...\), \[...\]) from non-code blocks while preserving inner text.
+		r"""Remove LaTeX math markers ($...$, \(...\), \[...\]) from non-code blocks while preserving inner text.
 		Skips fenced code blocks entirely."""
 		import re
 		lines = text.split('\n')

@@ -75,7 +75,7 @@ async def get_history(
     request: Request,
     limit: Optional[int] = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    sort_by: str = Query(default="created_at", regex="^(created_at|query|question_count)$"),
+    sort_by: str = Query(default="created_at", pattern="^(created_at|query|question_count)$"),
     ascending: bool = Query(default=False)
 ):
     """
@@ -396,7 +396,7 @@ from fastapi import Path
 @router.get("/export/{format}")
 async def export_history(
     request: Request,
-    format: str = Path(..., regex="^(json|csv)$", description="Export format (json or csv)")
+    format: str = Path(..., pattern="^(json|csv)$", description="Export format (json or csv)")
 ):
     """
     Export entire history
