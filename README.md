@@ -4,8 +4,7 @@ emoji: 🎯
 colorFrom: blue
 colorTo: purple
 sdk: docker
-sdk_version: "4.0"
-app_port: 8000
+app_port: 7860
 pinned: false
 license: mit
 ---
