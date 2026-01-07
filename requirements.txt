@@ -1,8 +1,9 @@
 # FastAPI + core deps
 fastapi
 uvicorn
-pydantic
+pydantic[email]
 pydantic-settings
+email-validator>=2.1.0
 httpx
 requests
 python-multipart

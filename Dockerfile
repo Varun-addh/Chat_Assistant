@@ -33,6 +33,10 @@ RUN pip install \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# Safety net: ensure critical runtime deps are present (HF build caches can be tricky).
+RUN pip install --no-cache-dir email-validator \
+    && python -c "import email_validator; import jwt; print('deps ok')"
+
 # Copy application
 COPY . .
 
