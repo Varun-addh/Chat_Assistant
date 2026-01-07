@@ -1,0 +1,142 @@
+"""
+Usage tracking utilities for billing and analytics
+"""
+from datetime import datetime, timezone
+from typing import Optional
+from sqlalchemy.orm import Session
+from app.models import UsageRecord, SessionRecord, User
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def track_api_usage(
+    db: Session,
+    user: Optional[User],
+    feature: str,
+    endpoint: str,
+    tokens_used: int = 0,
+    cost_usd: float = 0.0,
+    metadata: dict = None
+):
+    """
+    Track API usage for a user
+    
+    Args:
+        db: Database session
+        user: User object (None for guest)
+        feature: Feature name (copilot, mock_interview, practice_mode, etc.)
+        endpoint: API endpoint path
+        tokens_used: Number of tokens consumed
+        cost_usd: Estimated cost in USD
+        metadata: Additional context
+    """
+    try:
+        if user is None:
+            # Track guest usage with special user_id
+            user_id = "guest"
+        else:
+            user_id = user.id
+        
+        record = UsageRecord(
+            user_id=user_id,
+            feature=feature,
+            endpoint=endpoint,
+            tokens_used=tokens_used,
+            api_calls=1,
+            cost_usd=cost_usd,
+            extra_data=metadata or {},
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        db.add(record)
+        db.commit()
+        
+        logger.debug(f"📊 Usage tracked: user={user_id}, feature={feature}, tokens={tokens_used}")
+    
+    except Exception as e:
+        logger.error(f"❌ Failed to track usage: {e}")
+        db.rollback()
+
+
+def track_session(
+    db: Session,
+    user: User,
+    session_id: str,
+    session_type: str,
+):
+    """
+    Track a new session
+    
+    Args:
+        db: Database session
+        user: User object
+        session_id: Session identifier
+        session_type: Type of session (qa, mock_interview, practice_mode)
+    """
+    try:
+        record = SessionRecord(
+            id=session_id,
+            user_id=user.id,
+            session_type=session_type,
+            question_count=0,
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+            last_activity=datetime.now(timezone.utc)
+        )
+        
+        db.add(record)
+        db.commit()
+        
+        logger.debug(f"📊 Session tracked: user={user.id}, session={session_id}, type={session_type}")
+    
+    except Exception as e:
+        logger.error(f"❌ Failed to track session: {e}")
+        db.rollback()
+
+
+def get_user_usage_stats(db: Session, user_id: str, days: int = 1):
+    """
+    Get usage statistics for a user
+    
+    Args:
+        db: Database session
+        user_id: User ID
+        days: Number of days to look back
+    
+    Returns:
+        Dict with usage stats
+    """
+    from datetime import timedelta
+    
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    
+    # Query usage records
+    records = db.query(UsageRecord).filter(
+        UsageRecord.user_id == user_id,
+        UsageRecord.timestamp >= cutoff
+    ).all()
+    
+    # Aggregate stats
+    stats = {
+        "total_api_calls": len(records),
+        "total_tokens": sum(r.tokens_used for r in records),
+        "total_cost_usd": sum(r.cost_usd for r in records),
+        "features_used": {},
+    }
+    
+    # Group by feature
+    for record in records:
+        feature = record.feature
+        if feature not in stats["features_used"]:
+            stats["features_used"][feature] = {
+                "calls": 0,
+                "tokens": 0,
+                "cost": 0.0
+            }
+        
+        stats["features_used"][feature]["calls"] += record.api_calls
+        stats["features_used"][feature]["tokens"] += record.tokens_used
+        stats["features_used"][feature]["cost"] += record.cost_usd
+    
+    return stats

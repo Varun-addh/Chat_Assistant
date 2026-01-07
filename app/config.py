@@ -28,10 +28,15 @@ class Settings(BaseSettings):
 	host: str = "0.0.0.0"
 	port: int = 8000
 	cors_allow_origins: List[str] = ["*"]
+	# Public base URL used to build absolute redirect URIs (OAuth callbacks, etc.)
+	backend_base_url: str = "http://localhost:8000"
+	# Frontend URL for redirecting back after OAuth
+	frontend_url: str = "http://localhost:8080"
 
 	# Auth
 	api_key: str | None = None  # simple bearer key if provided
 	cookie_secret: str = secrets.token_urlsafe(32)
+	jwt_secret_key: str = secrets.token_urlsafe(32)  # JWT secret for authentication
 
 	# LLM Provider Selection
 	llm_provider: str = "gemini"  # default global provider; Interview Intelligence overrides to Groq internally
@@ -66,6 +71,10 @@ class Settings(BaseSettings):
 	# Update default to Gemini 3 preview model. Can be overridden via env var (GEMINI_MODEL).
 	gemini_model: str = "models/gemini-3-flash-preview"
 
+	# Google OAuth (Login with Google)
+	google_client_id: str | None = None
+	google_client_secret: str | None = None
+
 	# Serper API (for faster, more reliable web search - 2500 free searches/month)
 	serper_api_key: str | None = None
 
@@ -82,6 +91,13 @@ class Settings(BaseSettings):
 	enable_code_execution: bool = True
 	enable_query_expansion: bool = True
 	enable_streaming: bool = True
+
+	# Startup / performance flags
+	# Useful for tests, CI, and lightweight deployments.
+	# When enabled, we skip expensive model/service initialization in app startup.
+	fast_startup: bool = False
+	# Force-disable Interview Intelligence startup even if optional deps are installed.
+	disable_interview_intelligence: bool = False
 	
 	# API Key Policy
 	require_user_api_key: bool = False  # If True, users MUST provide their own API key (server keys won't be used as fallback)

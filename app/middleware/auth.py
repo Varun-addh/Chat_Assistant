@@ -1,95 +1,75 @@
 """
 User authentication middleware for Stratax AI
 
-Extracts user_id from various sources and attaches to request state
-for personalized history and session management.
+Extracts user from JWT token and attaches to request state
+for rate limiting, quotas, and personalized features.
 """
 from fastapi import Request, Header
 from typing import Optional
 import logging
+import jwt
 
 logger = logging.getLogger(__name__)
 
 
+def _extract_user_from_token(token: str):
+    """
+    Extract user from JWT token
+    
+    Returns User object or None
+    """
+    try:
+        from app.auth import SECRET_KEY, ALGORITHM
+        from app.database import get_db_context
+        from app.models import User
+        
+        # Decode JWT
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        
+        if not user_id:
+            return None
+        
+        # Get user from database
+        with get_db_context() as db:
+            user = db.query(User).filter(User.id == user_id).first()
+            return user
+    
+    except Exception as e:
+        logger.debug(f"Token extraction failed: {e}")
+        return None
+
+
 async def user_auth_middleware(request: Request, call_next):
     """
-    Middleware to extract and attach user_id to request state
+    Middleware to extract and attach user to request state
     
-    Checks for user_id in the following order:
-    1. X-User-ID header
-    2. Authorization header (Bearer token - extract user from JWT)
-    3. Query parameter user_id
-    4. Cookie user_id
+    Checks for Authorization header with Bearer token (JWT)
+    Attaches user object to request.state.user for downstream use
     
-    If no user_id found, request proceeds without authentication (guest mode)
+    If no valid token, request proceeds as guest (rate limited)
     """
-    user_id = None
+    user = None
     
-    # 1. Check X-User-ID header (simplest method for frontend)
-    user_id = request.headers.get("X-User-ID") or request.headers.get("x-user-id")
+    # Check Authorization header (JWT token)
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+        user = _extract_user_from_token(token)
     
-    # 2. Check Authorization header (for JWT tokens)
-    if not user_id:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.split(" ")[1]
-            # For now, use token as user_id (in production, decode JWT)
-            # TODO: Implement JWT decoding to extract user_id
-            user_id = _extract_user_from_token(token)
+    # Attach user to request state (or None for guests)
+    request.state.user = user
     
-    # 3. Check query parameter
-    if not user_id:
-        user_id = request.query_params.get("user_id")
-    
-    # 4. Check cookie
-    if not user_id:
-        user_id = request.cookies.get("user_id")
-    
-    # Attach user_id to request state
-    if user_id:
-        request.state.user_id = user_id
-        logger.debug(f"Authenticated request for user: {user_id}")
+    # For backwards compatibility, also set user_id
+    if user:
+        request.state.user_id = user.id
+        logger.debug(f"Authenticated request: {user.email} ({user.tier})")
     else:
-        # Guest mode - no user_id attached
-        logger.debug("Guest request (no user_id)")
+        request.state.user_id = None
+        logger.debug("Guest request (unauthenticated)")
     
     response = await call_next(request)
     return response
-
-
-def _extract_user_from_token(token: str) -> Optional[str]:
-    """
-    Extract user_id from JWT token
-    
-    For now, this is a placeholder. In production:
-    1. Decode JWT using secret key
-    2. Verify signature
-    3. Extract user_id from payload
-    4. Check expiration
-    
-    Args:
-        token: JWT token string
-        
-    Returns:
-        user_id if valid, None otherwise
-    """
-    try:
-        # Placeholder: In production, use PyJWT library
-        # import jwt
-        # payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        # return payload.get("user_id")
-        
-        # For now, accept token as-is if it looks like a user_id
-        # This allows testing without full JWT implementation
-        if token and len(token) > 0:
-            # Simple validation: alphanumeric + hyphens (UUID-like)
-            if all(c.isalnum() or c in ['-', '_'] for c in token):
-                return token
-        
-        return None
-    except Exception as e:
-        logger.warning(f"Failed to extract user from token: {e}")
-        return None
 
 
 def get_user_id_from_request(request: Request) -> Optional[str]:
@@ -103,3 +83,4 @@ def get_user_id_from_request(request: Request) -> Optional[str]:
         user_id if authenticated, None otherwise
     """
     return getattr(request.state, "user_id", None)
+

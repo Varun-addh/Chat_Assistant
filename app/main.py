@@ -10,6 +10,7 @@ from app.routers.ws import router as ws_router
 from app.routers.diagrams import router as diagrams_router
 from app.routers.evaluate import router as evaluate_router
 from app.routers.history import router as history_router
+from app.routers.auth_routes import router as auth_router
 from app.utils.audit import auditor
 from app.services.llm_service import llm_service
 import logging
@@ -42,6 +43,15 @@ except ModuleNotFoundError as e:
     else:
         raise
 
+# Allow explicitly disabling heavy subsystems (useful for tests/CI)
+if settings.fast_startup or settings.disable_interview_intelligence:
+    INTERVIEW_INTELLIGENCE_AVAILABLE = False
+    interview_intelligence = None  # type: ignore[assignment]
+    interview_intelligence_service = None  # type: ignore[assignment]
+    base_interview_service = None  # type: ignore[assignment]
+    enhanced_interview_service = None  # type: ignore[assignment]
+    ultra_production_service = None  # type: ignore[assignment]
+
 from app.routers.mock_interview import router as mock_interview_router
 from app.services.mock_interview_service import initialize_mock_interview_service
 from app.services.history_manager import default_history_manager
@@ -67,6 +77,15 @@ logger.info("="*60)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan: startup and shutdown."""
+    # Initialize database
+    from app.database import init_db
+    init_db()
+    logger.info("✅ Database initialized")
+
+    # Start in-memory rate limiter cleanup loop
+    from app.middleware.rate_limit import rate_limiter
+    rate_limiter.start()
+    
     if INTERVIEW_INTELLIGENCE_AVAILABLE:
         # Startup - initialize enhanced service first, then share its resources with base
         await enhanced_interview_service.initialize()
@@ -103,7 +122,8 @@ async def lifespan(app: FastAPI):
     
     # Initialize Practice Mode
     # Always initialize if enabled, even without server key (user can provide their own in Bridge Settings)
-    if settings.practice_mode_enabled:
+    # NOTE: In fast_startup we skip Practice Mode initialization to keep startup light.
+    if (not settings.fast_startup) and settings.practice_mode_enabled:
         # Use server key as default if available, otherwise just use a placeholder
         # The service will prioritize keys from request headers (Bridge Settings) anyway
         init_practice_mode(
@@ -116,14 +136,22 @@ async def lifespan(app: FastAPI):
         else:
             print("🔧 Practice Mode initialized (awaiting Bridge Settings key)")
     else:
-        print("⚠️  Practice Mode disabled in settings")
+        if settings.fast_startup:
+            print("⚡ Fast startup enabled: Practice Mode init skipped")
+        else:
+            print("⚠️  Practice Mode disabled in settings")
     
     yield
     
     # Shutdown - graceful cleanup
-    # Clean up practice mode TTS resources
-    from app.routers.practice_mode import cleanup_practice_mode
-    cleanup_practice_mode()
+    # Stop in-memory rate limiter cleanup loop
+    from app.middleware.rate_limit import rate_limiter
+    await rate_limiter.shutdown()
+
+    # Clean up practice mode TTS resources (only if it was initialized)
+    if (not settings.fast_startup) and settings.practice_mode_enabled:
+        from app.routers.practice_mode import cleanup_practice_mode
+        cleanup_practice_mode()
     
     # Close interview intelligence services (only close enhanced, base and ultra share resources)
     if INTERVIEW_INTELLIGENCE_AVAILABLE:
@@ -150,6 +178,10 @@ app.add_middleware(
 # User Authentication Middleware (for personalized history)
 from app.middleware.auth import user_auth_middleware
 app.middleware("http")(user_auth_middleware)
+
+# Rate Limiting Middleware (protects API costs)
+from app.middleware.rate_limit import rate_limit_middleware
+app.middleware("http")(rate_limit_middleware)
 
 
 @app.get("/health")
@@ -178,6 +210,7 @@ async def identity_check() -> JSONResponse:
 	})
 
 # Routers
+app.include_router(auth_router)  # Authentication routes (register, login, etc.)
 app.include_router(history_router, prefix="/api/history", tags=["history"])
 app.include_router(questions_router, prefix="/api", tags=["questions"])
 app.include_router(diagrams_router, prefix="/api", tags=["diagrams"])
