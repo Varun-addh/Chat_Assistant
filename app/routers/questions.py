@@ -26,6 +26,10 @@ import asyncio
 import logging
 
 from app.utils.story_contract import extract_mermaid_first, enforce_story_contract, sanitize_mermaid_subset
+from app.utils.mermaid_sanitizer import MermaidSanitizer
+
+from app.database import get_db_context
+from app.utils.usage_tracking import track_api_usage, track_session
 
 logger = logging.getLogger(__name__)
 
@@ -56,100 +60,60 @@ def _validate_specificity(text: str, system_description: str) -> tuple[bool, lis
 	if generic_count > 3:
 		issues.append(f"Too many generic phrases ({generic_count}): use actual tech names and mechanisms")
 	
-	# Check for specific tech mentions (indicates real design thinking)
-	tech_indicators = [
-		r'\b(redis|postgres|postgresql|kafka|elasticsearch|cassandra|mongodb|dynamodb|s3|sqs|rabbitmq)\b',
-		r'\b\d+\s*(ms|milliseconds?|sec|seconds?|minutes?|MB|GB|TB|PB|req/sec|QPS|TPS)\b',  # Numbers with units
-		r'\b(sharding|partitioning|replication|caching|indexing|hashing)\b',
-		r'\b(two-phase commit|optimistic locking|pessimistic locking|MVCC|CAP theorem)\b',
+	# Specificity should be domain-agnostic and avoid buzzword forcing.
+	# We look for:
+	# - concrete architecture nouns / components
+	# - at least one metric (or explicit comparison)
+	# - at least one reliability mechanism
+	tech_names = [
+		r'\b(redis|memcached|postgres|postgresql|mysql|cassandra|mongodb|dynamodb|bigtable|elasticsearch|opensearch)\b',
+		r'\b(kafka|pubsub|pub/sub|rabbitmq|sqs|kinesis)\b',
+		r'\b(s3|gcs|object storage|cdn|cloudfront|cloudflare)\b',
 	]
-	
-	has_specifics = any(re.search(pattern, text, re.IGNORECASE) for pattern in tech_indicators)
-	if not has_specifics:
-		issues.append("Missing specific technology names, metrics, or architectural patterns")
-	
-	# Check for quantified reasoning (numbers, metrics, comparisons)
-	has_numbers = bool(re.search(r'\b\d+\s*[a-z%]+\b', text))
-	has_comparison = bool(re.search(r'\b(vs|versus|compared to|instead of|chose.*over)\b', text_lower))
-	
-	if not has_numbers and not has_comparison:
-		issues.append("Missing quantified reasoning (numbers, metrics, or technology comparisons)")
+	arch_nouns = [
+		r'\b(api gateway|gateway|load balancer|waf|cdn|edge)\b',
+		r'\b(cache|caching|ttl|eviction|lru)\b',
+		r'\b(database|db|index|indexing|search)\b',
+		r'\b(queue|broker|worker|job|scheduler|dlq)\b',
+		r'\b(replication|failover|partitioning|shard|sharding|consistency)\b',
+	]
+	metric_patterns = [
+		r'\b(p50|p95|p99)\b',
+		r'\b\d+\s*(ms|milliseconds?|s|sec|seconds?|m|min|minutes?|hrs?|hours?)\b',
+		r'\b\d+(?:\.\d+)?\s*(rps|qps|tps|req/s|req/sec)\b',
+		r'\b\d+(?:\.\d+)?\s*(kb|mb|gb|tb|pb)\b',
+		r'\b\d+(?:\.\d+)?%\b',
+	]
+	reliability_patterns = [
+		r'\b(retry|backoff|timeout|circuit breaker|fallback|idempotent|idempotency)\b',
+		r'\b(rate limit|throttle|shed load)\b',
+		r'\b(reconcile|reconciliation|replay|dead letter|dlq)\b',
+	]
+
+	has_tech = any(re.search(p, text, re.IGNORECASE) for p in tech_names)
+	has_arch = any(re.search(p, text, re.IGNORECASE) for p in arch_nouns)
+	has_metric = any(re.search(p, text, re.IGNORECASE) for p in metric_patterns)
+	has_comparison = bool(re.search(r'\b(vs|versus|compared to|instead of|chose\s+.*\s+over)\b', text_lower))
+	has_reliability = any(re.search(p, text, re.IGNORECASE) for p in reliability_patterns)
+
+	if not (has_tech or has_arch):
+		issues.append("Missing concrete components (e.g., cache/DB/queue/CDN/gateway) or recognizable technologies")
+
+	if not (has_metric or has_comparison):
+		issues.append("Missing quantified reasoning (metrics with units or an explicit trade-off comparison)")
+
+	if not has_reliability:
+		issues.append("Missing reliability mechanisms (retry/backoff/timeout/DLQ/fallback/idempotency)")
 	
 	return len(issues) == 0, issues
 
 
 def _sanitize_mermaid_from_llm(mermaid_code: str) -> str:
 	"""Remove CSS/style/HTML artifacts that LLM might inject into Mermaid code.
-	Also fix common Mermaid syntax errors.
-	
-	LLMs sometimes add @import, @keyframes, CSS selectors, or HTML despite
-	being instructed not to. This breaks rendering.
+
+	Delegates to the single-source Mermaid sanitization pipeline.
 	"""
-	import re
-	
-	if not mermaid_code:
-		return mermaid_code
-	
-	# Split into lines
-	lines = mermaid_code.split('\n')
-	cleaned_lines = []
-	
-	# Patterns to reject (CSS/HTML artifacts)
-	reject_patterns = [
-		'@import', '@keyframes', '@font-face', '@media',
-		'#mermaid-svg', '#container', '.edge-', '.node-',
-		'<style>', '</style>', '<script>', '</script>',
-		'font-family:', 'font-size:', 'fill:', 'stroke:',
-		'background-color:', 'color:', 'opacity:',
-		'trebuchet', 'verdana', 'sans-serif',  # Font names indicate CSS leak
-		'}}#', '{font-', ':root{'  # CSS selector patterns
-	]
-	
-	for line in lines:
-		stripped = line.strip()
-		
-		# Skip empty lines at the start
-		if not stripped and not cleaned_lines:
-			continue
-		
-		# Skip lines that look like CSS/HTML
-		if any(pattern in line.lower() for pattern in reject_patterns):
-			logger.warning(f"[Mermaid Sanitizer] Removing CSS/HTML line: {stripped[:80]}")
-			continue
-		
-		# Skip lines that are pure CSS selectors (contain { } but not Mermaid syntax)
-		if '{' in line and '}' in line and not any(x in line for x in ['[', ']', '(', ')']):
-			logger.warning(f"[Mermaid Sanitizer] Removing CSS selector: {stripped[:80]}")
-			continue
-		
-		# Skip init blocks
-		if stripped.startswith('%%{init') or stripped.endswith('}%%'):
-			logger.warning(f"[Mermaid Sanitizer] Removing init block: {stripped[:80]}")
-			continue
-		
-		cleaned_lines.append(line)
-	
-	cleaned = '\n'.join(cleaned_lines)
-	
-	# Fix common arrow syntax errors: -> should be --> in Mermaid
-	cleaned = re.sub(r'(\w+|\])\s*->\s*(\w+|\[)', r'\1 --> \2', cleaned)
-	
-	# Fix single dash arrows: A - B should be A --> B
-	cleaned = re.sub(r'(\w+|\])\s+-\s+(\w+|\[)', r'\1 --> \2', cleaned)
-	
-	# Ensure first line is a valid diagram type
-	first_lines = [l.strip() for l in cleaned.split('\n') if l.strip()]
-	if first_lines:
-		first = first_lines[0].lower()
-		if not any(first.startswith(t) for t in ['flowchart', 'graph', 'sequencediagram', 'classdiagram']):
-			# Prepend flowchart LR if missing
-			cleaned = 'flowchart LR\n' + cleaned
-	
-	# Log if we made changes
-	if len(cleaned) < len(mermaid_code) * 0.9:
-		logger.info(f"[Mermaid Sanitizer] Cleaned {len(mermaid_code) - len(cleaned)} chars of CSS/HTML")
-	
-	return cleaned.strip()
+	return MermaidSanitizer.sanitize_from_llm(mermaid_code)
 
 
 async def _auto_evaluate_if_code(session_manager: SessionManager, session_id: str, question: str, answer: str, api_key: Optional[str] = None) -> None:
@@ -206,9 +170,15 @@ async def _auto_evaluate_if_code(session_manager: SessionManager, session_id: st
 
 @router.post("/session", response_model=CreateSessionResponse)
 async def create_session(request: Request):
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	state = await manager.create_session()
+
+	# Track sessions only for authenticated users (guests remain file-based only)
+	user = getattr(request.state, "user", None)
+	if user:
+		with get_db_context() as db:
+			track_session(db, user, state.session_id, session_type="qa")
 	return CreateSessionResponse(session_id=state.session_id)
 
 
@@ -259,8 +229,9 @@ async def submit_question(
 			detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue."
 		)
 	
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
+	recovered_from_session_id: Optional[str] = None
 	
 	try:
 		state = await manager.get(payload.session_id)
@@ -268,13 +239,23 @@ async def submit_question(
 			# Auto-recovery: Create a new session if the requested one doesn't exist
 			# This handles cases where backend was restarted or storage was cleared
 			logger.info(f"Session {payload.session_id} not found. Creating new session for recovery.")
+			recovered_from_session_id = payload.session_id
 			state = await manager.create_session()
-			# Update the response to include the new session_id so frontend can sync
-			logger.info(f"Auto-created new session: {state.session_id}")
+			# IMPORTANT: update the active session_id so subsequent saves/readbacks work.
+			payload.session_id = state.session_id
+			logger.info(f"Auto-created new session: {state.session_id} (recovered from {recovered_from_session_id})")
 	except KeyError:
 		# Fallback: create new session
+		recovered_from_session_id = payload.session_id
 		state = await manager.create_session()
+		payload.session_id = state.session_id
 		logger.info(f"Created new session due to KeyError: {state.session_id}")
+
+	# Expose the effective session_id to the client (helps UI stay stable across refresh/tabs)
+	response.headers["X-Stratax-Session-Id"] = payload.session_id
+	if recovered_from_session_id and recovered_from_session_id != payload.session_id:
+		response.headers["X-Stratax-Session-Recovered"] = "1"
+		response.headers["X-Stratax-Old-Session-Id"] = recovered_from_session_id
 
 	if not payload.question.strip():
 		raise HTTPException(status_code=400, detail="Empty question")
@@ -343,6 +324,12 @@ async def submit_question(
 				headers={
 					"X-Stratax-Guard": "identity",
 					"X-Stratax-App": getattr(settings, "app_name", "Stratax AI"),
+					"X-Stratax-Session-Id": payload.session_id,
+					**(
+						{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
+						if recovered_from_session_id and recovered_from_session_id != payload.session_id
+						else {}
+					),
 				},
 			)
 
@@ -391,23 +378,22 @@ async def submit_question(
 	# If system design detected AND user hasn't chosen a mode yet, ask for preference.
 	arch_mode = payload.architecture_mode
 	if is_architecture and not arch_mode:
-		logger.info(f"🏗️ System design detected: {payload.question} - asking user for preference")
-		
-		# Return minimal trigger text that frontend will detect and replace with UI card
-		# This message contains the keywords to trigger frontend detection but is meant to be hidden/replaced
-		choice_message = (
-			"Choose your preferred architecture format: "
-			"Single Comprehensive or Multi-View. "
-			"architecture_mode"
-		)
-		
-		# Don't save this internal trigger message to history
-		# The actual architecture response will be saved later
-		
+		# IMPORTANT: Do NOT leak a magic trigger string into chat text.
+		# Instead, return a structured UI hint so the frontend can render a selector.
+		# The client should re-submit /api/question with architecture_mode set.
+		logger.info("🏗️ System design detected with no architecture_mode: returning ui_action chooser")
 		return AnswerOut(
-			answer=choice_message,
+			answer="",
 			created_at=datetime.utcnow(),
 			truncated=False,
+			ui_action="choose_architecture_mode",
+			ui_payload={
+				"default": "multi-view",
+				"options": [
+					{"id": "single", "label": "Single View", "description": "One comprehensive architecture diagram"},
+					{"id": "multi-view", "label": "Multi View", "description": "5 focused diagrams: overview, flow, data, deployment, observability"},
+				],
+			},
 		)
 
 	# Route based on user's choice
@@ -464,6 +450,44 @@ async def submit_question(
 					ArchitectureViewType.OBSERVABILITY,
 				]
 				
+				def _fallback_view(view_name: str, view_type: ArchitectureViewType, err: Exception | None = None) -> tuple[str, str]:
+					"""Return (mermaid_code, explanation) placeholders for a view.
+
+					We use this when the LLM provider rate-limits or errors, so the
+					frontend still receives a complete 5-view package.
+					"""
+					err_msg = str(err).replace("\n", " ") if err else "Unknown error"
+					mermaid = (
+						"flowchart TD\n"
+						"  Client[Client] --> API[API]\n"
+						"  API --> Compute[Compute]\n"
+						"  Compute --> Store[(Storage)]\n"
+					)
+					# Prefer the same 5-layer scaffold the prompts enforce.
+					# (Internal method, but keeps formatting consistent.)
+					layer_scaffold = ""
+					try:
+						layer_scaffold = arch_gen._build_layer_explanations(view_type)  # type: ignore[attr-defined]
+					except Exception:
+						layer_scaffold = "### Layer 1 - Client & Auth\n- What happens: (generation unavailable)\n\n### Final Summary\nGeneration unavailable."
+
+					if view_name == "SYSTEM_OVERVIEW":
+						explanation = (
+							"- Generation degraded due to an LLM/provider error (showing safe fallback).\n"
+							"- This view still shows the core building blocks and their primary links.\n"
+							"- Retry later if you want richer domain-specific details.\n"
+							"- Error: " + _safe_ascii(err_msg) + "\n"
+							"- The remaining views may also degrade if the provider is rate-limited.\n"
+							"Goal: Provide a stable multi-view package even under partial failures."
+						)
+					else:
+						explanation = (
+							"NOTE: LLM generation failed for this view; showing the canonical 5-layer template.\n"
+							"Error: " + _safe_ascii(err_msg) + "\n\n" + layer_scaffold
+						)
+
+					return mermaid, explanation
+
 				# 3. Generate each view with diagram + story-driven explanation
 				full_response = f"# System Design: {payload.question}\n\n"
 				
@@ -482,62 +506,69 @@ async def submit_question(
 					base_prompt = f"{prompt_data['user_prompt']}"
 					combined_prompt = base_prompt
 
-					# Generate view with up to 2 retries if diagram is too complex
+					# Generate view with up to 1 retry; if provider errors, fall back per-view.
 					response_text = ""
 					mermaid_code = ""
 					explanation = ""
 					last_issues: List[str] = []
 
-					for attempt in range(3):
-						response_text, _ = await llm_service.generate_answer(
-							question=combined_prompt,
-							system_prompt=prompt_data['system_prompt'],
-							api_key=api_key,
-							apply_auto_overrides=False,
-						)
+					try:
+						# Keep retries tightly bounded to prevent quota storms.
+						for attempt in range(2):
+							response_text, _ = await llm_service.generate_answer(
+								question=combined_prompt,
+								system_prompt=prompt_data['system_prompt'],
+								api_key=api_key,
+								apply_auto_overrides=False,
+							)
 
-						# Parse response: Mermaid diagram first, then explanation
-						mermaid_code, raw_explanation = extract_mermaid_first(response_text or "")
-						if not mermaid_code:
-							mermaid_code = "flowchart TD\n  Error[No diagram generated]"
-						explanation = raw_explanation
-						explanation = _sanitize_view_explanation(explanation)
-						explanation = enforce_story_contract(view_name, payload.question, explanation)
-						explanation = _safe_ascii(explanation)
-						mermaid_code = sanitize_mermaid_subset(mermaid_code)
+							# Parse response: Mermaid diagram first, then explanation
+							mermaid_code, raw_explanation = extract_mermaid_first(response_text or "")
+							if not mermaid_code:
+								mermaid_code = "flowchart TD\n  Error[No diagram generated]"
+							explanation = raw_explanation
+							explanation = _sanitize_view_explanation(explanation)
+							explanation = enforce_story_contract(view_name, payload.question, explanation)
+							explanation = _safe_ascii(explanation)
+							mermaid_code = sanitize_mermaid_subset(mermaid_code)
 
-						# Validate specificity (skip for SYSTEM_OVERVIEW which is intentionally brief)
-						if view_name != "SYSTEM_OVERVIEW":
-							is_specific, specificity_issues = _validate_specificity(explanation, payload.question)
-							if not is_specific and attempt < 2:
-								logger.warning(f"[{view_name}] Content not specific enough (attempt {attempt+1}): {specificity_issues}")
-								combined_prompt = (
+							# Validate specificity (skip for SYSTEM_OVERVIEW which is intentionally brief)
+							if view_name != "SYSTEM_OVERVIEW":
+								is_specific, specificity_issues = _validate_specificity(explanation, payload.question)
+								if not is_specific and attempt < 1:
+									logger.warning(f"[{view_name}] Content not specific enough (attempt {attempt+1}): {specificity_issues}")
+									combined_prompt = (
 									f"MAKE IT MORE SPECIFIC. Previous answer was too generic: {', '.join(specificity_issues)}.\n\n"
-									f"You MUST include:\n"
-									f"- Actual technology names (Redis, Postgres, Kafka, etc.)\n"
-									f"- Actual numbers with units (50ms, 10K req/sec, 95% cache hit)\n"
-									f"- Specific mechanisms/algorithms (GEORADIUS, two-phase commit, sharding by user_id)\n"
-									f"- Technology comparisons (Chose X over Y because...)\n\n"
-									f"BAD: 'caching layer stores data'\n"
-									f"GOOD: 'Redis cluster: 3 primary + 3 replica, LRU eviction, 1-hour TTL, 95% hit rate'\n\n"
+									"Hard rules:\n"
+									"- Stay within ONE system. Do not introduce unrelated systems.\n"
+									"- Keep the cloud stack consistent (pick one provider; do not mix AWS/GCP/Azure unless explicitly asked).\n"
+									"- If DOMAIN HINTS are present in the prompt, you MUST follow them.\n"
+									"- Avoid buzzword dumping. Use advanced tech ONLY if it is truly required and you justify it in 'Why this layer exists'.\n\n"
+									"You MUST include (specific to THIS system):\n"
+									"- Concrete components with meaningful names (e.g., CDN, origin, catalog service, playback service, cache, DB).\n"
+									"- 2-3 real metrics with units (p95 latency ms, throughput rps, storage TB/day, cache TTL, availability %).\n"
+									"- 1-2 domain-appropriate mechanisms (examples: idempotency keys + retries, optimistic locking, cache invalidation, ABR via HLS/DASH, DRM/license, fanout notifications).\n"
+									"- At least ONE realistic failure mode per layer with mitigation (retry/backoff, DLQ, circuit breaker, fallback, reconciliation).\n\n"
+									"BAD: 'caching layer stores data'\n"
+									"GOOD: 'Redis: 3 shards, LRU eviction, 10m TTL for playback manifests; cache warmed on trending titles; stale-while-revalidate for spikes'\n\n"
 									+ base_prompt
 								)
-								continue  # Retry with specificity guidance
+									continue  # Retry with specificity guidance
 
-						# Validate complexity; if too complex, retry with a simplification instruction
-						validation = arch_gen.validate_diagram_complexity(
-							mermaid_code,
-							view_type,
-							max_nodes=prompt_data.get("max_nodes"),
-							max_edges=prompt_data.get("max_edges"),
-						)
-						if validation.get("valid"):
-							break
+							# Validate complexity; if too complex, retry with a simplification instruction
+							validation = arch_gen.validate_diagram_complexity(
+								mermaid_code,
+								view_type,
+								max_nodes=prompt_data.get("max_nodes"),
+								max_edges=prompt_data.get("max_edges"),
+							)
+							if validation.get("valid"):
+								break
 
-						last_issues = validation.get("issues") or []
-						logger.warning(f"Complexity warning for {view_type}: {last_issues}")
-						if attempt < 2:
-							combined_prompt = (
+							last_issues = validation.get("issues") or []
+							logger.warning(f"Complexity warning for {view_type}: {last_issues}")
+							if attempt < 1:
+								combined_prompt = (
 								f"SIMPLIFY AND REGENERATE. Previous diagram violated constraints: {last_issues}.\n"
 								f"You MUST reduce to <= {prompt_data.get('max_nodes')} nodes and <= {prompt_data.get('max_edges')} edges.\n"
 								"Keep ONLY the critical path for this view. Remove optional components.\n"
@@ -545,6 +576,10 @@ async def submit_question(
 								"Also: Explanation must follow the OUTPUT CONTRACT exactly (no Key Highlights, no tables, no deep dives).\n\n"
 								+ base_prompt
 							)
+
+					except Exception as e:
+						logger.warning(f"[{view_name}] View generation failed, using fallback: {e}")
+						mermaid_code, explanation = _fallback_view(view_name, view_type, e)
 
 					# If still invalid after retries, proceed (renderer will show placeholder if needed)
 					
@@ -729,6 +764,17 @@ async def submit_question(
 	
 	if payload.save_to_history:
 		await manager.append_qna(state.session_id, payload.question, answer)
+
+	# Usage tracking (Phase 2 billing/analytics). For now tokens/cost are not computed here.
+	with get_db_context() as db:
+		track_api_usage(
+			db,
+			getattr(request.state, "user", None),
+			feature="copilot",
+			endpoint=str(request.url.path),
+			metadata={"stream": False, "saved_to_history": bool(payload.save_to_history)},
+			guest_user_id=user_id if user_id.startswith("guest_") else None,
+		)
 		
 	await auditor.log({
 		"type": "qna",
@@ -751,7 +797,7 @@ async def upload_profile(
     request: Request = None,
 ):
 	# Get user-specific manager
-	user_id = get_user_id_from_request(request) if request else "default"
+	user_id = get_user_id_from_request(request) if request else "guest_unknown"
 	manager = get_session_manager(user_id)
 	
 	# Ensure session exists
@@ -820,7 +866,7 @@ async def upload_profile(
 
 @router.get("/sessions", response_model=SessionList)
 async def list_sessions(request: Request):
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	items_raw = await manager.list_sessions()
 	items = [
@@ -837,7 +883,7 @@ async def list_sessions(request: Request):
 
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str, request: Request):
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	deleted = await manager.delete_session(session_id)
 	if not deleted:
@@ -847,7 +893,7 @@ async def delete_session(session_id: str, request: Request):
 
 @router.delete("/history/{session_id}")
 async def clear_history(session_id: str, request: Request):
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	try:
 		await manager.clear_history(session_id)
@@ -858,7 +904,7 @@ async def clear_history(session_id: str, request: Request):
 
 @router.delete("/history/{session_id}/{index}")
 async def delete_qna_item(session_id: str, index: int, request: Request):
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	try:
 		await manager.remove_qna(session_id, index)
@@ -871,7 +917,7 @@ async def delete_qna_item(session_id: str, index: int, request: Request):
 
 @router.put("/session/{session_id}/title")
 async def update_session_title(session_id: str, payload: UpdateSessionTitleRequest, request: Request):
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	try:
 		await manager.set_session_title(session_id, payload.title)
@@ -883,7 +929,7 @@ async def update_session_title(session_id: str, payload: UpdateSessionTitleReque
 @router.get("/session/{session_id}/chat", response_model=SessionHistory)
 async def get_session_chat(session_id: str, request: Request):
 	"""Get chat history for a session (different from Search Intelligence history)"""
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	try:
 		state = await manager.get_required(session_id)

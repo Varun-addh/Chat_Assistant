@@ -17,7 +17,8 @@ def track_api_usage(
     endpoint: str,
     tokens_used: int = 0,
     cost_usd: float = 0.0,
-    metadata: dict = None
+    metadata: dict = None,
+    guest_user_id: Optional[str] = None,
 ):
     """
     Track API usage for a user
@@ -34,7 +35,8 @@ def track_api_usage(
     try:
         if user is None:
             # Track guest usage with special user_id
-            user_id = "guest"
+            # Prefer a stable per-client guest id (e.g. "guest_<hash>") when available.
+            user_id = guest_user_id or "guest"
         else:
             user_id = user.id
         

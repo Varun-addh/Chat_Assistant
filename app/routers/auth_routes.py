@@ -104,6 +104,8 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
             access_token=access_token,
             user_id=user.id,
             tier=user.tier,
+            email=user.email,
+            full_name=user.full_name,
         )
     
     except HTTPException:
@@ -148,6 +150,8 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
         access_token=access_token,
         user_id=user.id,
         tier=user.tier,
+        email=user.email,
+        full_name=user.full_name,
     )
 
 

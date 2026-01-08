@@ -45,6 +45,9 @@ class Token(BaseModel):
     token_type: str = "bearer"
     user_id: str
     tier: str
+    # Optional identity fields so clients can display user info without an extra /auth/me call
+    email: Optional[EmailStr] = None
+    full_name: Optional[str] = None
 
 
 class TokenData(BaseModel):

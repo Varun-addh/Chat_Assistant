@@ -4,6 +4,7 @@ Rate limiting middleware and utilities
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Tuple
 from fastapi import Request, HTTPException, status
+from fastapi.responses import JSONResponse
 from collections import defaultdict
 import asyncio
 import logging
@@ -149,7 +150,13 @@ async def rate_limit_middleware(request: Request, call_next):
     Extracts user from request.state (set by auth middleware)
     and checks rate limits based on user tier
     """
-    # Skip rate limiting for certain paths
+    path = request.url.path
+
+    # Skip rate limiting for certain paths.
+    #
+    # Rationale:
+    # - Health/docs/auth flows should never be blocked.
+    # - Mermaid rendering is a cheap UI helper; rate-limiting it breaks UX.
     skip_paths = [
         "/health",
         "/docs",
@@ -158,9 +165,25 @@ async def rate_limit_middleware(request: Request, call_next):
         "/auth/login",
         "/auth/google",
         "/auth/google/callback",
+        "/api/render_mermaid",
+        "/api/sessions",
+        "/api/session",
     ]
-    
-    if any(request.url.path.startswith(path) for path in skip_paths):
+
+    if any(path.startswith(p) for p in skip_paths):
+        return await call_next(request)
+
+    # Allowlist model: only meter expensive, LLM-backed routes.
+    # Everything else is intentionally unmetered to keep UX stable.
+    metered_prefixes = [
+        "/api/question",  # chat + system design generation
+        "/api/evaluate",  # evaluation uses LLM
+        "/api/generate_architecture",  # multi-view architecture package generation
+        "/api/practice",  # practice mode uses LLM
+        "/api/mock-interview",  # mock interview uses LLM
+    ]
+
+    if not any(path.startswith(p) for p in metered_prefixes):
         return await call_next(request)
 
     # Ensure the cleanup loop is running (safe no-op if already started)
@@ -172,7 +195,8 @@ async def rate_limit_middleware(request: Request, call_next):
     # If no user, apply strict guest rate limiting
     limit_override: Optional[int] = None
     if not user:
-        user_id = "guest"
+        # Auth middleware sets a stable per-client guest id like "guest_<hash>"
+        user_id = getattr(request.state, "user_id", None) or "guest"
         tier = UserTier.FREE
         # Apply stricter limits for guests
         limit_override = 10  # 10 requests per day for unauthenticated users
@@ -181,7 +205,7 @@ async def rate_limit_middleware(request: Request, call_next):
         tier = user.tier
     
     # Check rate limit
-    endpoint = request.url.path
+    endpoint = path
     allowed, current_count, max_limit = await rate_limiter.check_rate_limit(
         user_id=user_id,
         endpoint=endpoint,
@@ -190,16 +214,26 @@ async def rate_limit_middleware(request: Request, call_next):
     )
     
     if not allowed:
-        # Rate limit exceeded
-        raise HTTPException(
+        # Rate limit exceeded.
+        # IMPORTANT: do not raise HTTPException from middleware.
+        # In some Starlette/anyio execution paths this can surface as an
+        # ExceptionGroup and appear as a 500 to clients.
+        payload = {
+            "error": "Rate limit exceeded",
+            "current_usage": current_count,
+            "limit": max_limit,
+            "tier": tier,
+            "message": f"You've made {current_count}/{max_limit} requests today. Upgrade to PRO for higher limits.",
+        }
+        headers = {
+            "X-RateLimit-Limit": str(max_limit),
+            "X-RateLimit-Remaining": "0" if max_limit != -1 else "-1",
+            "X-RateLimit-Reset": str(int((datetime.now(timezone.utc) + timedelta(hours=24)).timestamp())),
+        }
+        return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "error": "Rate limit exceeded",
-                "current_usage": current_count,
-                "limit": max_limit,
-                "tier": tier,
-                "message": f"You've made {current_count}/{max_limit} requests today. Upgrade to PRO for higher limits.",
-            },
+            content={"detail": payload},
+            headers=headers,
         )
     
     # Add rate limit headers to response

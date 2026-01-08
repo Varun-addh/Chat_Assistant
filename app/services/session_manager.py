@@ -100,11 +100,22 @@ class SessionManager:
 			import logging
 			logging.getLogger(__name__).info(f"🔄 Session cache synced for {self.user_id}: +{loaded_count} new, -{len(to_remove)} deleted")
 
-	def _save(self, state: SessionState) -> None:
-		# 🚫 CRITICAL FIX: Don't save empty sessions to disk to prevent accumulation
-		# Only save sessions that have actual content (Q&A, title, or profile)
-		has_content = (state.qna and len(state.qna) > 0) or state.custom_title or state.profile_text
-		if not has_content:
+	def _save(self, state: SessionState, *, force: bool = False) -> None:
+		"""Persist a session to disk.
+
+		By default, we avoid persisting completely-empty sessions to prevent
+		accumulation. However, we *do* want newly-created sessions to survive
+		a browser refresh (otherwise /api/session/{id}/chat can 404 immediately),
+		so callers may pass force=True.
+		"""
+		# Only save sessions that have actual content (Q&A, title, profile, or transcript)
+		has_content = (
+			(state.qna and len(state.qna) > 0)
+			or state.custom_title
+			or state.profile_text
+			or state.partial_transcript
+		)
+		if not force and not has_content:
 			print(f"⏭️ Skipping save of empty session {state.session_id} (no content yet)")
 			return
 		
@@ -141,6 +152,8 @@ class SessionManager:
 				if not state.qna and not state.custom_title and not state.profile_text:
 					# Update timestamp so it appears at the top
 					state.last_update = datetime.utcnow()
+					# Persist the empty session so refresh doesn't lose it
+					self._save(state, force=True)
 					# Update debounce tracking
 					self._last_session_creation = current_time
 					self._last_created_session_id = state.session_id
@@ -150,8 +163,9 @@ class SessionManager:
 			session_id = str(uuid.uuid4())
 			state = SessionState(session_id=session_id)
 			self._sessions[session_id] = state
-			# Don't save empty session to disk - will be saved when content is added
-			print(f"📝 Created new session {session_id} in memory (will save when content added)")
+			# Persist immediately so a browser refresh can still fetch /chat successfully.
+			self._save(state, force=True)
+			print(f"📝 Created new session {session_id} in memory (saved stub to disk)")
 			
 			# Update debounce tracking
 			self._last_session_creation = current_time

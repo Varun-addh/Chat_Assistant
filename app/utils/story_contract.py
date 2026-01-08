@@ -6,6 +6,9 @@ from typing import Iterable, Tuple, List
 
 logger = logging.getLogger(__name__)
 
+from app.utils.architecture_layers import get_layer_titles
+from app.utils.mermaid_sanitizer import MermaidSanitizer
+
 
 def _to_ascii(text: str) -> str:
     """Normalize to ASCII where possible; drop remaining non-ASCII."""
@@ -50,30 +53,11 @@ def extract_mermaid_first(text: str) -> Tuple[str, str]:
 
 
 def sanitize_mermaid_subset(code: str) -> str:
-    """Keep Mermaid within a safe subset for common renderers."""
-    if not code:
-        return ""
-    code = _to_ascii(code)
+    """Keep Mermaid within a safe subset for common renderers.
 
-    out_lines: List[str] = []
-    for line in code.splitlines():
-        s = line.strip()
-        # Drop init and styling lines
-        if s.startswith("%%{init"):
-            continue
-        if s.lower().startswith("classdef"):
-            continue
-        if s.lower().startswith("linkstyle"):
-            continue
-
-        # Remove :::class usage
-        if ":::" in line:
-            line = re.sub(r":::\w+", "", line)
-
-        out_lines.append(line)
-
-    cleaned = "\n".join(out_lines).strip()
-    return cleaned
+    NOTE: Single source of truth lives in app.utils.mermaid_sanitizer.
+    """
+    return MermaidSanitizer.sanitize_subset(code)
 
 
 def _normalize_bullets(lines: Iterable[str]) -> List[str]:
@@ -552,56 +536,26 @@ def enforce_story_contract(view_name: str, system_description: str, explanation:
 
         return "\n".join(clean_bullets + [goal_line]).strip()
 
-    # Views: accept domain-specific layer titles, but enforce strict ordering + bullets.
-    view_defaults: dict[str, dict[str, object]] = {
-        "REQUEST_FLOW": {
-            "layers": [
-                "Ingestion & Protection",
-                "Core Logic & Enrichment",
-                "Reservation & Concurrency Control",
-                "Transaction Finalization",
-                "Post-Processing & Feedback",
-            ],
-            "final": "Final End-to-End Flow Summary",
-        },
-        "DATA_MODEL": {
-            "layers": [
-                "Primary Storage",
-                "Caching & Speed",
-                "Search & Analytics",
-            ],
-            "final": "Final Data Flow Summary",
-        },
-        "DEPLOYMENT": {
-            "layers": [
-                "Edge & Traffic",
-                "API & Governance",
-                "Core Services",
-                "Async & Workers",
-                "Data & State",
-            ],
-            "final": "Final Deployment Summary",
-        },
-        "OBSERVABILITY": {
-            "layers": [
-                "Metrics",
-                "Logs",
-                "Traces",
-                "Alerts",
-            ],
-            "final": "Final Observability Summary",
-        },
-    }
-
-    cfg = view_defaults.get(view)
-    if not cfg:
-        # Unknown view: keep a short, safe snippet
+    # Views: enforce a strict, consistent 5-layer contract across ALL multi-view outputs.
+    # Layer titles come from a single canonical model to prevent mismatches like:
+    # - DATA_MODEL clamped to 3 layers
+    # - OBSERVABILITY clamped to 4 layers
+    layer_titles: List[str] = get_layer_titles(view)
+    if not layer_titles:
+        # Unknown / non-layered view: keep a short, safe snippet
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         return "\n".join(lines[:12]).strip()
 
-    layer_titles: List[str] = list(cfg["layers"])  # type: ignore[assignment]
+    final_titles: dict[str, str] = {
+        "REQUEST_FLOW": "Final End-to-End Flow Summary",
+        "DATA_MODEL": "Final Data Flow Summary",
+        "DEPLOYMENT": "Final Deployment Summary",
+        "OBSERVABILITY": "Final Observability Summary",
+        "ASYNC_PROCESSING": "Final Async Processing Summary",
+    }
+
     max_layer = len(layer_titles)
-    final_title = str(cfg["final"])  # type: ignore[index]
+    final_title = final_titles.get(view, "Final Summary")
 
     # Parse sections by layer number so minor title differences don't break clamping.
     sections_by_layer: dict[int, List[str]] = {i: [] for i in range(1, max_layer + 1)}

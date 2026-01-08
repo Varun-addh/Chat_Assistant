@@ -8,8 +8,13 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.utils.architecture_layers import get_layer_model
+from app.utils.domain_profile import build_domain_profile, render_domain_hints
 
 logger = logging.getLogger(__name__)
+
+
+_LAYER_EXPLANATIONS_TOKEN = "<<LAYER_EXPLANATIONS>>"
 
 
 class ArchitectureViewType(str, Enum):
@@ -96,6 +101,53 @@ class ArchitectureGeneratorService:
     def __init__(self):
         self.view_prompts = self._initialize_view_prompts()
         logger.info(f"✅ [ArchitectureGenerator] Service initialized with {len(self.view_prompts)} view types")
+
+    def _layer_model(self, view_type: ArchitectureViewType) -> List[Dict[str, str]]:
+        """Return the canonical Layer 1..5 model for a given view.
+
+        Why this exists:
+        - Keeps a consistent layer meaning across ALL diagrams.
+        - Prevents mismatch like 3-layer data view vs 5-layer request/deploy.
+        - Makes outputs more interview-ready and easier to compare.
+
+        Note: We intentionally keep layer TITLES fixed (structure consistency),
+        while requiring all explanations/examples be domain-specific.
+        """
+        layers = get_layer_model(getattr(view_type, "name", str(view_type)))
+        return [{"title": l.title, "responsibility": l.responsibility} for l in layers]
+
+    def _build_layer_explanations(self, view_type: ArchitectureViewType) -> str:
+        """Build the Layer 1..5 explanation scaffold injected into prompts."""
+        model = self._layer_model(view_type)
+        if not model:
+            return "(No layer model required for this view.)"
+
+        lines: List[str] = []
+        lines.append("STRUCTURE RULES (STRICT):")
+        lines.append("- Output EXACTLY 5 layers (Layer 1..5) in order")
+        lines.append("- Use these EXACT layer titles (do not rename)")
+        lines.append("- Make the content domain-specific to the described system")
+        lines.append("- For each layer: 3 bullets 'What happens', 1 bullet 'Failure mode', 1 bullet 'Why this layer exists'")
+        lines.append("")
+
+        for i, layer in enumerate(model, 1):
+            title = layer["title"]
+            responsibility = layer["responsibility"]
+            lines.append(f"### Layer {i} - {title}")
+            lines.append(f"Responsibility: {responsibility}")
+            lines.append("What happens:")
+            lines.append("- (bullet 1: specific step/components)")
+            lines.append("- (bullet 2: specific step/components)")
+            lines.append("- (bullet 3: specific step/components)")
+            lines.append("Failure mode:")
+            lines.append("- (one realistic failure + how it's handled)")
+            lines.append("Why this layer exists:")
+            lines.append("- (one bullet: tradeoff or separation-of-concerns reason)")
+            lines.append("")
+
+        lines.append("### Final Summary")
+        lines.append("(3-5 short sentences summarizing the view using the 5-layer structure)")
+        return "\n".join(lines)
 
     def _estimate_problem_complexity(self, system_description: str) -> tuple[int, str]:
         """Heuristic complexity estimator for adaptive diagram sizing.
@@ -231,61 +283,7 @@ OUTPUT CONTRACT (MANDATORY):
    - ARROWS: Use --> for connections (NOT -> which is invalid)
 2) Immediately after, output the layer explanations:
 
-IMPORTANT (TITLE RULE): You MUST keep the layer numbers (Layer 1..5) but you MUST make the layer TITLES domain-specific to the given system.
-Do NOT reuse generic titles like "Ingestion & Protection". Instead, name what this system actually does.
-Example (for ride sharing): "### Layer 3 - Driver Matching & Geolocation".
-
-### Layer 1 - [Entry Point / Ingress]
-What happens:
-- (2 bullets: entry point, initial validation)
-Why it exists:
-- (1 bullet: why this is needed)
-
-### Layer 2 - [Gateway / Auth Layer]
-What happens:
-- (2 bullets: routing, authentication)
-Why it exists:
-- (1 bullet: architectural purpose)
-
-### Layer 3 - [CORE BUSINESS LOGIC - Domain Specific]
-How it works:
-- (3-4 bullets with SPECIFIC mechanisms, algorithms, data structures)
-- Include numbers: latency, throughput, sizes
-- Show actual tech: "Redis GEORADIUS", not "caching layer"
-- Example: "Scoring algorithm: 0.7*distance + 0.2*rating + 0.1*acceptance_rate"
-
-Why this design:
-- (1-2 bullets comparing alternatives with quantified reasoning)
-- Example: "Chose Redis over PostGIS: 30ms vs 200ms latency at 100K QPS"
-
-Key tradeoffs:
-- (1-2 bullets on what you sacrificed for this design)
-- Example: "Redis in-memory only → max 500K drivers (sufficient for 10-year growth)"
-
-### Layer 4 - [Transaction / Persistence Layer]
-How it works:
-- (3-4 bullets with specific transaction handling, consistency guarantees)
-- Include actual mechanisms: "Two-phase commit", "Optimistic locking", etc.
-
-Why this design:
-- (1-2 bullets explaining THE SPECIFIC CHOICE made here)
-
-Key tradeoffs:
-- (1-2 bullets on consistency vs availability vs latency)
-
-### Layer 5 - [Post-Processing / Async Work]
-How it works:
-- (3-4 bullets on async processing, event handling)
-- Show actual event flow and side effects
-
-Why this design:
-- (1-2 bullets on why async matters here)
-
-Key tradeoffs:
-- (1-2 bullets on eventual consistency or delayed feedback)
-
-### Final End-to-End Flow Summary
-(3-5 short sentences summarizing the complete flow)
+<<LAYER_EXPLANATIONS>>
 
 Mermaid rules (CRITICAL):
 - flowchart LR preferred
@@ -322,59 +320,7 @@ OUTPUT CONTRACT (MANDATORY):
 1) Output EXACTLY one Mermaid code block first, fenced as ```mermaid ... ```.
 2) Immediately after, output the layer explanations:
 
-IMPORTANT (TITLE RULE): You MUST keep the layer numbers (Layer 1..4) but you MUST make the layer TITLES domain-specific.
-Do NOT reuse generic titles like "Event Publishing". Name what this system actually publishes.
-Example (for e-commerce): "### Layer 1 - Order Event Stream".
-
-### Layer 1 - [Event Publishing - Domain Specific]
-How it works:
-- (3-4 bullets with event schema, publish mechanism, ordering guarantees)
-- Include: event format, topic/queue names, delivery semantics
-- Example: "Kafka topic 'order-events', 10 partitions, at-least-once delivery"
-
-Why this design:
-- (1-2 bullets on why events vs synchronous calls)
-- Example: "Chose Kafka over RabbitMQ: need message replay for exactly-once semantics"
-
-Key tradeoffs:
-- (1-2 bullets on eventual consistency cost, operational complexity)
-- Example: "At-least-once delivery: consumers must be idempotent"
-
-### Layer 2 - [Event Bus - Domain Specific]
-How it works:
-- (3-4 bullets with broker topology, partitioning, replication)
-- Example: "Kafka cluster: 5 brokers, replication factor 3, min.insync.replicas=2"
-
-Why this design:
-- (1-2 bullets on durability vs throughput)
-
-Key tradeoffs:
-- (1-2 bullets on complexity vs reliability)
-
-### Layer 3 - [Consumers - Domain Specific]
-How it works:
-- (3-4 bullets with consumer groups, parallelism, error handling)
-- Example: "3 consumer groups in parallel: Inventory, Payment, Notification"
-
-Why this design:
-- (1-2 bullets on independent scaling)
-
-Key tradeoffs:
-- (1-2 bullets on message ordering vs parallelism)
-
-### Layer 4 - [Side Effects - Domain Specific]
-How it works:
-- (3-4 bullets with actual side effects, idempotency, retries)
-- Example: "Dead letter queue for failed events after 3 retry attempts"
-
-Why this design:
-- (1-2 bullets on failure handling strategy)
-
-Key tradeoffs:
-- (1-2 bullets on retry complexity vs reliability)
-
-### Final Async Flow Summary
-(3-5 short sentences summarizing async architecture)
+<<LAYER_EXPLANATIONS>>
 
 Mermaid rules:
 - flowchart TD or LR
@@ -420,49 +366,7 @@ OUTPUT CONTRACT (MANDATORY):
    - ARROWS: Use --> for connections (NOT -> which is invalid)
 2) Immediately after, output the layer explanations:
 
-IMPORTANT (TITLE RULE): You MUST keep the layer numbers (Layer 1..3) but you MUST make the layer TITLES domain-specific.
-Do NOT reuse generic titles like "Primary Storage". Name the real entities/stores for this system (e.g., "User Profile Store", "Catalog Index", "Session Cache").
-
-### Layer 1 - [Primary Storage - Domain Specific]
-How it works:
-- (3-4 bullets with SPECIFIC storage tech, schema design, partitioning)
-- Include: database type, indexing strategy, sharding approach
-- Example: "User profiles in PostgreSQL, partitioned by user_id % 128"
-
-Why this design:
-- (1-2 bullets comparing alternatives: SQL vs NoSQL vs NewSQL)
-- Example: "Chose Postgres over Cassandra: strong consistency for user profiles"
-
-Key tradeoffs:
-- (1-2 bullets on consistency, scalability, cost)
-- Example: "Vertical scaling limit: 10TB per shard, max 128 shards = 1.28PB"
-
-### Layer 2 - [Caching & Speed - Domain Specific]
-How it works:
-- (3-4 bullets with cache topology, TTL, eviction policy)
-- Example: "Redis cluster: 3 primary + 3 replica, LRU eviction, 1-hour TTL"
-
-Why this design:
-- (1-2 bullets on cache hit rate, latency improvement)
-- Example: "95% cache hit rate → 200ms → 5ms read latency"
-
-Key tradeoffs:
-- (1-2 bullets on staleness vs freshness)
-- Example: "Cache invalidation lag: up to 10 seconds stale data acceptable"
-
-### Layer 3 - [Search & Analytics - Domain Specific]
-How it works:
-- (3-4 bullets with search engine, indexing, query optimization)
-- Example: "Elasticsearch: inverted index rebuilt every 60s, 5-shard cluster"
-
-Why this design:
-- (1-2 bullets on search requirements vs batch analytics)
-
-Key tradeoffs:
-- (1-2 bullets on query latency vs index freshness)
-
-### Final Data Flow Summary
-(3-5 sentences summarizing data patterns)
+<<LAYER_EXPLANATIONS>>
 
 Mermaid rules (CRITICAL):
 - flowchart LR
@@ -503,75 +407,7 @@ OUTPUT CONTRACT (MANDATORY):
    - ARROWS: Use --> for connections (NOT -> which is invalid)
 2) Immediately after, output the layer explanations:
 
-IMPORTANT (TITLE RULE): You MUST keep the layer numbers (Layer 1..5) but you MUST make the layer TITLES domain-specific.
-Do NOT reuse generic titles like "Edge & Traffic". Name the real infra concerns for this system (e.g., "Global Routing & CDN", "API Edge Auth", "Service Mesh").
-
-### Layer 1 - [Edge & CDN - Domain Specific]
-How it works:
-- (3-4 bullets with CDN setup, routing, DDoS mitigation, global distribution)
-- Include: PoP count, latency targets, caching strategy
-- Example: "CloudFlare CDN: 200+ PoPs, 50ms p95 latency globally, 95% cache hit rate"
-
-Why this design:
-- (1-2 bullets on latency requirements, cost savings from caching)
-- Example: "CDN reduces origin load by 85% → $30K/month savings on compute"
-
-Key tradeoffs:
-- (1-2 bullets on cost vs performance, cache invalidation complexity)
-- Example: "CDN costs $5K/month but saves $30K in origin compute + bandwidth"
-
-### Layer 2 - [API Gateway & Governance - Domain Specific]
-How it works:
-- (3-4 bullets with gateway topology, rate limiting, auth validation)
-- Example: "Kong API Gateway: 3 replicas, Redis-backed rate limiter (1000 req/min per user)"
-
-Why this design:
-- (1-2 bullets on centralized control, security)
-
-Key tradeoffs:
-- (1-2 bullets on single point of failure mitigation, latency overhead)
-
-### Layer 3 - [Core Service Deployment - Domain Specific]
-How it works:
-- (3-4 bullets with orchestration, scaling, service mesh)
-- Example: "Kubernetes: 20 pods per service, HPA scales 10-100 pods at 70% CPU"
-
-Why this design:
-- (1-2 bullets on deployment strategy: blue-green, canary, rolling)
-- Example: "Canary deploys: 5% traffic → 50% → 100% over 30 minutes"
-
-Key tradeoffs:
-- (1-2 bullets on cost vs resilience)
-- Example: "Over-provisioned 30% for traffic spikes → $15K/month extra cost"
-
-### Layer 4 - [Async Workers & Background Jobs - Domain Specific]
-How it works:
-- (3-4 bullets with job queues, workers, retry logic, scaling)
-- Example: "SQS FIFO queues, 10 worker instances, exponential backoff retry (1s → 30s → 5min)"
-
-Why this design:
-- (1-2 bullets on decoupling, fault tolerance)
-- Example: "Workers scale independently: peak 100 workers, off-peak 5 workers"
-
-Key tradeoffs:
-- (1-2 bullets on latency vs reliability, cost of retries)
-- Example: "Async processing adds 5-30s latency but prevents API timeouts"
-
-### Layer 5 - [Data Persistence & Backups - Domain Specific]
-How it works:
-- (3-4 bullets with backup strategy, replication, disaster recovery, RPO/RTO)
-- Example: "RDS Multi-AZ, hourly snapshots, cross-region replication (us-east-1 → us-west-2)"
-
-Why this design:
-- (1-2 bullets on RTO/RPO requirements, compliance)
-- Example: "RPO=1 hour, RTO=15 minutes for 99.99% availability SLA"
-
-Key tradeoffs:
-- (1-2 bullets on cost vs availability, storage costs)
-- Example: "Cross-region replication adds $2K/month but meets disaster recovery SLA"
-
-### Final Deployment Summary
-(3-5 sentences summarizing deployment architecture)
+<<LAYER_EXPLANATIONS>>
 
 Mermaid rules (CRITICAL):
 - flowchart TD preferred (top-down for infrastructure)
@@ -610,61 +446,7 @@ OUTPUT CONTRACT (MANDATORY):
    - ARROWS: Use --> for data flow, -.-> for monitoring (dotted arrow)
 2) Immediately after, output the layer explanations:
 
-IMPORTANT (TITLE RULE): You MUST keep the layer numbers (Layer 1..4) but you MUST make the layer TITLES domain-specific.
-Do NOT reuse generic titles like "Metrics". Name what you actually measure/log/trace/alert on for this system (e.g., "Checkout Latency SLOs", "Fraud Signals", "Ranking Drift").
-
-Use "Problem → Solution → Impact" structure for observability layers:
-
-### Layer 1 - [Metrics - Domain Specific]
-Problem this layer solves:
-- (1-2 bullets on what BREAKS without metrics)
-- Example: "Without metrics: Cannot detect 200ms → 2s latency regression"
-
-How we solve it:
-- (2-3 bullets with actual metrics, tools, dashboards)
-- Example: "Prometheus scrapes /metrics every 15s, Grafana dashboards, 4 golden signals"
-
-Measurable impact:
-- (1-2 bullets with NUMBERS)
-- Example: "Detected payment gateway timeout in 90 seconds vs 45 minutes before"
-
-### Layer 2 - [Logs - Domain Specific]
-Problem this layer solves:
-- (1-2 bullets on debugging challenges)
-
-How we solve it:
-- (2-3 bullets with log aggregation, structured logging)
-- Example: "ELK stack, JSON logs, request_id correlation, 7-day retention"
-
-Measurable impact:
-- (1-2 bullets on MTTR improvement)
-
-### Layer 3 - [Traces - Domain Specific]
-Problem this layer solves:
-- (1-2 bullets on distributed system debugging)
-- Example: "15-microservice call chain: which service is slow?"
-
-How we solve it:
-- (2-3 bullets with distributed tracing)
-- Example: "Jaeger spans, trace_id propagation, waterfall view"
-
-Measurable impact:
-- (1-2 bullets on root cause time)
-- Example: "MTTR: 45 min → 8 min to find failing service"
-
-### Layer 4 - [Alerts - Domain Specific]
-Problem this layer solves:
-- (1-2 bullets on incident response)
-
-How we solve it:
-- (2-3 bullets with alerting rules, on-call rotation)
-- Example: "PagerDuty: p50 latency > 100ms for 5 min → page on-call"
-
-Measurable impact:
-- (1-2 bullets on incident detection speed)
-
-### Final Observability Summary
-(3-5 sentences summarizing monitoring strategy)
+<<LAYER_EXPLANATIONS>>
 
 Mermaid rules (CRITICAL):
 - flowchart LR
@@ -678,7 +460,7 @@ Mermaid rules (CRITICAL):
 
 **CRITICAL**: Everything must be SPECIFIC to "{system_description}".
 Think about: What are the critical failures? What metrics matter most? What code pattern is most important?
-Monitor what matters for THIS SYSTEM. Implement code that solves THIS SYSTEM's core challenge.
+Monitor what matters for THIS SYSTEM. Focus on instrumentation, signals, and response playbooks.
 
 Generate a compact observability view for THIS system.
 """,
@@ -791,13 +573,27 @@ Output ONLY the Mermaid code, starting with 'flowchart TD'.""",
         user_prompt = prompt_config.user_prompt_template.format(
             system_description=system_description
         )
+
+        # Add deterministic domain hints to steer specificity without forcing buzzwords.
+        # This keeps the system "dynamic" across any system design prompt.
+        profile = build_domain_profile(system_description)
+        view_name = getattr(view_type, "name", str(view_type))
+        user_prompt = user_prompt.rstrip() + "\n\n" + render_domain_hints(profile, view_name)
         
         max_nodes, max_edges = self._dynamic_limits(view_type, system_description)
+
+        # Build system prompt with injected layer scaffold (for views that use it).
+        base_system_prompt = (prompt_config.system_prompt or "")
+        if _LAYER_EXPLANATIONS_TOKEN in base_system_prompt:
+            base_system_prompt = base_system_prompt.replace(
+                _LAYER_EXPLANATIONS_TOKEN,
+                self._build_layer_explanations(view_type),
+            )
 
         # Append dynamic limits to the prompt so sizing is driven by requirements.
         # We keep the original per-view guidance, but override numeric caps here.
         system_prompt = (
-            (prompt_config.system_prompt or "").rstrip()
+            base_system_prompt.rstrip()
             + "\n\nDynamic size limits for THIS question (must obey):\n"
             + f"- <= {max_nodes} nodes\n"
             + f"- <= {max_edges} edges\n"

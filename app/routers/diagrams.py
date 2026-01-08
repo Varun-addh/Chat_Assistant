@@ -20,160 +20,35 @@ from app.schemas import (
 )
 from app.services.architecture_generator import get_architecture_generator
 from app.services.llm_service import get_llm_service
+from app.utils.mermaid_sanitizer import MermaidSanitizer
 
 
 router = APIRouter()
 
 
 def _fix_duplicate_diagram_declarations(text: str) -> str:
-    """Fix invalid Mermaid where LLM generated multiple diagram type declarations.
-    
-    Example bad syntax:
-        flowchart LR
-          graph TD
-          A --> B
-    
-    This function keeps only the FIRST diagram type declaration and removes duplicates.
-    """
-    import re as _re
-    
-    lines = text.split('\n')
-    if len(lines) < 2:
-        return text
-    
-    diagram_types = ['flowchart', 'graph', 'sequenceDiagram', 'classDiagram', 'stateDiagram', 
-                     'erDiagram', 'journey', 'gantt', 'pie', 'gitGraph', 'mindmap', 'timeline']
-    
-    first_declaration_found = False
-    cleaned_lines = []
-    
-    for line in lines:
-        stripped = line.strip().lower()
-        
-        # Check if this line is a diagram type declaration
-        is_diagram_declaration = any(stripped.startswith(dtype.lower()) for dtype in diagram_types)
-        
-        if is_diagram_declaration:
-            if not first_declaration_found:
-                # Keep the first declaration
-                cleaned_lines.append(line)
-                first_declaration_found = True
-            # Skip any subsequent declarations (they're duplicates)
-            continue
-        else:
-            # Keep all non-declaration lines
-            cleaned_lines.append(line)
-    
-    return '\n'.join(cleaned_lines)
+    """Fix invalid Mermaid where LLM generated multiple diagram type declarations."""
+    return MermaidSanitizer.fix_duplicate_diagram_declarations(text)
 
 
 def _sanitize_code(raw: str) -> str:
     """Remove surrounding markdown fences if present and fix escaped newlines."""
-    text = raw.strip()
-    
-    # Fix escaped newlines (\\n -> \n) that LLMs sometimes generate
-    if '\\n' in text:
-        text = text.replace('\\n', '\n')
-    
-    if text.startswith("```"):
-        # Remove first line of fence
-        lines = text.split("\n")
-        if lines:
-            # drop first line and any closing fence line
-            body = "\n".join(lines[1:])
-            if body.rstrip().endswith("```"):
-                body = body[: body.rfind("```")].rstrip()
-            text = body
-    
-    # Fix duplicate diagram declarations (LLM sometimes generates "flowchart LR\n  graph TD")
-    text = _fix_duplicate_diagram_declarations(text)
-    
-    return text
+    return MermaidSanitizer.sanitize_code_block(raw)
 
 
 def _remove_non_ascii(text: str) -> str:
-    """Remove non-ASCII characters that can break some Mermaid renderers (and URLs).
-    Keeps basic punctuation and replaces unicode arrows/emojis with ASCII equivalents.
-    """
-    replacements = {
-        '→': '->', '←': '<-', '⇒': '=>', '⇐': '<=', '↔': '<->',
-        '“': '"', '”': '"', '’': "'", '–': '-', '—': '-', '…': '...',
-    }
-    for k, v in replacements.items():
-        text = text.replace(k, v)
-    # Strip any remaining non-ASCII
-    return ''.join(ch if ord(ch) < 128 else '' for ch in text)
+    """Remove non-ASCII characters that can break some Mermaid renderers (and URLs)."""
+    return MermaidSanitizer.to_ascii(text)
 
 
 def _strip_mermaid_features(text: str) -> str:
-    """Reduce diagram to a minimal, broadly compatible subset:
-    - Remove Mermaid init blocks (%%{init ... }%%)
-    - Remove classDef and linkStyle lines
-    - Remove class assignments (:::class)
-    - Remove HTML labels directive if present
-    - Remove any CSS/style artifacts (corrupted retries)
-    """
-    import re as _re
-    lines = []
-    for line in text.split('\n'):
-        s = line.strip()
-        if s.startswith('%%{init'):  # drop init block start
-            continue
-        if s.endswith('}%%') and '%%{init' in text:  # drop init block end line if isolated
-            continue
-        if s.lower().startswith('classdef'):
-            continue
-        if s.lower().startswith('linkstyle'):
-            continue
-        # Skip CSS artifacts that got mixed into Mermaid code
-        if any(css_marker in s for css_marker in ['@keyframes', '@import', '#container', '.edge-', '#mermaid-svg']):
-            continue
-        if ':::' in s:
-            # remove class assignment but keep node/edge
-            line = _re.sub(r':::\w+', '', line)
-        lines.append(line)
-    out = '\n'.join(lines)
-    # Remove htmlLabels directive if present inside init-like string remnants
-    out = _re.sub(r"'htmlLabels'\s*:\s*(true|false)", '', out, flags=_re.IGNORECASE)
-    return out.strip()
+    """Reduce diagram to a minimal, broadly compatible subset."""
+    return MermaidSanitizer.strip_features(text)
 
 
 def _ultra_simplify_mermaid(text: str) -> str:
-    """Last-resort simplification when renderers reject Mermaid.
-
-    Goal: produce *some* SVG instead of a placeholder by stripping the diagram down
-    to a basic flowchart with unlabeled edges.
-    """
-    import re as _re
-
-    if not text:
-        return ""
-
-    # Normalize newlines
-    code = text.replace("\r\n", "\n").replace("\r", "\n")
-    code = _strip_mermaid_features(code)
-    code = _remove_non_ascii(code)
-
-    # Force a flowchart header if missing
-    lines = [ln for ln in code.split("\n") if ln.strip()]
-    if not lines:
-        return "flowchart TD\n  A[Empty]"
-    first = lines[0].strip().lower()
-    if not (first.startswith("flowchart") or first.startswith("graph")):
-        lines.insert(0, "flowchart LR")
-
-    code = "\n".join(lines)
-
-    # Drop edge labels: -->|label| becomes -->
-    code = _re.sub(r"-->\|[^\|]{1,80}\|", "-->", code)
-    code = _re.sub(r"-\.->\|[^\|]{1,80}\|", "-.->", code)
-    code = _re.sub(r"==>\|[^\|]{1,80}\|", "==>", code)
-
-    # Drop any remaining pipe labels (best-effort)
-    code = _re.sub(r"\|\s*\([^\)]{1,6}\)\s*\|", "| |", code)
-    code = _re.sub(r"\|[^\|]{1,80}\|", "| |", code)
-
-    return code.strip()
+    """Last-resort simplification when renderers reject Mermaid."""
+    return MermaidSanitizer.ultra_simplify(text)
 
 
 def _svg_placeholder(message: str) -> str:
@@ -314,244 +189,12 @@ def _sanitize_edge_labels(code: str) -> str:
     - Brackets inside pipe delimiters: -->| (8) [Mobile Push]| breaks parsing
     - Solution: Remove brackets from pipe labels or convert to parentheses
     """
-    import re as _re
-    
-    # Pattern: -->| ... | or -.-| ... | or ==>| ... |
-    # Replace any [...] inside pipe delimiters with (...)
-    def sanitize_pipe_label(match):
-        arrow = match.group(1)
-        label = match.group(2)
-        
-        # Replace square brackets with parentheses inside labels
-        sanitized_label = label.replace('[', '(').replace(']', ')')
-        
-        return f"{arrow}|{sanitized_label}|"
-    
-    # Match arrow with pipe labels: -->|...|  or  -.-|...|  or  ==>|...|
-    code = _re.sub(r'([-=\.]+>)\|([^\|]+)\|', sanitize_pipe_label, code)
-    
-    return code
+    return MermaidSanitizer.sanitize_edge_labels(code)
 
 
 def _fix_mermaid_syntax_errors(code: str) -> str:
-    """Fix common Mermaid syntax errors to prevent rendering failures.
-    Handles bidirectional arrows, edge labels, and other common issues.
-    """
-    import re as _re
-    
-    # Fix bidirectional arrows: A <--> B becomes A --> B and B --> A
-    def fix_bidirectional_arrows(text):
-        # Find all bidirectional arrows
-        bidirectional_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*<-->\s*([A-Za-z0-9_]+)\s*$', _re.MULTILINE)
-        
-        def replace_bidirectional(match):
-            from_node = match.group(1)
-            to_node = match.group(2)
-            return f"  {from_node} --> {to_node}\n  {to_node} --> {from_node}"
-        
-        return bidirectional_pattern.sub(replace_bidirectional, text)
-    
-    # Fix edge labels: A -- Label --> B becomes A -->|Label| B
-    def fix_edge_labels(text):
-        # Pattern for A -- Label --> B
-        edge_label_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*--\s*([^-\n]+?)\s*-->\s*([A-Za-z0-9_]+)\s*$', _re.MULTILINE)
-        
-        def replace_edge_label(match):
-            from_node = match.group(1).strip()
-            label = match.group(2).strip()
-            to_node = match.group(3).strip()
-            return f"  {from_node} -->|{label}| {to_node}"
-        
-        return edge_label_pattern.sub(replace_edge_label, text)
-    
-    # Fix malformed edges like A --> B -- Label --> C
-    def fix_malformed_edges(text):
-        # Pattern for A --> B -- Label --> C (incorrect)
-        malformed_pattern = _re.compile(r'^\s*([A-Za-z0-9_]+)\s*-->\s*([A-Za-z0-9_]+)\s*--\s*([^-\n]+?)\s*-->\s*([A-Za-z0-9_]+)\s*$', _re.MULTILINE)
-        
-        def replace_malformed(match):
-            from_node = match.group(1).strip()
-            middle_node = match.group(2).strip()
-            label = match.group(3).strip()
-            to_node = match.group(4).strip()
-            return f"  {from_node} --> {middle_node}\n  {middle_node} -->|{label}| {to_node}"
-        
-        return malformed_pattern.sub(replace_malformed, text)
-
-    # Fix nested parentheses in labels: ID((Label (Text))) becomes ID(("Label (Text)"))
-    def fix_nested_labels(text):
-        # Match ID((label)), ID([label]), ID[label], ID(label), ID{label}
-        patterns = [
-            (r'([A-Za-z0-9_]+)\(\(([^"]+?)\)\)', r'\1(("\2"))'),  # circle
-            (r'([A-Za-z0-9_]+)\[\(([^"]+?)\)\]', r'\1([ "\2" ])'),  # stadium
-            (r'([A-Za-z0-9_]+)\[([^"\]]+?)\]', r'\1["\2"]'),      # square
-            (r'([A-Za-z0-9_]+)\(([^"\)]+?)\)', r'\1("\2")'),      # round
-            (r'([A-Za-z0-9_]+)\{([^"\}]+?)\}', r'\1{"\2"}'),      # diamond
-        ]
-        
-        for pattern, replacement in patterns:
-            def quote_if_needed(match):
-                node_id = match.group(1)
-                label = match.group(2).strip()
-                if any(c in label for c in "()/\\:-"):
-                    if "((" in pattern: return f'{node_id}(("{label}"))'
-                    if "[(" in pattern: return f'{node_id}(["{label}"])'
-                    if "[" in pattern: return f'{node_id}["{label}"]'
-                    if "(" in pattern: return f'{node_id}("{label}")'
-                    if "{" in pattern: return f'{node_id}{{"{label}"}}'
-                return match.group(0)
-            text = _re.sub(pattern, quote_if_needed, text)
-        return text
-
-    # New Fixes imported from llm_service (Step Id: 82)
-    def fix_special_chars(text):
-        lines = text.split('\n')
-        out_lines = []
-        for line in lines:
-            # 1. Fix double colons (::) BUT preserve class assignments (:::)
-            # Replace :: only when NOT part of ::: (class assignments)
-            # Use negative lookahead/lookbehind to avoid breaking :::
-            import re as _re
-            # Replace :: that is NOT preceded or followed by another :
-            line = _re.sub(r'(?<!:)::(?!:)', '-', line)
-            
-            # 2. Fix slashes in node labels: [text/with/slashes] -> ["text-with-slashes"]
-            # Iteratively fix to handle multiple occurrences
-            while '/' in line and '[' in line:
-                old_line = line
-                line = _re.sub(r'\[([^\]]*)/([^\]]*)\]', r'["\1-\2"]', line)
-                if old_line == line: break
-            
-            # 3. Fix colons in node labels: [text:with:colons] -> ["text-with-colons"]
-            # Exclude lines that already have quoted labels to avoid damaging them
-            # Also exclude lines with ::: (class assignments)
-            if '["' not in line and '"]' not in line and ':::' not in line:
-                 while ':' in line and '[' in line and '::' not in line:
-                    old_line = line
-                    line = _re.sub(r'\[([^\]]*):([^\]]*)\]', r'["\1-\2"]', line)
-                    if old_line == line: break
-            
-            out_lines.append(line)
-        return '\n'.join(out_lines)
-
-    # Fix wrong diagram type: erDiagram used with flowchart syntax
-    def fix_wrong_diagram_type(text):
-        """Fix when LLM generates erDiagram but uses flowchart syntax (subgraph, -->)."""
-        import re as _re
-        lines = text.split('\n')
-        if not lines:
-            return text
-        
-        # Find the diagram type line (skip init blocks)
-        diagram_type_idx = -1
-        for i, line in enumerate(lines):
-            stripped = line.strip().lower()
-            # Skip init blocks and empty lines
-            if stripped.startswith('%%{') or stripped.startswith("'") or stripped.startswith('}') or stripped == '':
-                continue
-            # Skip lines that are part of init JSON
-            if stripped in ['{', '},', '}}%%', '}%%']:
-                continue
-            # Found potential diagram type declaration
-            if stripped in ['erdiagram', 'er-diagram', 'sequencediagram', 'classiagram']:
-                diagram_type_idx = i
-                break
-            # If it's already a flowchart/graph, no fix needed
-            if stripped.startswith('flowchart') or stripped.startswith('graph'):
-                return text
-        
-        # Check if erDiagram is used but has flowchart syntax
-        if diagram_type_idx >= 0:
-            has_flowchart_syntax = any(
-                kw in text.lower() for kw in ['subgraph', '-->', '---', '-.->', ':::']
-            )
-            if has_flowchart_syntax:
-                # Replace erDiagram with flowchart TD
-                lines[diagram_type_idx] = 'flowchart TD'
-                return '\n'.join(lines)
-        return text
-    
-    # Fix invalid brace syntax: NodeName { Label }:::class -> NodeName["Label"]:::class
-    def fix_invalid_brace_nodes(text):
-        """Fix nodes using { } braces incorrectly (multi-line brace blocks are invalid)."""
-        import re as _re
-        
-        # Pattern: NodeName {\n  Label\n}:::class (multi-line brace node)
-        # This is INVALID for flowcharts
-        pattern = _re.compile(
-            r'([A-Za-z0-9_]+)\s*\{\s*\n\s*([^\n}]+?)\s*\n\s*\}(:::?\w+)?',
-            _re.MULTILINE
-        )
-        
-        def fix_brace(match):
-            node_id = match.group(1)
-            label = match.group(2).strip()
-            class_def = match.group(3) or ''
-            # Convert to proper square bracket node with quoted label
-            return f'{node_id}["{label}"]{class_def}'
-        
-        return pattern.sub(fix_brace, text)
-
-    # Fix orphaned/floating subgraphs by identifying which have no connections
-    def find_and_warn_orphaned_subgraphs(text):
-        """Log warning about subgraphs that have no external connections."""
-        import re as _re
-        
-        # Find all subgraph IDs
-        subgraph_pattern = _re.compile(r'subgraph\s+(\w+)', _re.IGNORECASE)
-        subgraphs = set(subgraph_pattern.findall(text))
-        
-        # Find all nodes referenced in edges (before and after arrows)
-        edge_pattern = _re.compile(r'(\w+)\s*[-=~]+[>\|]|[>\|][-=~]*\s*(\w+)')
-        nodes_in_edges = set()
-        for match in edge_pattern.finditer(text):
-            if match.group(1):
-                nodes_in_edges.add(match.group(1))
-            if match.group(2):
-                nodes_in_edges.add(match.group(2))
-        
-        # Find nodes inside each subgraph
-        subgraph_nodes = {}
-        current_subgraph = None
-        node_def_pattern = _re.compile(r'^\s*(\w+)[\[\(\{]')
-        
-        for line in text.split('\n'):
-            stripped = line.strip().lower()
-            subgraph_match = _re.match(r'subgraph\s+(\w+)', line, _re.IGNORECASE)
-            if subgraph_match:
-                current_subgraph = subgraph_match.group(1)
-                subgraph_nodes[current_subgraph] = []
-            elif stripped == 'end':
-                current_subgraph = None
-            elif current_subgraph:
-                node_match = node_def_pattern.match(line.strip())
-                if node_match:
-                    subgraph_nodes[current_subgraph].append(node_match.group(1))
-        
-        # Check which subgraphs have no nodes in edges
-        orphaned = []
-        for sg, nodes in subgraph_nodes.items():
-            has_connection = any(node in nodes_in_edges for node in nodes)
-            if not has_connection and nodes:
-                orphaned.append(sg)
-        
-        if orphaned:
-            logger.warning(f"[MERMAID] Orphaned subgraphs detected (no connections): {orphaned}")
-        
-        return text  # Return unchanged, just log warning for now
-
-    # Apply all fixes
-    fixed_code = code
-    fixed_code = fix_wrong_diagram_type(fixed_code)  # Fix diagram type FIRST
-    fixed_code = fix_invalid_brace_nodes(fixed_code)  # Fix brace syntax
-    fixed_code = fix_special_chars(fixed_code) # Apply this to clean up labels
-    fixed_code = fix_bidirectional_arrows(fixed_code)
-    fixed_code = fix_edge_labels(fixed_code)
-    fixed_code = fix_malformed_edges(fixed_code)
-    fixed_code = fix_nested_labels(fixed_code)
-    fixed_code = find_and_warn_orphaned_subgraphs(fixed_code)  # Log orphaned subgraphs
-    
-    return fixed_code
+    """Fix common Mermaid syntax errors to prevent rendering failures."""
+    return MermaidSanitizer.fix_mermaid_syntax_errors(code)
 
 
 def _add_sequential_step_numbers(code: str, force: bool = False) -> str:
@@ -678,19 +321,11 @@ async def render_mermaid(payload: dict):
     # Log first 200 chars for debugging
     logger.debug(f"[MERMAID] Input code (first 200 chars): {code[:200]}")
 
-    # Fix common Mermaid syntax errors first
-    try:
-        code = _fix_mermaid_syntax_errors(code)
-        logger.debug(f"[MERMAID] After syntax fix (first 200 chars): {code[:200]}")
-    except Exception as e:
-        logger.warning(f"[MERMAID] Syntax fix failed: {e}")
-    
-    # Sanitize edge labels to prevent parse errors from brackets in pipe delimiters
-    try:
-        code = _sanitize_edge_labels(code)
-        logger.debug("[MERMAID] Edge labels sanitized")
-    except Exception as e:
-        logger.warning(f"[MERMAID] Edge label sanitization failed: {e}")
+    # Single-source Mermaid sanitization pipeline (debuggable and deterministic)
+    sanitize_result = MermaidSanitizer.sanitize(code, mode="render")
+    if sanitize_result.stages:
+        logger.debug(f"[MERMAID] Sanitizer stages: {sanitize_result.stages}")
+    code = sanitize_result.code
 
     # Optional: Add step numbers to edges.
     # IMPORTANT: Default is FALSE for reliability. (Auto-numbering increases diagram
@@ -773,58 +408,84 @@ async def render_mermaid(payload: dict):
     # (Historically this double-applied numbering and produced invalid labels like
     # `-->| (8) [Mobile Push]|`, which Kroki rejects.)
 
-    # Simple cache key based on code + theme
-    import hashlib
-    cache_key = hashlib.md5(f"{code}|{theme}".encode()).hexdigest()
-    
-    # Check in-memory cache (simple dict for now)
+    # Check in-memory cache (LRU OrderedDict)
+    from collections import OrderedDict
     if not hasattr(render_mermaid, '_cache'):
-        render_mermaid._cache = {}
-    
-    if cache_key in render_mermaid._cache:
-        logger.debug(f"✅ Cache hit for diagram {cache_key[:8]}")
-        return Response(
-            content=render_mermaid._cache[cache_key],
-            media_type="image/svg+xml",
-            headers={"Cache-Control": "public, max-age=3600"}
-        )
-
-    # Some themes are supported by Mermaid directly; inject theme directive if provided
-    if theme and theme != "default" and not code.lstrip().startswith("%%{init") and len(code) < 3000:
-        # Prepend Mermaid init directive using valid JSON (double quotes)
-        code = f"%%{{init: {{ \"theme\": \"{theme}\" }} }}%%\n" + code
+        render_mermaid._cache = OrderedDict()
 
     import base64
     
     # Use async httpx instead of blocking requests
     import httpx
     
-    # Final sanitization pass to reduce renderer failures
-    code = _remove_non_ascii(code)
+    # Build explicit attempt variants.
+    # - "theme": try honoring theme if requested (may fail on some renderers)
+    # - "base": renderer-safe subset (no init/style)
+    # - "ultra": last-resort simplification
+    code_base = code
+    attempts: list[tuple[str, str]] = []
+
+    if theme and theme != "default" and not code_base.lstrip().startswith("%%{init") and len(code_base) < 3000:
+        # Prepend Mermaid init directive using valid JSON (double quotes)
+        code_theme = f"%%{{init: {{ \"theme\": \"{theme}\" }} }}%%\n" + code_base
+        attempts.append(("theme", code_theme))
+
+    attempts.append(("base", code_base))
+
+    ultra_result = MermaidSanitizer.sanitize(code_base, mode="ultra")
+    if ultra_result.code and ultra_result.code != code_base:
+        logger.debug(f"[MERMAID] Ultra sanitizer stages: {ultra_result.stages}")
+        attempts.append(("ultra", ultra_result.code))
+
+    # Cache is keyed by the actual attempt variant + code so we don't permanently
+    # pin a themed request to a previously-failed themed render.
+    import hashlib
+
+    def _attempt_cache_key(label: str, attempt_code: str) -> str:
+        return hashlib.md5(f"{label}|{attempt_code}".encode()).hexdigest()
+
+    for label, attempt_code in attempts:
+        ck = _attempt_cache_key(label, attempt_code)
+        if ck in render_mermaid._cache:
+            # LRU: mark as recently used
+            try:
+                render_mermaid._cache.move_to_end(ck)
+            except Exception:
+                pass
+            logger.debug(f"✅ Cache hit for diagram {ck[:8]} ({label})")
+            return Response(
+                content=render_mermaid._cache[ck],
+                media_type="image/svg+xml",
+                headers={"Cache-Control": "public, max-age=3600"}
+            )
 
     # Decide renderer strategy based on size
     svg = None
     timeout = httpx.Timeout(20.0, connect=5.0)  # Increased timeout
-    prefer_kroki = len(code) > 1200
+    prefer_kroki = len(code_base) > 1200
 
     if not prefer_kroki:
         # Try mermaid.ink first for small diagrams
-        try:
-            logger.debug(f"Trying mermaid.ink")
-            encoded_code = base64.b64encode(code.encode('utf-8')).decode('ascii')
-            url = f"https://mermaid.ink/svg/{encoded_code}"
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.get(url)
-                # transient outage retry (mermaid.ink sometimes returns 503)
-                if resp.status_code in {429, 502, 503, 504}:
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(0.25)
+        for label, attempt_code in attempts[:2]:
+            try:
+                logger.debug(f"Trying mermaid.ink ({label})")
+                encoded_code = base64.b64encode(attempt_code.encode('utf-8')).decode('ascii')
+                url = f"https://mermaid.ink/svg/{encoded_code}"
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.get(url)
-            logger.debug(f"mermaid.ink response: {resp.status_code}")
-            if resp.status_code == 200 and resp.text.strip().startswith("<svg"):
-                svg = resp.text
-        except Exception as exc:
-            logger.error(f"mermaid.ink failed: {exc}")
+                    # transient outage retry (mermaid.ink sometimes returns 503)
+                    if resp.status_code in {429, 502, 503, 504}:
+                        import asyncio as _asyncio
+                        await _asyncio.sleep(0.25)
+                        resp = await client.get(url)
+                logger.debug(f"mermaid.ink ({label}) response: {resp.status_code}")
+                if resp.status_code == 200 and resp.text.strip().startswith("<svg"):
+                    svg = resp.text
+                    used_label = label
+                    used_code = attempt_code
+                    break
+            except Exception as exc:
+                logger.error(f"mermaid.ink ({label}) failed: {exc}")
 
     if not svg:
         # Use Kroki (POST) with sanitization retries
@@ -833,16 +494,10 @@ async def render_mermaid(payload: dict):
         kroki_urls = list(dict.fromkeys(kroki_urls))  # de-dupe, preserve order
 
         for url in kroki_urls:
-            for attempt in range(4):
+            for label, attempt_code in attempts:
                 try:
-                    logger.debug(f"Trying Kroki {url} (attempt {attempt + 1})")
-                    code_to_send = code
-                    if attempt == 1:
-                        code_to_send = _strip_mermaid_features(code_to_send)
-                    elif attempt == 2:
-                        code_to_send = _remove_non_ascii(_strip_mermaid_features(code_to_send))
-                    elif attempt == 3:
-                        code_to_send = _ultra_simplify_mermaid(code_to_send)
+                    logger.debug(f"Trying Kroki {url} ({label})")
+                    code_to_send = attempt_code
 
                     async with httpx.AsyncClient(timeout=timeout) as client:
                         resp = await client.post(
@@ -852,27 +507,32 @@ async def render_mermaid(payload: dict):
                         )
                     if resp.status_code == 200 and resp.text.strip().startswith("<svg"):
                         svg = resp.text
+                        used_label = label
+                        used_code = attempt_code
                         break
 
                     # Log a small slice of the error body for diagnosis
                     body_preview = (resp.text or "").strip().replace("\n", " ")[:280]
-                    logger.error(f"Kroki returned {resp.status_code}: {body_preview}")
+                    logger.error(f"Kroki ({label}) returned {resp.status_code}: {body_preview}")
                 except Exception as kroki_exc:
-                    logger.error(f"Kroki attempt {attempt + 1} failed: {kroki_exc}")
+                    logger.error(f"Kroki ({label}) failed: {kroki_exc}")
             if svg:
                 break
 
         if not svg:
             # Final fallback: try mermaid.ink even for large diagrams (may work if not too large)
             try:
-                slim_code = _remove_non_ascii(_strip_mermaid_features(code))
-                encoded_code = base64.b64encode(slim_code.encode('utf-8')).decode('ascii')
+                fallback_label, fallback_code = attempts[-1]
+                logger.debug(f"Trying mermaid.ink final fallback ({fallback_label})")
+                encoded_code = base64.b64encode(fallback_code.encode('utf-8')).decode('ascii')
                 url = f"https://mermaid.ink/svg/{encoded_code}"
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.get(url)
-                logger.debug(f"mermaid.ink final fallback response: {resp.status_code}")
+                logger.debug(f"mermaid.ink final fallback ({fallback_label}) response: {resp.status_code}")
                 if resp.status_code == 200 and resp.text.strip().startswith("<svg"):
                     svg = resp.text
+                    used_label = fallback_label
+                    used_code = fallback_code
             except Exception as exc:
                 logger.error(f"mermaid.ink final fallback failed: {exc}")
 
@@ -880,23 +540,43 @@ async def render_mermaid(payload: dict):
             # Do not break UI; return a placeholder SVG explaining the failure
             msg = "Kroki returned errors and mermaid.ink fallback was unavailable. Showing placeholder."
             svg = _svg_placeholder(msg)
+            used_label = "placeholder"
+            used_code = code_base
 
     if not svg:
         logger.error(f"❌ Mermaid Rendering Failed. Input Code:\n{code}")
         # Return a generic placeholder to keep UI stable
         svg = _svg_placeholder("Unexpected renderer state; using placeholder")
     
-    # Cache the successful result
-    render_mermaid._cache[cache_key] = svg
+    # Cache the successful result (avoid caching placeholders)
+    if svg and "Mermaid render unavailable" not in svg:
+        label_for_cache = (locals().get("used_label") or "base")
+        code_for_cache = (locals().get("used_code") or code_base)
+        cache_key = _attempt_cache_key(label_for_cache, code_for_cache)
+        render_mermaid._cache[cache_key] = svg
+        # LRU: mark as recently used
+        try:
+            render_mermaid._cache.move_to_end(cache_key)
+        except Exception:
+            pass
+    else:
+        cache_key = "nocache"
     
-    # Limit cache size to prevent memory issues
-    if len(render_mermaid._cache) > 100:
-        # Remove oldest 20 entries
-        keys_to_remove = list(render_mermaid._cache.keys())[:20]
-        for k in keys_to_remove:
-            del render_mermaid._cache[k]
+    # Limit cache size to prevent memory issues (LRU eviction)
+    max_cache_items = 100
+    try:
+        while len(render_mermaid._cache) > max_cache_items:
+            # pop least-recently-used
+            render_mermaid._cache.popitem(last=False)
+    except Exception:
+        # Fall back to a simple trim if the cache isn't an OrderedDict for some reason
+        if len(render_mermaid._cache) > max_cache_items:
+            keys_to_remove = list(render_mermaid._cache.keys())[:20]
+            for k in keys_to_remove:
+                del render_mermaid._cache[k]
     
-    logger.debug(f"✅ Successfully rendered diagram {cache_key[:8]}")
+    if cache_key != "nocache":
+        logger.debug(f"✅ Successfully rendered diagram {cache_key[:8]}")
     
     return Response(
         content=svg,

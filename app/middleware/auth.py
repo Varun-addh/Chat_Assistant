@@ -8,6 +8,7 @@ from fastapi import Request, Header
 from typing import Optional
 import logging
 import jwt
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,29 @@ async def user_auth_middleware(request: Request, call_next):
     If no valid token, request proceeds as guest (rate limited)
     """
     user = None
+
+    def _get_client_ip() -> str:
+        # Prefer proxy-aware header if present (first hop)
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            # XFF can contain a chain: client, proxy1, proxy2...
+            ip = xff.split(",")[0].strip()
+            if ip:
+                return ip
+        if request.client and request.client.host:
+            return request.client.host
+        return "unknown"
+
+    def _guest_user_id() -> str:
+        # IMPORTANT:
+        # - Do NOT use a single global "guest" bucket (it makes all guests share sessions/quota)
+        # - Avoid storing raw IPs in session paths; hash to a short stable ID
+        # - Windows filesystem does not allow ':' in directory names
+        ip = _get_client_ip()
+        ua = request.headers.get("user-agent", "")
+        raw = f"{ip}|{ua}".encode("utf-8", errors="ignore")
+        digest = hashlib.sha256(raw).hexdigest()[:16]
+        return f"guest_{digest}"
     
     # Check Authorization header (JWT token)
     auth_header = request.headers.get("Authorization")
@@ -65,7 +89,7 @@ async def user_auth_middleware(request: Request, call_next):
         request.state.user_id = user.id
         logger.debug(f"Authenticated request: {user.email} ({user.tier})")
     else:
-        request.state.user_id = None
+        request.state.user_id = _guest_user_id()
         logger.debug("Guest request (unauthenticated)")
     
     response = await call_next(request)

@@ -14,6 +14,9 @@ from app.utils.audit import auditor
 from app.services.llm_service import get_llm_service
 from app.middleware.auth import get_user_id_from_request
 
+from app.database import get_db_context
+from app.utils.usage_tracking import track_api_usage
+
 # Use intelligent provider selection with "copilot" feature flag for evaluation
 llm_service = get_llm_service(feature="copilot")
 
@@ -101,7 +104,7 @@ async def evaluate_allowed(
 			groq_key = authorization
 	api_key = gemini_key if gemini_key else groq_key
 
-	user_id = get_user_id_from_request(request) if request else "default"
+	user_id = get_user_id_from_request(request) if request else "guest_unknown"
 	manager = get_session_manager(user_id)
 	
 	try:
@@ -150,7 +153,7 @@ async def evaluate(
 			)
 
 	# Get user-spec manager
-	user_id = get_user_id_from_request(request) or "default"
+	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	
 	try:
@@ -204,6 +207,17 @@ async def evaluate(
 		cached_result = _evaluation_cache[cache_key]
 		# Update session_id to match current request
 		cached_result.session_id = payload.session_id
+
+		# Usage tracking (cache hit still counts as an evaluation call)
+		with get_db_context() as db:
+			track_api_usage(
+				db,
+				getattr(request.state, "user", None),
+				feature="evaluation",
+				endpoint=str(request.url.path),
+				metadata={"cached": True, "language": payload.language or "python"},
+				guest_user_id=user_id if user_id.startswith("guest_") else None,
+			)
 		
 		# Log cache hit
 		await auditor.log({
@@ -385,6 +399,17 @@ async def evaluate(
 
 	# Cache the result for future requests
 	_evaluation_cache[cache_key] = resp
+
+	# Usage tracking (Phase 2 billing/analytics)
+	with get_db_context() as db:
+		track_api_usage(
+			db,
+			getattr(request.state, "user", None),
+			feature="evaluation",
+			endpoint=str(request.url.path),
+			metadata={"cached": False, "language": payload.language or "python"},
+			guest_user_id=user_id if user_id.startswith("guest_") else None,
+		)
 
 
 
