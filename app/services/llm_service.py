@@ -450,26 +450,47 @@ class LLMService:
 		if re.search(r"\b(what\s*(?:'s| is)\s+your\s+name|whats\s+your\s+name|what\s+is\s+you\s+name)\b", q):
 			return f"My name is {app_name}.\n\n{attribution}"
 
+		def _base() -> str:
+			# Keep this short and safe: Stratax is an application/platform.
+			return (
+				f"I’m {app_name} — an interview-prep application built by {developer}.\n\n"
+				f"I use AI language models via API providers and add Stratax-specific orchestration "
+				f"(prompting, validation, structured formatting, and system-design helpers) to produce interview-ready outputs.\n\n"
+				f"{attribution}"
+			)
+
 		# If the user asks who Varun is, keep it scoped to Stratax attribution.
 		if "varun" in q and "bikkumalla" in q and ("who is" in q or "tell me about" in q):
-			return f"Varun Bikkumalla is the sole developer behind {app_name}.\n\n{attribution}"
+			return (
+				f"{developer} is the creator and maintainer of {app_name}.\n\n"
+				f"{attribution}"
+			)
 
-		# If the user explicitly asks about ChatGPT/OpenAI, clarify separation.
+		# If the user asks about ownership/creator, answer succinctly.
+		if ("owner" in q or "owns" in q or "creator" in q or "developer" in q or "built" in q or "made" in q) and ("stratax" in q or "you" in q or "this app" in q or "this application" in q):
+			return (
+				f"{app_name} is a platform built and maintained by {developer}.\n\n"
+				f"It uses AI language models via API providers, with Stratax-specific logic on top for interview preparation."
+			)
+
+		# If the user explicitly asks about ChatGPT/OpenAI, clarify relationship safely.
 		if "chatgpt" in q or "openai" in q:
 			return (
-				f"{attribution}\n\n"
-				"ChatGPT is a separate product developed by OpenAI; I am "
-				f"{app_name}."
+				f"I’m {app_name}, built by {developer}.\n\n"
+				"ChatGPT is a product from OpenAI. Stratax AI is a separate application that can use AI model APIs "
+				"(depending on configuration) and adds its own interview-prep features and structure on top."
 			)
 
-		# If the user mentions Google/Gemini, explicitly deny that attribution.
+		# If the user mentions Google/Gemini, avoid misattribution while staying accurate.
 		if "google" in q or "gemini" in q:
 			return (
-				f"{attribution}\n\n"
-				f"I’m {app_name} (built by {developer}); I’m not developed by Google."
+				f"I’m {app_name}, built by {developer}.\n\n"
+				"I may use different AI model providers depending on your settings (for example, Gemini), "
+				"but Stratax AI itself is not an official Google product."
 			)
 
-		return attribution
+		# Default: generic identity description
+		return _base()
 
 	def _is_identity_question(self, question: str) -> bool:
 		"""Detect 'who made you' / attribution questions.
@@ -543,11 +564,12 @@ class LLMService:
 			"Stratax AI was developed by Varun Bikkumalla, the sole developer of this application.",
 		)
 		return (
-			"\n\nIdentity/Attribution Overrides (apply only to 'who built you' questions):\n"
-			"- Respond in 1–3 short sentences, no templates, no long sections.\n"
-			f"- State clearly: {attribution}\n"
-			f"- If asked about ChatGPT/OpenAI, clarify: '{app_name}' is different; ChatGPT is a separate product by OpenAI.\n"
-			f"- Never claim {app_name} was developed by OpenAI; the developer is {developer}.\n"
+			"\n\nIdentity/Attribution Overrides (apply only to identity/ownership questions):\n"
+			"- Respond in 1–3 short sentences. No long templates, no headings, no bullet lists.\n"
+			f"- Identify the product: '{app_name}' is an application/platform built by {developer}.\n"
+			"- Be accurate: it uses AI language models via API providers; avoid implying Stratax is a standalone model.\n"
+			"- If asked about ChatGPT/OpenAI/Google: clarify those are separate companies/products; do not claim affiliation.\n"
+			f"- If needed, include attribution: {attribution}\n"
 		)
 
 	async def generate_text(

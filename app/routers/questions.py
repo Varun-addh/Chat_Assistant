@@ -13,7 +13,7 @@ from app.schemas import (
 	SessionSummary, 
 	UpdateSessionTitleRequest
 )
-from app.services.session_manager import get_session_manager, SessionManager
+from app.services.session_manager import get_session_manager, SessionManager, SessionState
 from app.services.llm_service import get_llm_service
 from app.services.architecture_generator import get_architecture_generator, ArchitectureViewType
 from app.services.code_evaluation_service import evaluate_code
@@ -24,6 +24,7 @@ from app.middleware.auth import get_user_id_from_request
 from fastapi import Request
 import asyncio
 import logging
+import uuid
 
 from app.utils.story_contract import extract_mermaid_first, enforce_story_contract, sanitize_mermaid_subset
 from app.utils.mermaid_sanitizer import MermaidSanitizer
@@ -232,30 +233,82 @@ async def submit_question(
 	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	recovered_from_session_id: Optional[str] = None
+	reused_existing_session: bool = False
+
+	def _is_valid_session_id(value: str) -> bool:
+		v = (value or "").strip()
+		if not v:
+			return False
+		if v.lower() in {"undefined", "null", "none"}:
+			return False
+		try:
+			uuid.UUID(v)
+			return True
+		except Exception:
+			return False
+
+	async def _get_most_recent_session() -> Optional[SessionState]:
+		"""Best-effort: return the most recently updated session for this user."""
+		try:
+			items = await manager.list_sessions()
+		except Exception:
+			return None
+		for it in items:
+			sid = it.get("session_id")
+			if not sid:
+				continue
+			state = await manager.get(sid)
+			if state is not None:
+				return state
+		return None
 	
-	try:
-		state = await manager.get(payload.session_id)
-		if state is None:
-			# Auto-recovery: Create a new session if the requested one doesn't exist
-			# This handles cases where backend was restarted or storage was cleared
-			logger.info(f"Session {payload.session_id} not found. Creating new session for recovery.")
+	# Guard: if the frontend sent a bogus session_id, reuse latest session instead of
+	# creating a new one for every message (prevents sidebar spam).
+	if not _is_valid_session_id(payload.session_id):
+		recovered_from_session_id = payload.session_id
+		recent = await _get_most_recent_session()
+		if recent is not None:
+			state = recent
+			payload.session_id = state.session_id
+			reused_existing_session = True
+			logger.info(f"Reused most recent session {state.session_id} due to invalid session_id='{recovered_from_session_id}'")
+		else:
+			state = await manager.create_session()
+			payload.session_id = state.session_id
+			logger.info(f"Created new session because session_id was invalid and no recent session exists: {state.session_id}")
+	else:
+		try:
+			state = await manager.get(payload.session_id)
+			if state is None:
+				# Auto-recovery: prefer reusing the most recent session if it was updated recently.
+				recovered_from_session_id = payload.session_id
+				recent = await _get_most_recent_session()
+				if recent is not None:
+					state = recent
+					payload.session_id = state.session_id
+					reused_existing_session = True
+					logger.info(
+						f"Session {recovered_from_session_id} not found. Reusing most recent session {state.session_id}"
+					)
+				else:
+					logger.info(f"Session {recovered_from_session_id} not found. Creating new session for recovery.")
+					state = await manager.create_session()
+					payload.session_id = state.session_id
+					logger.info(f"Auto-created new session: {state.session_id} (recovered from {recovered_from_session_id})")
+		except KeyError:
+			# Fallback: create new session
 			recovered_from_session_id = payload.session_id
 			state = await manager.create_session()
-			# IMPORTANT: update the active session_id so subsequent saves/readbacks work.
 			payload.session_id = state.session_id
-			logger.info(f"Auto-created new session: {state.session_id} (recovered from {recovered_from_session_id})")
-	except KeyError:
-		# Fallback: create new session
-		recovered_from_session_id = payload.session_id
-		state = await manager.create_session()
-		payload.session_id = state.session_id
-		logger.info(f"Created new session due to KeyError: {state.session_id}")
+			logger.info(f"Created new session due to KeyError: {state.session_id}")
 
 	# Expose the effective session_id to the client (helps UI stay stable across refresh/tabs)
 	response.headers["X-Stratax-Session-Id"] = payload.session_id
 	if recovered_from_session_id and recovered_from_session_id != payload.session_id:
 		response.headers["X-Stratax-Session-Recovered"] = "1"
 		response.headers["X-Stratax-Old-Session-Id"] = recovered_from_session_id
+		if reused_existing_session:
+			response.headers["X-Stratax-Session-Reused"] = "1"
 
 	if not payload.question.strip():
 		raise HTTPException(status_code=400, detail="Empty question")
@@ -927,14 +980,31 @@ async def update_session_title(session_id: str, payload: UpdateSessionTitleReque
 
 
 @router.get("/session/{session_id}/chat", response_model=SessionHistory)
-async def get_session_chat(session_id: str, request: Request):
+async def get_session_chat(session_id: str, request: Request, response: Response):
 	"""Get chat history for a session (different from Search Intelligence history)"""
 	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
 	try:
 		state = await manager.get_required(session_id)
 	except KeyError:
-		raise HTTPException(status_code=404, detail="Session not found")
+		# Backward compatibility: earlier builds stored guest sessions under "guest_unknown".
+		# After introducing stable guest IDs (guest_<hash>), old tabs may still hold a legacy
+		# session_id. For guests only, try loading from legacy bucket and migrate forward.
+		if user_id.startswith("guest_") and user_id != "guest_unknown":
+			legacy = get_session_manager("guest_unknown")
+			legacy_state = await legacy.get(session_id)
+			if legacy_state is not None:
+				# Migrate session to current guest bucket so future loads succeed.
+				manager._sessions[session_id] = legacy_state  # type: ignore[attr-defined]
+				manager._save(legacy_state, force=True)  # type: ignore[attr-defined]
+				await legacy.delete_session(session_id)
+				response.headers["X-Stratax-Session-Legacy-Migrated"] = "1"
+				state = legacy_state
+				# Continue to build response below
+			else:
+				raise HTTPException(status_code=404, detail="Session not found")
+		else:
+			raise HTTPException(status_code=404, detail="Session not found")
 	
 	items = [
 		QnA(
