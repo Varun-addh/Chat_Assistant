@@ -4,10 +4,10 @@ FastAPI endpoints for realistic interview practice mode.
 """
 
 import logging
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Header, Query
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Header, Query, Request
 from fastapi.responses import FileResponse
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 import aiofiles
 import os
 
@@ -29,6 +29,12 @@ from app.schemas import (
 )
 from app.services.practice_mode_service import PracticeModeService
 
+from app.config import settings
+from app.database import get_db_context
+from app.middleware.auth import get_user_id_from_request
+from app.utils.event_logging import track_event, stable_question_id
+from app.services.learning_loops import compute_practice_insights, merge_focus_areas
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
@@ -38,6 +44,71 @@ router = APIRouter(
 
 # Service instance (will be initialized in main.py)
 practice_service: Optional[PracticeModeService] = None
+
+
+def _copy_user_profile(profile: UserProfile, update: dict[str, Any]) -> UserProfile:
+    """Compatibility helper for Pydantic v1/v2."""
+    if hasattr(profile, "model_copy"):
+        return profile.model_copy(update=update)  # type: ignore[attr-defined]
+    return profile.copy(update=update)  # type: ignore[call-arg]
+
+
+def _maybe_enrich_profile_focus(*, user_id: str, profile: Optional[UserProfile]) -> tuple[Optional[UserProfile], list[str]]:
+    """Enrich UserProfile.interview_focus from recent practice events (best-effort)."""
+    if not profile:
+        return None, []
+
+    try:
+        with get_db_context() as db:
+            insights = compute_practice_insights(db, user_id=user_id, domain=profile.domain)
+        recommended: list[str] = list(insights.get("recommended_focus") or [])
+    except Exception:
+        recommended = []
+
+    if not recommended:
+        return profile, []
+
+    existing = getattr(profile, "interview_focus", None)
+    merged = merge_focus_areas(existing, recommended, max_items=5)
+    if merged == (existing or []):
+        return profile, recommended
+
+    return _copy_user_profile(profile, {"interview_focus": merged}), recommended
+
+
+def _safe_enum_value(v: Any) -> Any:
+    try:
+        return v.value  # type: ignore[attr-defined]
+    except Exception:
+        return v
+
+
+def _track_practice_event(
+    *,
+    user_id: str,
+    session_id: Optional[str],
+    event_type: str,
+    question_text: Optional[str] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    """Best-effort structured telemetry for Practice Mode.
+
+    Never raises; never blocks product flows.
+    """
+    if not getattr(settings, "enable_event_logging", True):
+        return
+    try:
+        with get_db_context() as db:
+            track_event(
+                db,
+                user_id=user_id,
+                session_id=session_id,
+                event_type=event_type,
+                question_text=question_text,
+                extra=extra or {},
+            )
+    except Exception:
+        pass
 
 
 def init_practice_mode(
@@ -139,9 +210,31 @@ async def get_available_rounds(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/insights")
+async def get_practice_insights(
+    http_request: Request,
+    domain: Optional[str] = Query(None, description="Optional domain filter (matches session start domain)"),
+    lookback_days: int = Query(30, ge=1, le=365),
+):
+    """Get lightweight, explainable practice insights for the current user.
+
+    This endpoint is intentionally simple: it aggregates recent practice events
+    into a recommended focus list and a few summary stats.
+    """
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+    with get_db_context() as db:
+        return compute_practice_insights(
+            db,
+            user_id=user_id,
+            domain=domain,
+            lookback_days=lookback_days,
+        )
+
+
 @router.post("/interview/start-round", response_model=StartInterviewResponse)
 async def start_round_based_interview(
-    request: RoundSelectionRequest,
+    payload: RoundSelectionRequest,
+    http_request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -171,7 +264,9 @@ async def start_round_based_interview(
         Session with questions specific to the chosen round
     """
     try:
-        logger.info(f"📥 Received request: round_type={request.round_type}, domain={request.domain}, exp={request.experience_years}")
+        logger.info(f"📥 Received request: round_type={payload.round_type}, domain={payload.domain}, exp={payload.experience_years}")
+
+        user_id = get_user_id_from_request(http_request) or "guest_unknown"
         
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
@@ -179,35 +274,38 @@ async def start_round_based_interview(
         from app.services.round_config_service import RoundConfigService
         
         # Get configuration for the selected round
-        round_config = RoundConfigService.get_round_config(request.round_type)
+        round_config = RoundConfigService.get_round_config(payload.round_type)
         
         # Use user-provided question count if available, otherwise use round default
-        final_question_count = request.question_count or round_config.question_count
+        final_question_count = payload.question_count or round_config.question_count
         logger.info(f"🎯 Starting {round_config.name} with {final_question_count} questions")
         
         # Build user profile from domain/experience or use provided profile
-        if request.user_profile:
-            profile = request.user_profile
+        if payload.user_profile:
+            profile = payload.user_profile
         else:
             # Create profile from domain and experience
             # Infer basic skills from domain
-            basic_skills = [request.domain] if request.domain else []
+            basic_skills = [payload.domain] if payload.domain else []
             
             profile = UserProfile(
-                domain=request.domain,
-                experience_years=request.experience_years,
+                domain=payload.domain,
+                experience_years=payload.experience_years,
                 skills=basic_skills,  # Required field
-                company_preference=request.company_specific
+                company_preference=payload.company_specific
             )
         
         # Override company preference if specified
-        if request.company_specific:
-            profile.company_preference = request.company_specific
+        if payload.company_specific:
+            profile.company_preference = payload.company_specific
         
         # Calculate difficulty based on experience (NOT round's default difficulty)
         experience_based_difficulty = RoundConfigService.get_difficulty_for_experience(
             profile.experience_years
         )
+
+        # Learning loop: enrich focus areas from prior attempts (best-effort)
+        profile, recommended_focus = _maybe_enrich_profile_focus(user_id=user_id, profile=profile)
         
         logger.info(f"📋 Profile: {profile.domain} with {profile.experience_years} years | Difficulty: {experience_based_difficulty.value.upper()} | Company: {profile.company_preference or 'Generic'}")
         
@@ -229,7 +327,7 @@ async def start_round_based_interview(
             difficulty=experience_based_difficulty,  # ✅ Use experience-based difficulty
             user_profile=profile,
             question_count=final_question_count,  # ✅ Now dynamic
-            round_type=request.round_type,
+            round_type=payload.round_type,
             api_key=api_key
         )
         
@@ -238,6 +336,38 @@ async def start_round_based_interview(
         total_questions = len(session.questions) if session else round_config.question_count
         
         tts_audio_url = f"/api/practice/audio/{audio_filename}" if audio_filename else ""
+
+        _track_practice_event(
+            user_id=user_id,
+            session_id=session_id,
+            event_type="practice_session_started",
+            question_text=getattr(first_question, "text", None),
+            extra={
+                "flow": "round_based",
+                "round_type": _safe_enum_value(payload.round_type),
+                "domain": payload.domain,
+                "experience_years": payload.experience_years,
+                "difficulty": _safe_enum_value(experience_based_difficulty),
+                "question_count": int(final_question_count),
+                "company": profile.company_preference,
+                "recommended_focus": recommended_focus,
+            },
+        )
+        _track_practice_event(
+            user_id=user_id,
+            session_id=session_id,
+            event_type="practice_question_served",
+            question_text=getattr(first_question, "text", None),
+            extra={
+                "question_num": int(getattr(first_question, "id", 1) or 1),
+                "question_id": int(getattr(first_question, "id", 1) or 1),
+                "question_hash": stable_question_id(getattr(first_question, "text", "") or ""),
+                "difficulty": _safe_enum_value(getattr(first_question, "difficulty", None)),
+                "category": getattr(first_question, "category", None),
+                "round_type": _safe_enum_value(getattr(first_question, "round_type", None)),
+                "tts": bool(audio_filename),
+            },
+        )
         
         logger.info(f"🎤 TTS Audio: {'✅ ' + tts_audio_url if tts_audio_url else '❌ No audio generated'}")
         
@@ -335,7 +465,8 @@ async def quick_start_interview(
 
 @router.post("/interview/start", response_model=StartInterviewResponse)
 async def start_interview(
-    request: StartInterviewRequest,
+    payload: StartInterviewRequest,
+    http_request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -347,7 +478,9 @@ async def start_interview(
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
         
-        logger.info(f"Starting interview with difficulty: {request.difficulty}")
+        logger.info(f"Starting interview with difficulty: {payload.difficulty}")
+
+        user_id = get_user_id_from_request(http_request) or "guest_unknown"
         
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
@@ -365,20 +498,57 @@ async def start_interview(
             else:
                 api_key = settings.groq_api_key or settings.gemini_api_key
 
+        # Learning loop: enrich focus areas from prior attempts (best-effort)
+        enriched_profile, recommended_focus = _maybe_enrich_profile_focus(
+            user_id=user_id,
+            profile=payload.user_profile,
+        )
+
         # Start interview with user profile
         session_id, first_question, audio_filename = await practice_service.start_interview(
-            difficulty=request.difficulty,
-            user_profile=request.user_profile,
-            question_count=request.question_count,
+            difficulty=payload.difficulty,
+            user_profile=enriched_profile,
+            question_count=payload.question_count,
             api_key=api_key
         )
         
         # Get session to retrieve total questions count
         session = practice_service.get_session(session_id)
-        total_questions = len(session.questions) if session else request.question_count
+        total_questions = len(session.questions) if session else payload.question_count
         
         # Build audio URL
-        tts_audio_url = f"/api/practice/audio/{audio_filename}"
+        tts_audio_url = f"/api/practice/audio/{audio_filename}" if audio_filename else ""
+
+        _track_practice_event(
+            user_id=user_id,
+            session_id=session_id,
+            event_type="practice_session_started",
+            question_text=getattr(first_question, "text", None),
+            extra={
+                "flow": "standard",
+                "difficulty": _safe_enum_value(payload.difficulty),
+                "question_count": int(payload.question_count),
+                "round_type": _safe_enum_value(payload.round_type),
+                "category": payload.category,
+                "company": getattr(enriched_profile, "company_preference", None) if enriched_profile else None,
+                "recommended_focus": recommended_focus,
+            },
+        )
+        _track_practice_event(
+            user_id=user_id,
+            session_id=session_id,
+            event_type="practice_question_served",
+            question_text=getattr(first_question, "text", None),
+            extra={
+                "question_num": int(getattr(first_question, "id", 1) or 1),
+                "question_id": int(getattr(first_question, "id", 1) or 1),
+                "question_hash": stable_question_id(getattr(first_question, "text", "") or ""),
+                "difficulty": _safe_enum_value(getattr(first_question, "difficulty", None)),
+                "category": getattr(first_question, "category", None),
+                "round_type": _safe_enum_value(getattr(first_question, "round_type", None)),
+                "tts": bool(audio_filename),
+            },
+        )
         
         return StartInterviewResponse(
             session_id=session_id,
@@ -396,6 +566,7 @@ async def start_interview(
 @router.post("/interview/submit-answer", response_model=SubmitAnswerResponse)
 async def submit_answer(
     background_tasks: BackgroundTasks,
+    http_request: Request,
     audio: UploadFile = File(..., description="Audio file of the answer"),
     session_id: str = Form(..., description="Session ID"),
     question_id: int = Form(..., ge=1, le=5, description="Question ID (1-5)"),
@@ -411,6 +582,8 @@ async def submit_answer(
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
         
         logger.info(f"Receiving answer for session {session_id}, question {question_id}")
+
+        user_id = get_user_id_from_request(http_request) or "guest_unknown"
         
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
@@ -439,6 +612,18 @@ async def submit_answer(
             content = await audio.read()
             await f.write(content)
 
+        _track_practice_event(
+            user_id=user_id,
+            session_id=session_id,
+            event_type="practice_answer_audio_received",
+            question_text=None,
+            extra={
+                "question_id": int(question_id),
+                "audio_bytes": len(content or b""),
+                "content_type": audio.content_type,
+            },
+        )
+
         # Process answer
         result = await practice_service.submit_answer(
             session_id=session_id,
@@ -460,6 +645,28 @@ async def submit_answer(
             requires_acknowledgment=result.get("requires_acknowledgment", True),
             current_question_id=result.get("current_question_id", question_id)
         )
+
+        # Telemetry: processed answer summary (avoid storing transcript by default)
+        metrics_obj = result.get("metrics")
+        fb_obj = result.get("micro_feedback")
+        _track_practice_event(
+            user_id=user_id,
+            session_id=session_id,
+            event_type="practice_answer_processed",
+            question_text=None,
+            extra={
+                "question_id": int(question_id),
+                "transcript_len": len((result.get("transcript") or "")),
+                "wpm": getattr(metrics_obj, "wpm", None),
+                "filler_count": getattr(metrics_obj, "filler_count", None),
+                "confidence_score": getattr(metrics_obj, "confidence_score", None),
+                "correctness_score": getattr(fb_obj, "correctness_score", None),
+                "technical_accuracy": getattr(fb_obj, "technical_accuracy", None),
+                "is_correct": getattr(fb_obj, "is_correct", None),
+                "complete": bool(result.get("complete")),
+                "requires_acknowledgment": bool(result.get("requires_acknowledgment", True)),
+            },
+        )
         
         # Don't add next_question - user must acknowledge feedback first
         # Next question will be fetched via /acknowledge-feedback endpoint
@@ -480,7 +687,8 @@ async def submit_answer(
 
 @router.post("/interview/acknowledge-feedback", response_model=NextQuestionResponse)
 async def acknowledge_feedback(
-    request: AcknowledgeFeedbackRequest,
+    payload: AcknowledgeFeedbackRequest,
+    http_request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -492,7 +700,9 @@ async def acknowledge_feedback(
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
         
-        logger.info(f"📋 Feedback acknowledged for session {request.session_id}, question {request.question_id}")
+        logger.info(f"📋 Feedback acknowledged for session {payload.session_id}, question {payload.question_id}")
+
+        user_id = get_user_id_from_request(http_request) or "guest_unknown"
         
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
@@ -509,9 +719,21 @@ async def acknowledge_feedback(
 
         # Get next question after acknowledgment
         result = await practice_service.get_next_question_after_acknowledgment(
-            session_id=request.session_id,
-            question_id=request.question_id,
+            session_id=payload.session_id,
+            question_id=payload.question_id,
             api_key=api_key
+        )
+
+        _track_practice_event(
+            user_id=user_id,
+            session_id=payload.session_id,
+            event_type="practice_feedback_acknowledged",
+            question_text=None,
+            extra={
+                "question_id": int(payload.question_id),
+                "feedback_read": bool(getattr(payload, "feedback_read", True)),
+                "complete": bool(result.get("complete")),
+            },
         )
         
         # Build response
@@ -523,13 +745,30 @@ async def acknowledge_feedback(
         if result["complete"]:
             # Interview finished
             response.evaluation_report = result.get("evaluation_report")
-            logger.info(f"✅ Interview complete for session {request.session_id}")
+            logger.info(f"✅ Interview complete for session {payload.session_id}")
         else:
             # Next question available
             response.next_question = result["next_question"]
             if result.get("tts_audio_url"):
                 response.tts_audio_url = f"/api/practice/audio/{result['tts_audio_url']}"
             logger.info(f"➡️ Next question ready: Q{result['next_question'].id}")
+
+            next_q = result.get("next_question")
+            _track_practice_event(
+                user_id=user_id,
+                session_id=payload.session_id,
+                event_type="practice_question_served",
+                question_text=getattr(next_q, "text", None),
+                extra={
+                    "question_num": int(getattr(next_q, "id", 0) or 0),
+                    "question_id": int(getattr(next_q, "id", 0) or 0),
+                    "question_hash": stable_question_id(getattr(next_q, "text", "") or ""),
+                    "difficulty": _safe_enum_value(getattr(next_q, "difficulty", None)),
+                    "category": getattr(next_q, "category", None),
+                    "round_type": _safe_enum_value(getattr(next_q, "round_type", None)),
+                    "tts": bool(result.get("tts_audio_url")),
+                },
+            )
         
         return response
         
@@ -693,6 +932,7 @@ async def get_status():
 async def get_evaluation(
     session_id: str,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """

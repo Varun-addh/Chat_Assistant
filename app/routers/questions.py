@@ -31,6 +31,7 @@ from app.utils.mermaid_sanitizer import MermaidSanitizer
 
 from app.database import get_db_context
 from app.utils.usage_tracking import track_api_usage, track_session
+from app.utils.event_logging import track_event
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +314,29 @@ async def submit_question(
 	if not payload.question.strip():
 		raise HTTPException(status_code=400, detail="Empty question")
 
+	# --- Telemetry spine: request received (safe, low-cost, no raw text by default) ---
+	if getattr(settings, "enable_event_logging", True):
+		try:
+			with get_db_context() as db:
+				track_event(
+					db,
+					user_id=user_id,
+					session_id=payload.session_id,
+					event_type="chat_prompt_received",
+					question_text=payload.question,
+					extra={
+						"stream": bool(payload.stream),
+						"saved_to_history": bool(payload.save_to_history),
+						"architecture_mode": payload.architecture_mode,
+						"style_mode": getattr(payload, "style_mode", None),
+						"tone": getattr(payload, "tone", None),
+						"layout": getattr(payload, "layout", None),
+					},
+				)
+		except Exception:
+			# Never fail the request due to analytics.
+			pass
+
 	# Auto-detect architecture mode choice if user replies with "single" or "multi"
 	# This handles the case where user is responding to the architecture choice prompt
 	if not payload.architecture_mode:
@@ -351,6 +375,19 @@ async def submit_question(
 	# This is a belt-and-suspenders guard in addition to the LLMService short-circuit.
 	if llm_service._is_identity_question(payload.question):
 		identity_answer = llm_service._identity_response_text(payload.question)
+		if getattr(settings, "enable_event_logging", True):
+			try:
+				with get_db_context() as db:
+					track_event(
+						db,
+						user_id=user_id,
+						session_id=payload.session_id,
+						event_type="chat_identity_guard",
+						question_text=payload.question,
+						extra={"stream": bool(payload.stream)},
+					)
+			except Exception:
+				pass
 		# Proof-of-handling: inspect this in DevTools -> Network -> Response Headers
 		response.headers["X-Stratax-Guard"] = "identity"
 		response.headers["X-Stratax-App"] = getattr(settings, "app_name", "Stratax AI")
@@ -435,6 +472,19 @@ async def submit_question(
 		# Instead, return a structured UI hint so the frontend can render a selector.
 		# The client should re-submit /api/question with architecture_mode set.
 		logger.info("🏗️ System design detected with no architecture_mode: returning ui_action chooser")
+		if getattr(settings, "enable_event_logging", True):
+			try:
+				with get_db_context() as db:
+					track_event(
+						db,
+						user_id=user_id,
+						session_id=payload.session_id,
+						event_type="chat_architecture_mode_prompted",
+						question_text=payload.question,
+						extra={"detected": True},
+					)
+			except Exception:
+				pass
 		return AnswerOut(
 			answer="",
 			created_at=datetime.utcnow(),
@@ -793,6 +843,24 @@ async def submit_question(
 				"answer": full_answer,
 				"saved_to_history": payload.save_to_history,
 			})
+
+			if getattr(settings, "enable_event_logging", True):
+				try:
+					with get_db_context() as db:
+						track_event(
+							db,
+							user_id=user_id,
+							session_id=state.session_id,
+							event_type="chat_answer_generated",
+							question_text=payload.question,
+							extra={
+								"stream": True,
+								"saved_to_history": bool(payload.save_to_history),
+								"answer_len": len(full_answer or ""),
+							},
+						)
+				except Exception:
+					pass
 			
 			# Auto-evaluate if response contains code
 			asyncio.create_task(_auto_evaluate_if_code(manager, state.session_id, payload.question, full_answer, api_key))
@@ -836,6 +904,25 @@ async def submit_question(
 		"answer": answer,
 		"saved_to_history": payload.save_to_history,
 	})
+
+	if getattr(settings, "enable_event_logging", True):
+		try:
+			with get_db_context() as db:
+				track_event(
+					db,
+					user_id=user_id,
+					session_id=state.session_id,
+					event_type="chat_answer_generated",
+					question_text=payload.question,
+					extra={
+						"stream": False,
+						"saved_to_history": bool(payload.save_to_history),
+						"truncated": bool(truncated),
+						"answer_len": len(answer or ""),
+					},
+				)
+		except Exception:
+			pass
 	
 	# Auto-evaluate if response contains code
 	asyncio.create_task(_auto_evaluate_if_code(manager, state.session_id, payload.question, answer, api_key))

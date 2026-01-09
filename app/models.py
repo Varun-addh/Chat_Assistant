@@ -132,6 +132,37 @@ class RateLimitRecord(Base):
         return f"<RateLimitRecord user={self.user_id} endpoint={self.endpoint} count={self.request_count}>"
 
 
+class EventRecord(Base):
+    """Structured product/learning events (foundation for compounding datasets).
+
+    NOTE:
+    - We intentionally do NOT enforce a FK to users for guest events.
+    - Keep payloads small; store large text only if explicitly enabled.
+    """
+
+    __tablename__ = "event_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # Who/where
+    user_id = Column(String, nullable=False, index=True)
+    session_id = Column(String, nullable=True, index=True)
+
+    # What
+    event_type = Column(String, nullable=False, index=True)
+    question_id = Column(String, nullable=True, index=True)
+    content_hash = Column(String, nullable=True, index=True)
+
+    # Details (JSON for flexibility)
+    extra_data = Column(JSON, nullable=True)
+
+    # When
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return f"<EventRecord user={self.user_id} type={self.event_type} session={self.session_id}>"
+
+
 # Tier quotas (requests per day)
 TIER_QUOTAS = {
     UserTier.FREE: {

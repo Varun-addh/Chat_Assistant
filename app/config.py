@@ -84,6 +84,14 @@ class Settings(BaseSettings):
 	# Logging
 	log_level: str = "INFO"
 	analytics_path: str | None = None  # e.g., logs/qna.jsonl
+	# Event logging / telemetry (data moat foundation)
+	# - analytics_hmac_key: if set, we use HMAC-SHA256 for stable, non-reversible IDs.
+	# - analytics_store_raw_text: if true, we may store question/answer text in event payloads.
+	#   Keep this false by default to reduce privacy risk.
+	analytics_hmac_key: str | None = None
+	analytics_store_raw_text: bool = False
+	analytics_text_preview_len: int = 120
+	enable_event_logging: bool = True
 
 	# Feature Flags
 	enable_hybrid_search: bool = True

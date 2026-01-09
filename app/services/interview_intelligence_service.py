@@ -251,17 +251,17 @@ class ModernInterviewIntelligenceService:
         Returns dict with code_solution, language, time_complexity, space_complexity.
         """
         llm_svc = self._get_llm_service()
-        if not llm_svc.enabled:
-            logger.debug("LLM service disabled, skipping code generation")
-            return None
 
         if not question_text:
             logger.debug("No question text provided, cannot generate code solution")
             return None
 
+        # IMPORTANT:
+        # Do NOT gate on llm_svc.enabled here. That property currently reflects only server-side keys,
+        # but Interview Intelligence can be driven by user-provided API keys.
         client, provider = llm_svc._ensure_client(api_key=api_key)
         if not client:
-            logger.warning("LLM client unavailable, skipping code generation")
+            logger.debug("LLM client unavailable, skipping code generation")
             return None
         language = (language_hint or "python").lower()
         chosen_language = "python" if language not in ["python", "javascript", "java", "cpp", "go", "typescript"] else language
@@ -550,13 +550,13 @@ class ModernInterviewIntelligenceService:
     ) -> List[InterviewQuestion]:
         """Generate with LLM - try Groq first for coding questions"""
         llm_svc = self._get_llm_service()
-        if not llm_svc.enabled:
-            logger.warning("LLM not enabled, returning empty results")
-            return []
         
         prompt = self._build_generation_prompt(request)
         
         try:
+            # IMPORTANT:
+            # Do NOT gate on llm_svc.enabled here. That property currently reflects only server-side keys,
+            # but Interview Intelligence can be driven by user-provided API keys.
             client, provider = llm_svc._ensure_client(api_key=api_key)
             if not client:
                 # Check if it's because user API key is required
@@ -1773,7 +1773,23 @@ CRITICAL FORMAT RULES:
         6. Store good questions for future use
         """
         logger.info(f"Searching for: {query} (limit={limit}, force_refresh={force_refresh})")
-        
+
+        # If the caller requests direct LLM mode but we have no usable LLM client,
+        # don't hard-fail into empty results: fall back to vector DB mode.
+        try:
+            llm_svc = self._get_llm_service()
+            llm_client, _ = llm_svc._ensure_client(api_key=api_key)
+            llm_available = llm_client is not None
+        except Exception:
+            llm_available = False
+
+        if force_refresh and not llm_available:
+            logger.warning(
+                "Direct LLM mode requested but no LLM client is configured/available; "
+                "falling back to vector DB mode. Configure API keys to enable fresh generation."
+            )
+            force_refresh = False
+
         if force_refresh:
             logger.info("🚀 DIRECT LLM MODE: Skipping vector DB, generating fresh from LLM only")
         else:
@@ -1912,6 +1928,11 @@ CRITICAL FORMAT RULES:
             else:
                 logger.info(f"Successfully generated {len(results)}/{limit} questions")
         
+        # If we still have nothing (fresh install, no LLM keys, empty vector DB),
+        # return a small set of template-based questions instead of an empty response.
+        if not results:
+            results = self._fallback_template_questions(query=query, intent=intent, count=min(limit, 5))
+
         # Step 5: Rank all results (skip embeddings if force_refresh for pure LLM mode)
         ranked = await self._rank_questions(results, query, intent, skip_embeddings=force_refresh)
         
@@ -1958,6 +1979,74 @@ CRITICAL FORMAT RULES:
         
         logger.info(f"Returning {len(final_results)} questions (requested {limit})")
         return final_results
+
+    def _fallback_template_questions(self, *, query: str, intent: SearchIntent, count: int) -> List[InterviewQuestion]:
+        """Deterministic fallback when neither vector DB nor LLM are available.
+
+        This is intentionally simple and marked with a distinct source.
+        """
+
+        q = (query or "").strip()
+        topic = intent.primary_topic or "general"
+        difficulty = intent.difficulty_preference or "medium"
+        question_type = intent.question_type or "technical"
+
+        # Keep answers short and interview-ready.
+        def _answer_template(title: str) -> str:
+            return (
+                f"- Define {title} in 1–2 lines and why it matters.\n"
+                "- Explain how it works at a high level (components/steps).\n"
+                "- Call out 1–2 trade-offs or failure modes.\n"
+                "- Give a concrete example (numbers/shape of data).\n"
+                "- Mention how you would validate/monitor it in production."
+            )
+
+        base_questions: List[str]
+        if topic in {"data-science", "machine-learning", "ml"} or "diffusion" in q.lower():
+            base_questions = [
+                f"Explain diffusion models at a high level. What problem do they solve compared to GANs and VAEs?",
+                "Walk through the forward diffusion process and the reverse denoising process. What is the role of the noise schedule?",
+                "What is classifier-free guidance? How does it change sampling quality vs diversity?",
+                "How would you evaluate a diffusion model (offline metrics + human eval) and detect mode collapse or artifacts?",
+                "What are the main latency bottlenecks during sampling, and what techniques reduce inference time?",
+            ]
+        elif question_type == "system-design" or topic == "system-design":
+            base_questions = [
+                f"Design a system related to: {q}. List requirements and propose a high-level architecture.",
+                "How would you handle scaling, caching, and consistency trade-offs in this design?",
+                "What are the top failure modes, and what observability signals would you track?",
+            ]
+        elif question_type == "coding" or intent.requires_code:
+            base_questions = [
+                f"Write code to solve a problem related to: {q}. Explain your approach and complexity.",
+                "What edge cases would you test, and how would you optimize the solution?",
+            ]
+        else:
+            base_questions = [
+                f"Explain: {q}. What are the core concepts and the most common pitfalls?",
+                f"Give a real-world example of {q} and how you would debug issues in production.",
+                "What trade-offs would influence your design/implementation choices here?",
+            ]
+
+        out: List[InterviewQuestion] = []
+        for i, text in enumerate(base_questions[: max(1, count)]):
+            out.append(
+                InterviewQuestion(
+                    question=text,
+                    answer=_answer_template("the concept"),
+                    topic=topic,
+                    difficulty=difficulty,
+                    question_type=question_type,
+                    key_concepts=intent.keywords[:5],
+                    common_mistakes=["Answering too vaguely", "Skipping trade-offs"],
+                    follow_up_questions=[],
+                    companies=intent.target_companies,
+                    confidence_score=0.25,
+                    source="fallback_template",
+                )
+            )
+
+        return out
     
     async def get_questions_by_topic(
         self,

@@ -1026,12 +1026,22 @@ async def search_questions(
     gemini_key = x_gemini_key
     if not groq_key and authorization and authorization.startswith("Bearer "):
         groq_key = authorization.split(" ")[1]
-        
+
     api_key = gemini_key if gemini_key else groq_key
-    
-    # Fallback to dev keys
+
+    # If the server is configured to require user API keys, do NOT fall back to server keys.
+    if settings.require_user_api_key and not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "API key required for Interview Intelligence. "
+                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
+                "or Authorization: Bearer <key>."
+            ),
+        )
+
+    # Fallback to dev keys only in permissive mode
     if not api_key:
-        from app.config import settings
         api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
@@ -1070,12 +1080,22 @@ async def search_questions_post(
     gemini_key = x_gemini_key
     if not groq_key and authorization and authorization.startswith("Bearer "):
         groq_key = authorization.split(" ")[1]
-        
+
     api_key = gemini_key if gemini_key else groq_key
-    
-    # Fallback to dev keys
+
+    # If the server is configured to require user API keys, do NOT fall back to server keys.
+    if settings.require_user_api_key and not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "API key required for Interview Intelligence. "
+                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
+                "or Authorization: Bearer <key>."
+            ),
+        )
+
+    # Fallback to dev keys only in permissive mode
     if not api_key:
-        from app.config import settings
         api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
