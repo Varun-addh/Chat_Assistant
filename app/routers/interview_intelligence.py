@@ -814,57 +814,13 @@ async def _search_and_build_response(
         "refresh": refresh,
     })
 
-    # SAVE TO HISTORY: Ensure search is persisted for the history sidebar (only if requested)
-    if save_to_history:
-        if len(question_objects) == 0:
-            logger.info(f"⏭️ Skipping history save (0 results) for query: '{query}'")
-        else:
-            try:
-                # Get user-specific history manager
-                from app.services.history_manager import HistoryManager
-                from app.middleware.auth import get_user_id_from_request
-
-                user_id = None
-                if request:
-                    user_id = get_user_id_from_request(request)
-
-                # Create user-specific history manager or use default for guests
-                if user_id:
-                    history_manager = HistoryManager(user_id=user_id)
-                    logger.info(f"🔄 Using personalized history for user: {user_id}")
-                else:
-                    from app.services.history_manager import default_history_manager
-                    history_manager = default_history_manager
-                    logger.info(f"🔄 Using default history (guest mode)")
-
-                logger.info(
-                    f"🔄 Attempting to save search to history: query='{query}', count={len(question_objects)}"
-                )
-
-                await history_manager.initialize()
-                logger.info("✅ History manager initialized successfully")
-
-                # Convert Pydantic objects to dicts for storage
-                history_questions = [q.dict() for q in question_objects]
-                logger.info(f"📝 Converted {len(history_questions)} questions to dicts")
-
-                tab_id = await history_manager.save_search(
-                    query=query,
-                    questions=history_questions,
-                    metadata={
-                        "search_type": "standard",
-                        "refresh": refresh,
-                        "count": len(history_questions),
-                        "user_id": user_id if user_id else "guest",
-                    },
-                )
-                logger.info(
-                    f"💾 ✅ Standard search SUCCESSFULLY saved to history: tab_id={tab_id}, query='{query}', user={user_id or 'guest'}"
-                )
-            except Exception as e:
-                logger.error(f"❌ FAILED to save standard search to history: {e}", exc_info=True)
-    else:
-        logger.debug(f"⏭️ Skipping history save (save_to_history=False) for query: '{query}'")
+    # HISTORY SAVE: Disabled here to prevent duplicates.
+    # The frontend now controls history save via POST /api/history/ after receiving results.
+    # This gives the UI full control and avoids double-saving.
+    if save_to_history and len(question_objects) > 0:
+        logger.debug(
+            f"⏭️ Skipping backend auto-save for Interview Intelligence (frontend will save via /api/history/): query='{query}'"
+        )
 
 
     return SearchQuestionsResponse(
