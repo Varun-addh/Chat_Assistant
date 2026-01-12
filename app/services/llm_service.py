@@ -2809,7 +2809,24 @@ class LLMService:
 		
 		return prompt
 
-	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None, api_key: Optional[str] = None, apply_auto_overrides: bool = True, allow_provider_fallback: bool = True) -> tuple[str, bool]:
+	async def generate_answer(
+		self,
+		question: str,
+		system_prompt: Optional[str] = None,
+		profile_text: Optional[str] = None,
+		previous_qna: Optional[List[Dict[str, str]]] = None,
+		*,
+		style_mode: Optional[str] = None,
+		tone: Optional[str] = None,
+		layout: Optional[str] = None,
+		variability: Optional[float] = None,
+		seed: Optional[int] = None,
+		api_key: Optional[str] = None,
+		apply_auto_overrides: bool = True,
+		allow_provider_fallback: bool = True,
+		groq_model_override: Optional[str] = None,
+		restrict_groq_to_override: bool = False,
+	) -> tuple[str, bool]:
 		# Deterministic identity answers (avoid LLM hallucinated attribution)
 		if self._is_identity_question(question):
 			logger.info("🪪 [IDENTITY] generate_answer short-circuit: %s", (question or "")[:200])
@@ -2929,7 +2946,14 @@ class LLMService:
 			DECOMMISSIONED = ["llama-3.1-70b-versatile", "llama3-70b-8192"]
 
 			def _groq_models_to_try() -> list[str]:
-				raw_list = [self._settings.groq_model] + self._settings.groq_fallback_models
+				# Allow per-call override (used for demo mode cost control).
+				if groq_model_override:
+					if restrict_groq_to_override:
+						raw_list = [groq_model_override]
+					else:
+						raw_list = [groq_model_override] + [self._settings.groq_model] + self._settings.groq_fallback_models
+				else:
+					raw_list = [self._settings.groq_model] + self._settings.groq_fallback_models
 				models: list[str] = []
 				for m in raw_list:
 					if m and m not in models and m not in DECOMMISSIONED:
@@ -3178,7 +3202,24 @@ class LLMService:
 		return False, 0.0, "all classification attempts failed"
 
 
-	async def stream_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None, api_key: Optional[str] = None, apply_auto_overrides: bool = True, allow_provider_fallback: bool = True) -> AsyncIterator[str]:
+	async def stream_answer(
+		self,
+		question: str,
+		system_prompt: Optional[str] = None,
+		profile_text: Optional[str] = None,
+		previous_qna: Optional[List[Dict[str, str]]] = None,
+		*,
+		style_mode: Optional[str] = None,
+		tone: Optional[str] = None,
+		layout: Optional[str] = None,
+		variability: Optional[float] = None,
+		seed: Optional[int] = None,
+		api_key: Optional[str] = None,
+		apply_auto_overrides: bool = True,
+		allow_provider_fallback: bool = True,
+		groq_model_override: Optional[str] = None,
+		restrict_groq_to_override: bool = False,
+	) -> AsyncIterator[str]:
 		# Deterministic identity answers (avoid LLM hallucinated attribution)
 		if self._is_identity_question(question):
 			logger.info("🪪 [IDENTITY] stream_answer short-circuit: %s", (question or "")[:200])
@@ -3265,7 +3306,13 @@ class LLMService:
 				return None
 
 		import anyio
-		models_to_try = [self._settings.groq_model] + [m for m in self._settings.groq_fallback_models if m != self._settings.groq_model]
+		if groq_model_override:
+			if restrict_groq_to_override:
+				models_to_try = [groq_model_override]
+			else:
+				models_to_try = [groq_model_override] + [self._settings.groq_model] + [m for m in self._settings.groq_fallback_models if m != self._settings.groq_model]
+		else:
+			models_to_try = [self._settings.groq_model] + [m for m in self._settings.groq_fallback_models if m != self._settings.groq_model]
 		stream = None
 		active_provider = provider
 		
