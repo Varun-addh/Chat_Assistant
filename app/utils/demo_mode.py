@@ -92,15 +92,28 @@ def extract_user_provided_api_key(
     - the Bearer token looks like an LLM key prefix.
     """
 
-    groq_key = (x_api_key or "").strip() or None
-    gemini_key = (x_gemini_key or "").strip() or None
+    def _clean_header_val(v: Optional[str]) -> Optional[str]:
+        t = (v or "").strip()
+        if not t:
+            return None
+        if t.lower() in ("null", "undefined", "none"):
+            return None
+        return t
 
+    groq_key = _clean_header_val(x_api_key)
+    gemini_key = _clean_header_val(x_gemini_key)
+
+    # Only accept bridge headers if they look like a supported LLM key.
+    # This prevents accidental values (e.g. 'undefined') from disabling demo mode.
     key = gemini_key or groq_key
-    if key:
+    if key and _looks_like_llm_key(key):
         return key
 
     auth_val = (authorization or "").strip()
     if not auth_val:
+        return None
+
+    if auth_val.lower() in ("null", "undefined", "none"):
         return None
 
     # If authenticated user exists, Authorization is assumed to be JWT.

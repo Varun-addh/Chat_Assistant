@@ -193,42 +193,87 @@ async def submit_question(
 	x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
 	authorization: Optional[str] = Header(None, alias="Authorization")
 ):
-	# 1. Extract and clean headers (handle empty strings from frontend)
-	groq_key = (x_api_key.strip() if x_api_key else None) or None
-	gemini_key = (x_gemini_key.strip() if x_gemini_key else None) or None
-	
-	if not groq_key and authorization:
-		auth_val = authorization.strip()
-		if auth_val.lower().startswith("bearer "):
-			groq_key = auth_val.split(" ", 1)[1] if " " in auth_val else auth_val
-		else:
-			groq_key = auth_val
+	# 1. Extract and clean headers (handle empty strings/undefined/null from frontend)
+	def _clean(v: Optional[str]) -> Optional[str]:
+		t = (v or "").strip()
+		if not t:
+			return None
+		if t.lower() in {"null", "undefined", "none"}:
+			return None
+		return t
 
-	# 2. Select the key to use. 
-	# If the user has provided a Gemini key in Bridge Settings, we prefer it (as it's higher quality).
-	# Otherwise, use the Groq key if provided.
+	groq_key = _clean(x_api_key)
+	gemini_key = _clean(x_gemini_key)
+
+	# IMPORTANT:
+	# - If the request is authenticated, Authorization is assumed to be JWT (not an LLM key).
+	# - If unauthenticated, accept Authorization only when it looks like a real LLM key.
+	user = getattr(request.state, "user", None)
+	if user is None and not groq_key and authorization:
+		auth_val = _clean(authorization)
+		if auth_val:
+			if auth_val.lower().startswith("bearer "):
+				token = auth_val.split(" ", 1)[1].strip() if " " in auth_val else ""
+			else:
+				token = auth_val
+			# Only treat Authorization as an LLM key if it matches Groq/Gemini key shapes
+			if token.startswith("gsk_") or token.startswith("AIza") or token.startswith("ATza"):
+				groq_key = token
+
+	# 2. Decide demo vs registered for this endpoint.
+	# Product requirement: demo mode should use Groq (cost-capped), not Gemini.
+	# We treat the request as demo only when:
+	# - not authenticated, AND
+	# - no bridge key headers were supplied.
+	is_demo = (user is None) and (not groq_key) and (not gemini_key)
+
+	# 3. Select key to use.
+	# If the user provided a Gemini key in Bridge Settings, we prefer it (higher quality).
+	# Otherwise, use Groq key if provided.
 	api_key = gemini_key or groq_key
 	
-	# 3. Fallback to server/env keys ONLY if user provided NO keys in Bridge Settings
+	# 4. Fallback to server/env keys ONLY if user provided NO keys in Bridge Settings
 	if not api_key:
-		# Use preferred provider from settings if key is available
-		if settings.llm_provider == "gemini" and settings.gemini_api_key:
-			api_key = settings.gemini_api_key
-			logger.info("🔧 Using environment GEMINI_API_KEY")
-		elif settings.llm_provider == "groq" and settings.groq_api_key:
-			api_key = settings.groq_api_key
-			logger.info("🔧 Using environment GROQ_API_KEY")
-		else:
-			# Last resort: use whatever is available
-			api_key = settings.gemini_api_key or settings.groq_api_key
-			if api_key:
-				logger.info(f"🔧 Using fallback environment key for {settings.llm_provider}")
+		if is_demo:
+			# DEMO PATH: always prefer Groq
+			if bool(getattr(settings, "enable_demo_key_pool", False)):
+				try:
+					from app.services.demo_key_pool import demo_key_pool
+					demo_key = demo_key_pool.get_key()
+					if demo_key and demo_key.startswith("gsk_"):
+						api_key = demo_key
+						logger.info("🔧 [DEMO] Using Groq demo key pool")
+				except Exception:
+					# Fall back to env Groq key below
+					pass
 
-	# 4. Final check: if still no key, raise error
+			if not api_key and settings.groq_api_key:
+				api_key = settings.groq_api_key
+				logger.info("🔧 [DEMO] Using environment GROQ_API_KEY")
+		else:
+			# REGISTERED PATH: use effective provider selection
+			effective = settings.get_effective_provider(feature="copilot")
+			if effective == "gemini" and settings.gemini_api_key:
+				api_key = settings.gemini_api_key
+				logger.info("🔧 Using environment GEMINI_API_KEY")
+			elif effective == "groq" and settings.groq_api_key:
+				api_key = settings.groq_api_key
+				logger.info("🔧 Using environment GROQ_API_KEY")
+			else:
+				api_key = settings.gemini_api_key or settings.groq_api_key
+				if api_key:
+					logger.info(f"🔧 Using fallback environment key for {effective}")
+
+	# 5. Final check: if still no key, raise error
 	if not api_key:
+		if is_demo:
+			raise HTTPException(
+				status_code=503,
+				detail="Demo is temporarily unavailable (Groq is not configured).",
+			)
 		raise HTTPException(
 			status_code=401,
-			detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue."
+			detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
 		)
 	
 	user_id = get_user_id_from_request(request) or "guest_unknown"
@@ -870,18 +915,27 @@ async def submit_question(
 
 	# Provide recent QnA as context for follow-ups
 	previous_qna = state.qna
-	answer, truncated = await llm_service.generate_answer(
-		payload.question,
-		payload.system_prompt,
-		profile_text=profile_text,
-		previous_qna=previous_qna,
-		style_mode=payload.style_mode,
-		tone=payload.tone,
-		layout=payload.layout,
-		variability=payload.variability,
-		seed=payload.seed,
-		api_key=api_key,
-	)
+	try:
+		answer, truncated = await llm_service.generate_answer(
+			payload.question,
+			payload.system_prompt,
+			profile_text=profile_text,
+			previous_qna=previous_qna,
+			style_mode=payload.style_mode,
+			tone=payload.tone,
+			layout=payload.layout,
+			variability=payload.variability,
+			seed=payload.seed,
+			api_key=api_key,
+		)
+	except Exception as e:
+		logger.error("❌ LLM generate_answer failed: %s", str(e)[:300])
+		raise HTTPException(
+			status_code=502,
+			detail=(
+				"LLM provider failed. Please verify your GEMINI_API_KEY / GROQ_API_KEY (or add a key in Bridge Settings) and try again."
+			),
+		)
 	
 	if payload.save_to_history:
 		await manager.append_qna(state.session_id, payload.question, answer)

@@ -2923,69 +2923,90 @@ class LLMService:
 			"""Returns (answer, truncated) with automated fallback for rate limits"""
 			client = client_local
 			provider = provider_local
+			# Provider-specific logic:
+			# - Groq: try primary + fallback models
+			# - Gemini: single call (no Groq model list)
 			DECOMMISSIONED = ["llama-3.1-70b-versatile", "llama3-70b-8192"]
-			raw_list = [self._settings.groq_model] + self._settings.groq_fallback_models
-			# Filter out decommissioned models and duplicates
-			models_to_try = []
-			for m in raw_list:
-				if m not in models_to_try and m not in DECOMMISSIONED:
-					models_to_try.append(m)
-			
-			for current_model in models_to_try:
-				try:
-					if provider == "groq":
+
+			def _groq_models_to_try() -> list[str]:
+				raw_list = [self._settings.groq_model] + self._settings.groq_fallback_models
+				models: list[str] = []
+				for m in raw_list:
+					if m and m not in models and m not in DECOMMISSIONED:
+						models.append(m)
+				return models
+
+			async def _call_groq(groq_client) -> tuple[str, bool]:
+				for current_model in _groq_models_to_try():
+					try:
 						if stream:
-							stream_resp = client.chat.completions.create(**build_kwargs(True, current_model))
+							stream_resp = groq_client.chat.completions.create(**build_kwargs(True, current_model))
 							parts: list[str] = []
 							finish_reason = None
 							for chunk in stream_resp:
 								parts.append(getattr(chunk.choices[0].delta, "content", None) or "")
-								if hasattr(chunk.choices[0], 'finish_reason') and chunk.choices[0].finish_reason:
+								if hasattr(chunk.choices[0], "finish_reason") and chunk.choices[0].finish_reason:
 									finish_reason = chunk.choices[0].finish_reason
 							raw_text = "".join(parts).strip()
 							formatted = self._format_response(raw_text)
 							truncated = (finish_reason == "length")
 							return (formatted, truncated)
-						else:
-							resp = client.chat.completions.create(**build_kwargs(False, current_model))
-							raw_text = resp.choices[0].message.content.strip()
-							formatted = self._format_response(raw_text)
-							finish_reason = resp.choices[0].finish_reason
-							truncated = (finish_reason == "length")
-							return (formatted, truncated)
-					elif provider == "gemini":
-						# Gemini logic (remains same but wrapped in retry)
-						gmodel = client.GenerativeModel(self._settings.gemini_model)
-						full_prompt = (prompt + "\n\nUser: " + question).strip()
-						resp = gmodel.generate_content(full_prompt)
-						raw_text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
-						formatted = self._format_response((raw_text or "").strip())
-						return (formatted, False)
-				except Exception as e:
-					# Try next model if rate limited OR if model is decommissioned/missing (400)
-					error_msg = str(e).lower()
-					should_retry = any(x in error_msg for x in ["429", "rate_limit", "400", "decommissioned", "not found", "invalid_request_error"])
-					
-					if should_retry:
-						logger.warning(f"⚠️ Model {current_model} failed ({e}). Trying next fallback...")
-						continue
-					raise e
-			
-			# If we exhausted all Groq models, try Gemini as a last resort if it's not the primary provider
-			if provider == "groq":
-				try:
-					gemini_client, gemini_provider = self._ensure_client_by_provider("gemini")
-					if gemini_client:
-						logger.info("🔄 All Groq models failed. Falling back to Gemini...")
-						gmodel = gemini_client.GenerativeModel(self._settings.gemini_model)
-						full_prompt = (prompt + "\n\nUser: " + question).strip()
-						resp = gmodel.generate_content(full_prompt)
-						raw_text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
-						formatted = self._format_response((raw_text or "").strip())
-						return (formatted, False)
-				except Exception as gemini_err:
-					logger.error(f"❌ Gemini fallback also failed: {gemini_err}")
-			
+						resp = groq_client.chat.completions.create(**build_kwargs(False, current_model))
+						raw_text = resp.choices[0].message.content.strip()
+						formatted = self._format_response(raw_text)
+						finish_reason = resp.choices[0].finish_reason
+						truncated = (finish_reason == "length")
+						return (formatted, truncated)
+					except Exception as e:
+						error_msg = str(e).lower()
+						should_retry = any(
+							x in error_msg
+							for x in ["429", "rate_limit", "400", "decommissioned", "not found", "invalid_request_error"]
+						)
+						if should_retry:
+							logger.warning(f"⚠️ Model {current_model} failed ({e}). Trying next fallback...")
+							continue
+						raise
+				raise Exception("All Groq models reached their limits or failed.")
+
+			def _call_gemini(gemini_client) -> tuple[str, bool]:
+				gmodel = gemini_client.GenerativeModel(self._settings.gemini_model)
+				full_prompt = (prompt + "\n\nUser: " + question).strip()
+				resp = gmodel.generate_content(full_prompt)
+				raw_text = getattr(resp, "text", None) or (
+					resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else ""
+				)
+				formatted = self._format_response((raw_text or "").strip())
+				return (formatted, False)
+
+			# Primary provider call
+			try:
+				if provider == "groq":
+					return await _call_groq(client)
+				if provider == "gemini":
+					return _call_gemini(client)
+			except Exception as primary_err:
+				# Symmetric fallback across providers
+				if provider == "groq":
+					try:
+						gemini_client, _ = self._ensure_client_by_provider("gemini")
+						if gemini_client:
+							logger.info("🔄 Groq failed. Falling back to Gemini...")
+							return _call_gemini(gemini_client)
+					except Exception as gemini_err:
+						logger.error(f"❌ Gemini fallback also failed: {gemini_err}")
+						raise Exception("All LLM providers and models reached their limits or failed.") from primary_err
+				elif provider == "gemini":
+					try:
+						groq_client, _ = self._ensure_client_by_provider("groq")
+						if groq_client:
+							logger.info("🔄 Gemini failed. Falling back to Groq...")
+							return await _call_groq(groq_client)
+					except Exception as groq_err:
+						logger.error(f"❌ Groq fallback also failed: {groq_err}")
+						raise Exception("All LLM providers and models reached their limits or failed.") from primary_err
+				raise
+
 			raise Exception("All LLM providers and models reached their limits or failed.")
 
 		for attempt in range(2):
