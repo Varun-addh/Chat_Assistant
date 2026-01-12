@@ -236,7 +236,7 @@ async def submit_question(
 	if not api_key:
 		if is_demo:
 			# DEMO PATH: always prefer Groq
-			if bool(getattr(settings, "enable_demo_key_pool", False)):
+			if settings.is_demo_key_pool_enabled():
 				try:
 					from app.services.demo_key_pool import demo_key_pool
 					demo_key = demo_key_pool.get_key()
@@ -668,6 +668,7 @@ async def submit_question(
 								system_prompt=prompt_data['system_prompt'],
 								api_key=api_key,
 								apply_auto_overrides=False,
+								allow_provider_fallback=(not is_demo),
 							)
 
 							# Parse response: Mermaid diagram first, then explanation
@@ -816,6 +817,7 @@ async def submit_question(
 					api_key=api_key,
 					# Legacy behavior: allow LLMService to apply its auto system-design overrides.
 					apply_auto_overrides=True,
+					allow_provider_fallback=(not is_demo),
 				):
 					collected.append(chunk)
 					safe_chunk = chunk.replace('\n', '\ndata: ')
@@ -845,6 +847,7 @@ async def submit_question(
 				api_key=api_key,
 				# Legacy behavior: allow LLMService to apply its auto system-design overrides.
 				apply_auto_overrides=True,
+				allow_provider_fallback=(not is_demo),
 			)
 			final_ans = ("## Single-View Architecture\n\n" + (answer or "").strip()).strip()
 			if payload.save_to_history:
@@ -870,6 +873,7 @@ async def submit_question(
 				variability=payload.variability,
 				seed=payload.seed,
 				api_key=api_key,
+				allow_provider_fallback=(not is_demo),
 			):
 				collected.append(chunk)
 				# Fix: Proper SSE encoding for multi-line chunks to prevent text loss/corruption
@@ -927,6 +931,7 @@ async def submit_question(
 			variability=payload.variability,
 			seed=payload.seed,
 			api_key=api_key,
+			allow_provider_fallback=(not is_demo),
 		)
 	except Exception as e:
 		logger.error("❌ LLM generate_answer failed: %s", str(e)[:300])

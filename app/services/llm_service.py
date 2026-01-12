@@ -2809,7 +2809,7 @@ class LLMService:
 		
 		return prompt
 
-	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None, api_key: Optional[str] = None, apply_auto_overrides: bool = True) -> tuple[str, bool]:
+	async def generate_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None, api_key: Optional[str] = None, apply_auto_overrides: bool = True, allow_provider_fallback: bool = True) -> tuple[str, bool]:
 		# Deterministic identity answers (avoid LLM hallucinated attribution)
 		if self._is_identity_question(question):
 			logger.info("🪪 [IDENTITY] generate_answer short-circuit: %s", (question or "")[:200])
@@ -2986,6 +2986,9 @@ class LLMService:
 				if provider == "gemini":
 					return _call_gemini(client)
 			except Exception as primary_err:
+				# Some flows (e.g. demo) must not fall back across providers.
+				if not allow_provider_fallback:
+					raise
 				# Symmetric fallback across providers
 				if provider == "groq":
 					try:
@@ -3175,7 +3178,7 @@ class LLMService:
 		return False, 0.0, "all classification attempts failed"
 
 
-	async def stream_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None, api_key: Optional[str] = None, apply_auto_overrides: bool = True) -> AsyncIterator[str]:
+	async def stream_answer(self, question: str, system_prompt: Optional[str] = None, profile_text: Optional[str] = None, previous_qna: Optional[List[Dict[str, str]]] = None, *, style_mode: Optional[str] = None, tone: Optional[str] = None, layout: Optional[str] = None, variability: Optional[float] = None, seed: Optional[int] = None, api_key: Optional[str] = None, apply_auto_overrides: bool = True, allow_provider_fallback: bool = True) -> AsyncIterator[str]:
 		# Deterministic identity answers (avoid LLM hallucinated attribution)
 		if self._is_identity_question(question):
 			logger.info("🪪 [IDENTITY] stream_answer short-circuit: %s", (question or "")[:200])
@@ -3277,15 +3280,16 @@ class LLMService:
 						continue
 					raise e
 			
-			# If everything failed, try Gemini last resort
-			if stream is None:
+			# If everything failed, try Gemini last resort (unless disabled, e.g. Demo Mode)
+			if stream is None and allow_provider_fallback:
 				try:
 					gemini_client, _ = self._ensure_client_by_provider("gemini")
 					if gemini_client:
 						active_provider = "gemini"
 						client = gemini_client
 						logger.info("🔄 [STREAM] Groq failed. Falling back to Gemini...")
-				except: pass
+				except Exception:
+					pass
 		else:
 			stream = await anyio.to_thread.run_sync(_call_stream, self._settings.groq_model) # Should not be called if not groq
 

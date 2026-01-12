@@ -62,6 +62,9 @@ class Settings(BaseSettings):
 	# local development so your UI testing uses your developer/server keys instead.
 	# In production, set this to true to enable real public demo traffic.
 	enable_demo_key_pool: bool = False
+	# Safety: even if ENABLE_DEMO_KEY_POOL=true, do NOT allow consuming demo keys
+	# in development/local unless you explicitly opt in.
+	allow_demo_key_pool_in_dev: bool = False
 	# Hard global demo budget guard (daily). When exceeded, demo returns 503.
 	demo_global_daily_request_limit: int = 0  # 0 = disabled
 	groq_model: str = "llama-3.3-70b-versatile"
@@ -299,6 +302,7 @@ class Settings(BaseSettings):
 		return v
 
 	def get_effective_provider(self, feature: str = "default") -> str:
+		# NOTE: demo key pool enablement is handled separately by is_demo_key_pool_enabled().
 		"""
 		Determine which LLM provider to use based on available API keys.
 		
@@ -331,6 +335,27 @@ class Settings(BaseSettings):
 		
 		# No providers configured: fallback to configured default
 		return self.llm_provider
+
+	def is_demo_key_pool_enabled(self) -> bool:
+		"""Effective demo key pool enablement.
+
+		Goal:
+		- Prevent developers from accidentally burning demo keys while testing locally.
+		- Allow public demo traffic to use demo key pool in production/staging.
+
+		Rules:
+		- If ENABLE_DEMO_KEY_POOL is false -> disabled.
+		- In production/staging: enabled when ENABLE_DEMO_KEY_POOL is true.
+		- In dev/test/local: enabled only if both ENABLE_DEMO_KEY_POOL=true AND
+		  ALLOW_DEMO_KEY_POOL_IN_DEV=true.
+		"""
+		if not bool(self.enable_demo_key_pool):
+			return False
+		env = (self.app_env or "development").strip().lower()
+		if env in {"production", "prod", "staging", "stage"}:
+			return True
+		# development / local safety gate
+		return bool(self.allow_demo_key_pool_in_dev)
 
 settings = Settings()
 

@@ -185,7 +185,7 @@ def resolve_effective_api_key(
         # IMPORTANT: In local development, you usually want the UI to use your
         # developer/server key (GROQ_API_KEY / GEMINI_API_KEY), not consume demo keys.
         # Only use demo keys when explicitly enabled.
-        if not getattr(settings, "enable_demo_key_pool", False):
+        if not settings.is_demo_key_pool_enabled():
             return "demo", None, False
 
         demo_key = demo_key_pool.get_key()

@@ -261,7 +261,7 @@ async def rate_limit_middleware(request: Request, call_next):
     )
     user_type = infer_user_type(request, user=user, user_provided_key=provided_key)
     has_user_key = bool(provided_key)
-    demo_key_pool_enabled = bool(getattr(settings, "enable_demo_key_pool", False))
+    demo_key_pool_enabled = settings.is_demo_key_pool_enabled()
 
     # Debug log for confirming demo-mode behavior (no secrets logged)
     if (path or "").startswith("/api/question"):
