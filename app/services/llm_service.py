@@ -11,7 +11,25 @@ from app.config import settings
 import logging
 import json
 
+from app.services.demo_key_pool import demo_key_pool
+
 logger = logging.getLogger(__name__)
+
+
+def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
+	msg = str(exc).lower()
+	return any(
+		x in msg
+		for x in [
+			"429",
+			"rate_limit",
+			"rate limit",
+			"quota",
+			"resource_exhausted",
+			"exceeded",
+			"too many requests",
+		]
+	)
 
 
 CODE_FORWARD_PROMPT = (
@@ -592,11 +610,11 @@ class LLMService:
 			logger.info("🪪 [IDENTITY] generate_text short-circuit: %s", (prompt or "")[:200])
 			return self._identity_response_text(prompt)
 
-		client, provider = self._ensure_client(api_key)
-		if client is None:
-			raise Exception("LLM client not available. Please configure an API key.")
+		def _call(local_key: Optional[str]):
+			client, provider = self._ensure_client(local_key)
+			if client is None:
+				raise Exception("LLM client not available. Please configure an API key.")
 
-		def _call():
 			try:
 				if provider == "groq":
 					messages = []
@@ -667,12 +685,22 @@ class LLMService:
 				raise
 
 		import anyio
-		try:
-			result = await anyio.to_thread.run_sync(_call)
-			return (result or "").strip()
-		except Exception as e:
-			logger.error(f"Generate text failed: {e}")
-			return ""
+
+		pool_keys = set(demo_key_pool.keys())
+		attempt_key = api_key
+		for attempt in range(2):
+			try:
+				result = await anyio.to_thread.run_sync(_call, attempt_key)
+				return (result or "").strip()
+			except Exception as e:
+				if attempt == 0 and attempt_key and attempt_key in pool_keys and _is_quota_or_rate_limit_error(e):
+					demo_key_pool.mark_exhausted(attempt_key, reason=str(e)[:200])
+					attempt_key = demo_key_pool.get_key()  # rotate
+					if attempt_key:
+						logger.warning("[DEMO_KEY_POOL] Retrying generate_text with a different demo key")
+						continue
+				logger.error(f"Generate text failed: {e}")
+				return ""
 
 
 
@@ -1498,6 +1526,13 @@ class LLMService:
 			api_key = api_key.strip()
 			if api_key.lower() in ("null", "undefined", "none", ""):
 				api_key = None
+
+		# Demo key pooling: if caller supplied a demo key, swap to an available key
+		# (handles cooldown after quota/rate-limit failures).
+		if api_key:
+			pool_keys = set(demo_key_pool.keys())
+			if api_key in pool_keys and len(pool_keys) > 1:
+				api_key = demo_key_pool.get_key(preferred=api_key) or api_key
 		
 		# If API key is provided, detect provider from key prefix
 		if api_key:
@@ -2780,10 +2815,9 @@ class LLMService:
 			logger.info("🪪 [IDENTITY] generate_answer short-circuit: %s", (question or "")[:200])
 			return (self._identity_response_text(question), False)
 
-		client, provider = self._ensure_client(api_key)
-
-		if client is None:
-			return (question, False)  # mock: echo when no key, not truncated
+		pool_keys = set(demo_key_pool.keys())
+		attempt_key = api_key
+		last_err: Exception | None = None
 
 		# Use shared helper to build prompt with profile context
 		base_prompt = self._build_prompt_with_profile(question, system_prompt, profile_text)
@@ -2851,15 +2885,12 @@ class LLMService:
 		# Style & tone overrides for variety
 		prompt = prompt + self._style_overrides(style_mode, tone, layout, variability, seed)
 
-		import anyio
-
-		model = self._settings.groq_model if provider == "groq" else self._settings.gemini_model
 		temperature = self._settings.answer_temperature
 		top_p = self._settings.groq_top_p
 		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens)
 		stream = self._settings.groq_stream
 
-		def build_kwargs(stream_flag: bool, model_override: Optional[str] = None):
+		def build_kwargs(stream_flag: bool, model_name: str):
 			# Build message list with optional recent history for contextual follow-ups
 			messages: List[Dict[str, str]] = [
 				{"role": "system", "content": prompt}
@@ -2877,7 +2908,7 @@ class LLMService:
 			# Current question last
 			messages.append({"role": "user", "content": question})
 			kwargs = {
-				"model": model_override or model,
+				"model": model_name,
 				"messages": messages,
 				"temperature": temperature,
 				"max_tokens": max_tokens,
@@ -2888,8 +2919,10 @@ class LLMService:
 				kwargs["stream"] = True
 			return kwargs
 
-		async def _call() -> tuple[str, bool]:
+		async def _call(client_local, provider_local) -> tuple[str, bool]:
 			"""Returns (answer, truncated) with automated fallback for rate limits"""
+			client = client_local
+			provider = provider_local
 			DECOMMISSIONED = ["llama-3.1-70b-versatile", "llama3-70b-8192"]
 			raw_list = [self._settings.groq_model] + self._settings.groq_fallback_models
 			# Filter out decommissioned models and duplicates
@@ -2955,7 +2988,29 @@ class LLMService:
 			
 			raise Exception("All LLM providers and models reached their limits or failed.")
 
-		return await _call()
+		for attempt in range(2):
+			client, provider = self._ensure_client(attempt_key)
+			if client is None:
+				return (question, False)  # mock: echo when no key, not truncated
+			try:
+				return await _call(client, provider)
+			except Exception as e:
+				last_err = e
+				if (
+					attempt == 0
+					and attempt_key
+					and attempt_key in pool_keys
+					and _is_quota_or_rate_limit_error(e)
+				):
+					demo_key_pool.mark_exhausted(attempt_key, reason=str(e)[:200])
+					attempt_key = demo_key_pool.get_key()  # rotate
+					if attempt_key:
+						logger.warning("[DEMO_KEY_POOL] Retrying generate_answer with a different demo key")
+						continue
+				raise
+
+		# Should never reach here, but keeps mypy/linters happy.
+		raise last_err if last_err else Exception("LLM call failed")
 
 	async def evaluate_code_with_critique(self, problem: str, code: str, language: str, conversation_context: str = "", api_key: Optional[str] = None) -> str:
 		"""Ask the model to produce a structured evaluation and approach explanation."""

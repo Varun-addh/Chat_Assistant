@@ -9,9 +9,54 @@ from collections import defaultdict
 import asyncio
 import logging
 from contextlib import suppress
+import uuid
 from app.models import User, UserTier, TIER_QUOTAS
+from app.utils.demo_mode import DEMO_ERROR_PAYLOAD, demo_session_id, infer_user_type
+from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------ Demo mode quotas ------------------------------
+# Demo is intended to show value quickly while being cost-capped.
+# All demo limits apply within a short rolling window (session duration).
+DEMO_WINDOW_MINUTES = 30
+
+# Feature quotas within the demo window
+DEMO_LIMIT_QUESTIONS = 5  # spec: 5–10
+DEMO_LIMIT_SYSTEM_DESIGNS = 1
+DEMO_LIMIT_PRACTICE_ROUNDS = 1
+DEMO_LIMIT_MOCK_INTERVIEWS = 1
+
+
+def _demo_feature_limit_for_path(path: str) -> tuple[Optional[str], Optional[int]]:
+    """Return (feature_name, limit) for a metered path in demo mode."""
+    p = path or ""
+    if p.startswith("/api/question"):
+        return "questions", DEMO_LIMIT_QUESTIONS
+    if p.startswith("/api/generate_architecture") or p.startswith("/api/diagrams"):
+        return "designs", DEMO_LIMIT_SYSTEM_DESIGNS
+    # Practice mode: only gate starting a round/session; let in-session calls proceed
+    if p.startswith("/api/practice/interview/start-round") or p.startswith("/api/practice/interview/start"):
+        return "practice_rounds", DEMO_LIMIT_PRACTICE_ROUNDS
+    if p.startswith("/api/mock-interview"):
+        return "mock_interviews", DEMO_LIMIT_MOCK_INTERVIEWS
+    # Default demo limit for other metered endpoints (keep conservative)
+    return "requests", 10
+
+
+async def _compute_demo_remaining(demo_user_id: str) -> dict:
+    usage = await rate_limiter.get_usage(demo_user_id)
+
+    questions_used = int(usage.get("demo:questions", 0))
+    designs_used = int(usage.get("demo:designs", 0))
+    practice_used = int(usage.get("demo:practice_rounds", 0))
+
+    return {
+        "questions": max(0, DEMO_LIMIT_QUESTIONS - questions_used),
+        "designs": max(0, DEMO_LIMIT_SYSTEM_DESIGNS - designs_used),
+        "practice_rounds": max(0, DEMO_LIMIT_PRACTICE_ROUNDS - practice_used),
+    }
 
 
 class InMemoryRateLimiter:
@@ -188,28 +233,79 @@ async def rate_limit_middleware(request: Request, call_next):
 
     # Ensure the cleanup loop is running (safe no-op if already started)
     rate_limiter.start()
+
+    # Auth middleware normally sets a stable per-client id (guest_<hash>) even
+    # when unauthenticated. Some unit tests mount only this middleware, so we
+    # create a stable per-app fallback id to avoid cross-test coupling.
+    if getattr(request.state, "user_id", None) is None:
+        fallback = getattr(request.app.state, "_fallback_guest_id", None)
+        if not fallback:
+            fallback = f"guest_{uuid.uuid4().hex[:16]}"
+            setattr(request.app.state, "_fallback_guest_id", fallback)
+        setattr(request.state, "user_id", fallback)
     
     # Get user from request state (set by auth middleware)
     user: Optional[User] = getattr(request.state, "user", None)
-    
-    # If no user, apply strict guest rate limiting
+
+    # Demo vs registered inference (demo is unauth + no API key headers)
+    user_type = infer_user_type(request, user=user)
+
     limit_override: Optional[int] = None
-    if not user:
-        # Auth middleware sets a stable per-client guest id like "guest_<hash>"
+    window_minutes: int = 1440
+
+    if user_type == "demo":
+        user_id = demo_session_id(request)
+        tier = UserTier.FREE
+        window_minutes = DEMO_WINDOW_MINUTES
+
+        # Hard global demo budget guard (daily): protect platform spend.
+        if int(getattr(settings, "demo_global_daily_request_limit", 0) or 0) > 0:
+            g_allowed, g_count, g_limit = await rate_limiter.check_rate_limit(
+                user_id="demo_global",
+                endpoint="demo:global",
+                tier=UserTier.FREE,
+                window_minutes=1440,
+                limit_override=int(settings.demo_global_daily_request_limit),
+            )
+            if not g_allowed:
+                payload = {
+                    "error": "DEMO_UNAVAILABLE",
+                    "message": "Demo is currently at capacity. Please sign up and connect your own AI engine to continue.",
+                    "current_usage": g_count,
+                    "limit": g_limit,
+                }
+                reset_at = datetime.now(timezone.utc) + timedelta(hours=24)
+                headers = {
+                    "X-RateLimit-Limit": str(g_limit),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(int(reset_at.timestamp())),
+                }
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"detail": payload},
+                    headers=headers,
+                )
+
+        feature_name, feature_limit = _demo_feature_limit_for_path(path)
+        endpoint = f"demo:{feature_name or 'requests'}"
+        limit_override = feature_limit
+    elif not user:
+        # Unauthenticated but treated as "registered" (has user-provided key)
+        # Keep basic abuse protection, but do not enforce demo session limits.
         user_id = getattr(request.state, "user_id", None) or "guest"
         tier = UserTier.FREE
-        # Apply stricter limits for guests
-        limit_override = 10  # 10 requests per day for unauthenticated users
+        limit_override = 100
+        endpoint = path
     else:
         user_id = user.id
         tier = user.tier
-    
-    # Check rate limit
-    endpoint = path
+        endpoint = path
+
     allowed, current_count, max_limit = await rate_limiter.check_rate_limit(
         user_id=user_id,
         endpoint=endpoint,
         tier=tier,
+        window_minutes=window_minutes,
         limit_override=limit_override,
     )
     
@@ -218,17 +314,30 @@ async def rate_limit_middleware(request: Request, call_next):
         # IMPORTANT: do not raise HTTPException from middleware.
         # In some Starlette/anyio execution paths this can surface as an
         # ExceptionGroup and appear as a 500 to clients.
-        payload = {
-            "error": "Rate limit exceeded",
-            "current_usage": current_count,
-            "limit": max_limit,
-            "tier": tier,
-            "message": f"You've made {current_count}/{max_limit} requests today. Upgrade to PRO for higher limits.",
-        }
+        now = datetime.now(timezone.utc)
+
+        if user_type == "demo":
+            remaining = await _compute_demo_remaining(user_id)
+            payload = {
+                **DEMO_ERROR_PAYLOAD,
+                "user_type": "demo",
+                "demo_remaining": remaining,
+            }
+            reset_at = now + timedelta(minutes=DEMO_WINDOW_MINUTES)
+        else:
+            payload = {
+                "error": "Rate limit exceeded",
+                "current_usage": current_count,
+                "limit": max_limit,
+                "tier": tier,
+                "message": f"You've made {current_count}/{max_limit} requests today. Upgrade to PRO for higher limits.",
+            }
+            reset_at = now + timedelta(hours=24)
+
         headers = {
             "X-RateLimit-Limit": str(max_limit),
             "X-RateLimit-Remaining": "0" if max_limit != -1 else "-1",
-            "X-RateLimit-Reset": str(int((datetime.now(timezone.utc) + timedelta(hours=24)).timestamp())),
+            "X-RateLimit-Reset": str(int(reset_at.timestamp())),
         }
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -243,7 +352,10 @@ async def rate_limit_middleware(request: Request, call_next):
         response.headers["X-RateLimit-Remaining"] = "-1"
     else:
         response.headers["X-RateLimit-Remaining"] = str(max(0, max_limit - current_count))
-    response.headers["X-RateLimit-Reset"] = str(int((datetime.now(timezone.utc) + timedelta(hours=24)).timestamp()))
+    reset_at = datetime.now(timezone.utc) + (
+        timedelta(minutes=DEMO_WINDOW_MINUTES) if user_type == "demo" else timedelta(hours=24)
+    )
+    response.headers["X-RateLimit-Reset"] = str(int(reset_at.timestamp()))
     
     return response
 

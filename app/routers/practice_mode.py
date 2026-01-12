@@ -21,6 +21,8 @@ from app.schemas import (
     QuickStartRequest,
     ConversationalResponse,
     AcknowledgeFeedbackRequest,
+    PracticeFeedbackRatedRequest,
+    PracticeFeedbackRatedResponse,
     NextQuestionResponse,
     InterviewRound,
     RoundConfig,
@@ -32,7 +34,7 @@ from app.services.practice_mode_service import PracticeModeService
 from app.config import settings
 from app.database import get_db_context
 from app.middleware.auth import get_user_id_from_request
-from app.utils.event_logging import track_event, stable_question_id
+from app.utils.event_logging import track_event, stable_question_id, stable_hash
 from app.services.learning_loops import compute_practice_insights, merge_focus_areas
 
 logger = logging.getLogger(__name__)
@@ -777,6 +779,62 @@ async def acknowledge_feedback(
     except Exception as e:
         logger.error(f"Error acknowledging feedback: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/interview/rate-feedback", response_model=PracticeFeedbackRatedResponse)
+async def rate_feedback(
+    payload: PracticeFeedbackRatedRequest,
+    http_request: Request,
+):
+    """Phase 3: collect ground-truth human labels for feedback usefulness.
+
+    This endpoint is intentionally lightweight and best-effort: it should never
+    block the main practice flow.
+    """
+
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+
+    # Best-effort: attach stable question hash if we can resolve the question text.
+    q_hash: Optional[str] = None
+    try:
+        if practice_service and payload.session_id:
+            sess = practice_service.get_session(payload.session_id)
+            if sess and getattr(sess, "questions", None):
+                for q in sess.questions:  # type: ignore[attr-defined]
+                    if int(getattr(q, "id", -1)) == int(payload.question_id):
+                        q_text = str(getattr(q, "text", "") or "")
+                        if q_text.strip():
+                            q_hash = stable_question_id(q_text)
+                        break
+    except Exception:
+        q_hash = None
+
+    # Optional comment: store only if raw text analytics are enabled.
+    comment = (payload.comment or "").strip() or None
+    comment_hash = stable_hash(comment) if comment else None
+
+    extra: dict[str, Any] = {
+        "question_id": int(payload.question_id),
+        "question_hash": q_hash,
+        "usefulness_rating": int(payload.usefulness_rating),
+        "perceived_difficulty": _safe_enum_value(payload.perceived_difficulty) if payload.perceived_difficulty else None,
+        "comment_len": len(comment or ""),
+        "comment_hash": comment_hash,
+    }
+
+    if comment and getattr(settings, "analytics_store_raw_text", False):
+        # Keep it bounded even when enabled.
+        extra["comment_preview"] = comment[:200]
+
+    _track_practice_event(
+        user_id=user_id,
+        session_id=payload.session_id,
+        event_type="practice_feedback_rated",
+        question_text=None,
+        extra=extra,
+    )
+
+    return PracticeFeedbackRatedResponse(ok=True)
 
 
 @router.get("/conversational-response", response_model=ConversationalResponse)

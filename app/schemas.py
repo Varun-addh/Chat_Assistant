@@ -444,6 +444,48 @@ class AcknowledgeFeedbackRequest(BaseModel):
 	)
 
 
+class PracticeFeedbackRatedRequest(BaseModel):
+	"""Phase 3: human usefulness/preference labels for practice feedback.
+
+	This is the ground-truth supervision signal: the user explicitly rates how
+	useful the feedback was (and optionally how hard the question felt).
+	"""
+
+	session_id: str = Field(
+		...,
+		description="Session identifier",
+		validation_alias=AliasChoices("session_id", "sessionId"),
+	)
+	question_id: int = Field(
+		...,
+		ge=1,
+		description="Question ID the feedback corresponds to",
+		validation_alias=AliasChoices("question_id", "questionId"),
+	)
+	usefulness_rating: int = Field(
+		...,
+		ge=1,
+		le=5,
+		description="How useful was the feedback? 1 (not useful) to 5 (very useful)",
+		validation_alias=AliasChoices("usefulness_rating", "usefulnessRating", "usefulness"),
+	)
+	perceived_difficulty: Optional[QuestionDifficulty] = Field(
+		default=None,
+		description="How hard did this question feel to the user (optional)",
+		validation_alias=AliasChoices("perceived_difficulty", "perceivedDifficulty"),
+	)
+	comment: Optional[str] = Field(
+		default=None,
+		max_length=1000,
+		description="Optional free-text: why this was (not) useful",
+	)
+
+
+class PracticeFeedbackRatedResponse(BaseModel):
+	"""Ack response for a rating submission."""
+	ok: bool = True
+
+
 class NextQuestionResponse(BaseModel):
 	"""Response with next question after feedback acknowledgment."""
 	next_question: Optional[PracticeInterviewQuestion] = Field(None, description="Next question if interview not complete")

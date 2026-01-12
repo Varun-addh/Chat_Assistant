@@ -20,6 +20,8 @@ The backend provides a FastAPI service for an “AI Interview Assistant” with:
   - `app/routers/mock_interview.py`, `app/services/mock_interview_service.py`
 - **Practice Mode** (round-based interview practice + local STT/TTS + analytics/evaluation orchestration)
   - `app/routers/practice_mode.py`, `app/services/practice_mode_service.py`, `app/services/local_stt_service.py`, `app/services/local_tts_service.py`
+- **Telemetry + learning loops** (structured event stream + deterministic personalization hints)
+  - `app/models.py` (`EventRecord`), `app/utils/event_logging.py`, `app/services/learning_loops.py`
 - **Real-time partial transcripts over WebSocket** (STT streaming stub)
   - `app/routers/ws.py`, `app/services/stt_service.py`
 
@@ -196,6 +198,7 @@ Notable settings (non-exhaustive; see file for full list):
 - External features: `serper_api_key`, `cohere_api_key`, `judge0_api_key`
 - Feature flags: `enable_hybrid_search`, `enable_reranking`, `enable_code_execution`, `enable_query_expansion`, `enable_streaming`
 - API key policy: `require_user_api_key`
+- Telemetry (EventRecord stream): `analytics_hmac_key`, `analytics_store_raw_text`, `analytics_text_preview_len`, `enable_event_logging`
 - STT (WebSocket): `stt_provider`
 - Practice mode toggles + audio config (`practice_mode_enabled`, `practice_*`)
 - Architecture detection heuristics (`architecture_detection_*`, `architecture_complexity_signals`)
@@ -269,6 +272,11 @@ Interview Intelligence is **optional at startup** (disabled if `qdrant_client` i
 - Uses a Qdrant local store under `data/interview_intelligence_v2/vector_db`.
 - Uses SentenceTransformers embeddings (and caches/loads a local model under `data/models/all-MiniLM-L6-v2`).
 - Supports LLM-based question generation with JSON parsing/repair and optional “backfill” of code solutions.
+- Enforces API key policy:
+  - When `REQUIRE_USER_API_KEY=true`, Interview Intelligence search endpoints return **401** unless the client provides a key via `X-API-Key`, `X-Gemini-Key`, or `Authorization: Bearer <key>`.
+- History behavior (important for UI correctness):
+  - Standard search (`GET/POST /api/intelligence/search`) accepts `save_to_history`, but the backend intentionally **does not auto-save** standard search results to History to avoid duplicates.
+  - The frontend should save exactly once via `POST /api/history/`.
 - References optional features toggled by settings:
   - Hybrid search (`HybridSearchEngine`)
   - Reranking (`CohereReranker`)
@@ -308,6 +316,22 @@ See: `app/routers/practice_mode.py`, `app/services/practice_mode_service.py`, `a
 - The `STTService` in `app/services/stt_service.py` is currently a stub: if enabled, it yields `"..."` per chunk; if disabled, it yields `"(audio)"` per chunk.
 
 See: `app/routers/ws.py`, `app/utils/security.py`, `app/services/stt_service.py`.
+
+### 4.13 Telemetry & learning loops: `EventRecord` + `event_logging` + `learning_loops`
+
+This repo includes a lightweight “data moat” foundation based on a structured event stream.
+
+- Events are stored in the SQL database table `event_records` (`EventRecord` in `app/models.py`).
+- `app/utils/event_logging.py` provides:
+  - stable IDs for questions (`stable_question_id`) using SHA256 or **HMAC-SHA256** (when `analytics_hmac_key` is set)
+  - safe-by-default storage (raw text is not stored unless explicitly enabled)
+  - best-effort writes (event logging never blocks product flows)
+- `app/services/learning_loops.py` aggregates recent events into explainable, deterministic signals.
+- Practice Mode consumes these signals:
+  - `GET /api/practice/insights` returns aggregated insights and a recommended focus list.
+  - Practice start flows may merge those recommended focus areas into `UserProfile.interview_focus`.
+
+See: `app/models.py`, `app/utils/event_logging.py`, `app/services/learning_loops.py`, `app/routers/practice_mode.py`.
 
 ## 5) Data Flow (request → response)
 
@@ -385,6 +409,11 @@ See: `app/config.py`.
 - `SERPER_API_KEY`, `COHERE_API_KEY`, `JUDGE0_API_KEY`.
 - Feature flags: `ENABLE_HYBRID_SEARCH`, `ENABLE_RERANKING`, `ENABLE_CODE_EXECUTION`, `ENABLE_QUERY_EXPANSION`, `ENABLE_STREAMING`.
 - `REQUIRE_USER_API_KEY` — when true, user requests must include their own key (enforced in Interview Intelligence service codepaths).
+- Telemetry / event logging:
+  - `ANALYTICS_HMAC_KEY` — enables HMAC-SHA256 stable IDs for event logging
+  - `ANALYTICS_STORE_RAW_TEXT` — if true, event payloads may include text previews (default false)
+  - `ANALYTICS_TEXT_PREVIEW_LEN` — preview length when storing text previews (default 120)
+  - `ENABLE_EVENT_LOGGING` — enable/disable structured event logging (default true)
 - Practice Mode: `PRACTICE_MODE_ENABLED`, `PRACTICE_AUDIO_STORAGE`, `PRACTICE_STT_MODEL_SIZE`, etc.
 - `STT_PROVIDER` — affects WebSocket STT stub behavior.
 
@@ -465,6 +494,12 @@ See: `app/main.py`, `app/utils/audit.py`.
    - Recommendation: document backup/rotation strategy and consider a unified persistence layer if multi-worker scaling is required.
    - Evidence: `app/services/session_manager.py`, `app/services/mock_interview_service.py`, `app/services/history_manager.py`.
 
+6. **Interview Intelligence history duplicates (avoid double-save)**
+  - Symptom: one search appearing twice in History.
+  - Cause: backend auto-save + frontend save both writing entries.
+  - Current behavior: backend standard search path skips auto-save; frontend should be the single source of truth (`POST /api/history/`).
+  - Evidence: `app/routers/interview_intelligence.py` (`_search_and_build_response`).
+
 ## 10) Complete API Reference
 
 ### Core Q&A Endpoints (`/api`)
@@ -510,6 +545,7 @@ See: `app/main.py`, `app/utils/audit.py`.
 | POST | `/api/practice/interview/start` | Start full practice interview |
 | POST | `/api/practice/interview/submit-answer` | Submit audio answer |
 | POST | `/api/practice/interview/acknowledge-feedback` | Acknowledge and get next question |
+| GET | `/api/practice/insights` | Get explainable practice insights + recommended focus areas |
 | GET | `/api/practice/conversational-response` | Get conversational AI response |
 | GET | `/api/practice/audio/{filename}` | Retrieve synthesized TTS audio |
 | GET | `/api/practice/session/{session_id}` | Get practice session details |

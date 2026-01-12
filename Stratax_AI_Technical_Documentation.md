@@ -44,12 +44,13 @@ Stratax AI addresses these challenges through a multi-layered backend architectu
 - **Agent-based architecture** with specialized components for interviewing, evaluation, and speech analytics
 - **Company-specific interview preparation** with targeted question generation
 - **Real-time feedback loops** with micro-coaching on delivery metrics (pace, fillers, confidence)
+- **Telemetry-driven personalization** using a structured event stream (privacy-safe stable hashes) and deterministic learning loops for recommended practice focus areas
 
 ## Technology Foundation
 
 **Runtime:** Python 3.12 + FastAPI + Starlette  
 **AI/ML:** Groq SDK, Google Generative AI, sentence-transformers, faster-whisper  
-**Storage:** Qdrant vector DB, file-based JSON/JSONL persistence  
+**Storage:** SQLite (`data/stratax.db`) for structured records (users/usage/rate limits/telemetry), Qdrant vector DB for semantic retrieval, plus file-based JSON/JSONL persistence for sessions/audit logs  
 **Deployment:** Docker containerization with docker-compose orchestration  
 **Audio:** librosa, soundfile, pyttsx3, gTTS
 
@@ -76,6 +77,20 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 4. **Audio Processing** — Transcription, synthesis, and delivery metric extraction
 5. **Evaluation Pipeline** — Multi-stage assessment of answers and code submissions
 6. **Diagram Generation** — Architecture visualization from code analysis
+
+## Recent Updates (Past Week)
+
+### Telemetry & learning loops
+
+- Added a structured telemetry spine using a database-backed `event_records` stream (SQLAlchemy `EventRecord`).
+- Events use privacy-safe stable identifiers (SHA256 or HMAC-SHA256 when configured) and avoid raw text storage by default.
+- Introduced deterministic “learning loops” that aggregate recent practice events into explainable insights.
+- Exposed `GET /api/practice/insights` to return summary stats and `recommended_focus` for personalization.
+
+### Interview Intelligence: key policy + history correctness
+
+- Enforced `REQUIRE_USER_API_KEY` behavior: when enabled, Interview Intelligence requests without a client-supplied key return **401** (no silent fallback).
+- Prevented duplicate history entries by disabling backend auto-save for standard Interview Intelligence search; the UI should save exactly once through the History API.
 
 ### Service Architecture
 
@@ -148,7 +163,7 @@ graph TB
     Client["<b>Client Layer</b><br/>Web UI, Mobile App, API Consumers"]
     
     subgraph Gateway["API Gateway Layer - FastAPI + Middleware"]
-        MW["CORS | Auth | User ID Extraction | Audit"]
+        MW["CORS | Auth | User ID Extraction | Rate Limiting | Audit"]
     end
     
     subgraph Core["Core Service Layer"]
@@ -163,7 +178,7 @@ graph TB
         Vector["<b>Vector Layer</b><br/>• Qdrant<br/>• sentence-transformers"]
     end
     
-    Persist["<b>Persistence Layer</b><br/>• Sessions: JSON per user<br/>• Vector DB: Qdrant local store<br/>• Audio: WAV files<br/>• History: JSONL logs"]
+    Persist["<b>Persistence Layer</b><br/>• SQLite: users/usage/rate limits/telemetry<br/>• Sessions: JSON per user<br/>• Vector DB: Qdrant local store<br/>• Audio: WAV files<br/>• History/Audit: JSONL logs"]
     
     Client -->|HTTP/WebSocket| Gateway
     Gateway --> QA

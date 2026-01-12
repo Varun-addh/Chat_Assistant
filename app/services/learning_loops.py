@@ -148,6 +148,143 @@ def _collect_practice_attempts(
     return attempts
 
 
+def _collect_practice_feedback_ratings(
+    db: Session,
+    *,
+    user_id: str,
+    lookback_days: int = 30,
+    max_events: int = 750,
+    domain: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Aggregate Phase 3 human labels from practice_feedback_rated events.
+
+    We join ratings with practice_question_served metadata to support:
+    - per-user ranking of feedback/question usefulness
+    - difficulty correction based on perceived difficulty
+
+    Returns a dict that is safe to attach to compute_practice_insights output.
+    """
+
+    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+
+    event_types = [
+        "practice_session_started",
+        "practice_question_served",
+        "practice_feedback_rated",
+    ]
+
+    rows: List[EventRecord] = (
+        db.query(EventRecord)
+        .filter(EventRecord.user_id == user_id)
+        .filter(EventRecord.timestamp >= since)
+        .filter(EventRecord.event_type.in_(event_types))
+        .order_by(EventRecord.timestamp.desc())
+        .limit(max_events)
+        .all()
+    )
+
+    session_domain: Dict[str, str] = {}
+    served: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    rated: List[Tuple[str, int, Dict[str, Any]]] = []
+
+    for r in rows:
+        if not r.session_id:
+            continue
+        extra = r.extra_data or {}
+
+        if r.event_type == "practice_session_started":
+            dom = extra.get("domain")
+            if isinstance(dom, str) and dom.strip():
+                session_domain[r.session_id] = dom.strip()
+            continue
+
+        qid = _as_int(extra.get("question_id"))
+        if qid is None:
+            continue
+
+        if r.event_type == "practice_question_served":
+            served[(r.session_id, qid)] = extra
+        elif r.event_type == "practice_feedback_rated":
+            rated.append((r.session_id, qid, extra))
+
+    # Helper: domain filtering at session granularity
+    def _session_allowed(sess_id: str) -> bool:
+        if not domain:
+            return True
+        sd = session_domain.get(sess_id)
+        return bool(sd and sd.strip().lower() == domain.strip().lower())
+
+    # Aggregations
+    usefulness_all: List[Optional[float]] = []
+
+    by_category: Dict[str, List[Optional[float]]] = {}
+    by_system_difficulty: Dict[str, List[Optional[float]]] = {}
+    perceived_vs_system: Dict[str, Dict[str, int]] = {}
+    by_question_hash: Dict[str, Dict[str, Any]] = {}
+
+    for sess_id, qid, extra in rated:
+        if not _session_allowed(sess_id):
+            continue
+
+        meta = served.get((sess_id, qid), {})
+        cat = meta.get("category")
+        sys_diff = meta.get("difficulty")
+
+        u = _as_float(extra.get("usefulness_rating"))
+        usefulness_all.append(u)
+
+        if isinstance(cat, str) and cat.strip():
+            by_category.setdefault(cat, []).append(u)
+
+        if isinstance(sys_diff, str) and sys_diff.strip():
+            by_system_difficulty.setdefault(sys_diff, []).append(u)
+
+        perceived = extra.get("perceived_difficulty")
+        if isinstance(sys_diff, str) and isinstance(perceived, str) and sys_diff and perceived:
+            perceived_vs_system.setdefault(sys_diff, {})
+            perceived_vs_system[sys_diff][perceived] = int(perceived_vs_system[sys_diff].get(perceived, 0)) + 1
+
+        q_hash = extra.get("question_hash") or meta.get("question_hash")
+        if isinstance(q_hash, str) and q_hash.strip():
+            bucket = by_question_hash.setdefault(
+                q_hash,
+                {
+                    "question_hash": q_hash,
+                    "count": 0,
+                    "avg_usefulness": None,
+                    "category": cat,
+                    "difficulty": sys_diff,
+                    "question_id": qid,
+                },
+            )
+            bucket.setdefault("_us", [])
+            bucket["_us"].append(u)
+            bucket["count"] = int(bucket.get("count", 0)) + 1
+
+    # Finalize per-question buckets
+    question_rankings: List[Dict[str, Any]] = []
+    for _, b in by_question_hash.items():
+        us = b.pop("_us", [])
+        b["avg_usefulness"] = _avg(us)
+        question_rankings.append(b)
+
+    question_rankings.sort(
+        key=lambda x: (
+            -float(x.get("avg_usefulness") or -1.0),
+            -int(x.get("count") or 0),
+        )
+    )
+
+    return {
+        "count": len([x for x in usefulness_all if x is not None]) or len(rated),
+        "avg_usefulness": _avg(usefulness_all),
+        "by_category": {k: {"count": len(v), "avg_usefulness": _avg(v)} for k, v in by_category.items()},
+        "by_system_difficulty": {k: {"count": len(v), "avg_usefulness": _avg(v)} for k, v in by_system_difficulty.items()},
+        "perceived_vs_system": perceived_vs_system,
+        "question_rankings": question_rankings[:50],
+    }
+
+
 def compute_practice_insights(
     db: Session,
     *,
@@ -242,6 +379,18 @@ def compute_practice_insights(
         if f not in dedup:
             dedup.append(f)
 
+    # Optional Phase 3 human labels (best-effort)
+    try:
+        human_feedback = _collect_practice_feedback_ratings(
+            db,
+            user_id=user_id,
+            domain=domain,
+            lookback_days=lookback_days,
+            max_events=max_events,
+        )
+    except Exception:
+        human_feedback = None
+
     return {
         "user_id": user_id,
         "domain": domain,
@@ -256,6 +405,7 @@ def compute_practice_insights(
         "by_category": by_category_out,
         "by_difficulty": by_difficulty_out,
         "recommended_focus": dedup,
+        "human_feedback": human_feedback,
     }
 
 

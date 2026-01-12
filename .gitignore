@@ -50,8 +50,8 @@ debug.log
 # Pytest
 .pytest_cache/
 
-# Test/Demo files (local testing scripts only)
-test_*.py
+# Test/Demo files
+# NOTE: Python unit tests live under /tests and should be committed for CI.
 *_demo.html
 *_tester.html
 *_integration.html

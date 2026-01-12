@@ -3,6 +3,7 @@ from pydantic import field_validator
 from typing import List
 import secrets
 import os
+import re
 from dotenv import load_dotenv
 
 
@@ -27,6 +28,8 @@ class Settings(BaseSettings):
 	# Server
 	host: str = "0.0.0.0"
 	port: int = 8000
+	# Environment name (development/staging/production). Used to toggle certain defaults.
+	app_env: str = "development"
 	cors_allow_origins: List[str] = ["*"]
 	# Public base URL used to build absolute redirect URIs (OAuth callbacks, etc.)
 	backend_base_url: str = "http://localhost:8000"
@@ -49,6 +52,18 @@ class Settings(BaseSettings):
 
 	# Groq
 	groq_api_key: str | None = None
+	# Stratax-controlled platform key used ONLY for Demo Mode (no-auth + no user key).
+	# This key must never be exposed to clients. Keep strict demo quotas to cap cost.
+	stratax_demo_api_key: str | None = None
+	# Optional pool (comma-separated or JSON list). If present, the backend will
+	# automatically rotate and cooldown exhausted demo keys.
+	stratax_demo_api_keys: List[str] = []
+	# If false, demo users will NOT use STRATAX demo keys. This is recommended for
+	# local development so your UI testing uses your developer/server keys instead.
+	# In production, set this to true to enable real public demo traffic.
+	enable_demo_key_pool: bool = False
+	# Hard global demo budget guard (daily). When exceeded, demo returns 503.
+	demo_global_daily_request_limit: int = 0  # 0 = disabled
 	groq_model: str = "llama-3.3-70b-versatile"
 	groq_fallback_models: List[str] = [
 		"openai/gpt-oss-120b",
@@ -239,6 +254,48 @@ class Settings(BaseSettings):
 		# Allow environment variable override
 		if isinstance(v, str):
 			return [origin.strip() for origin in v.split(",")]
+		return v
+
+	@field_validator("stratax_demo_api_keys", mode="before")
+	@classmethod
+	def parse_demo_key_pool(cls, v):
+		def _expand_env_ref(s: str) -> str | None:
+			# Support referencing other env vars inside JSON lists, e.g. ["${GROQ_API_KEY}"]
+			# This avoids duplicating secrets in .env while keeping pydantic-settings JSON decoding happy.
+			s = (s or "").strip()
+			if not s:
+				return None
+			m = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", s)
+			if m:
+				val = os.environ.get(m.group(1), "").strip()
+				return val or None
+			m2 = re.fullmatch(r"\$([A-Za-z_][A-Za-z0-9_]*)", s)
+			if m2:
+				val = os.environ.get(m2.group(1), "").strip()
+				return val or None
+			return s
+
+		# Accept JSON list (pydantic may parse automatically), or comma-separated string.
+		if v is None:
+			return []
+		if isinstance(v, list):
+			out: list[str] = []
+			for x in v:
+				expanded = _expand_env_ref(str(x))
+				if expanded:
+					out.append(expanded)
+			return out
+		if isinstance(v, str):
+			raw = v.strip()
+			if not raw:
+				return []
+			parts = [p.strip() for p in raw.split(",") if p.strip()]
+			out: list[str] = []
+			for p in parts:
+				expanded = _expand_env_ref(p)
+				if expanded:
+					out.append(expanded)
+			return out
 		return v
 
 	def get_effective_provider(self, feature: str = "default") -> str:
