@@ -11,7 +11,12 @@ import logging
 from contextlib import suppress
 import uuid
 from app.models import User, UserTier, TIER_QUOTAS
-from app.utils.demo_mode import DEMO_ERROR_PAYLOAD, demo_session_id, infer_user_type
+from app.utils.demo_mode import (
+    DEMO_ERROR_PAYLOAD,
+    demo_session_id,
+    extract_user_provided_api_key,
+    infer_user_type,
+)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -248,7 +253,26 @@ async def rate_limit_middleware(request: Request, call_next):
     user: Optional[User] = getattr(request.state, "user", None)
 
     # Demo vs registered inference (demo is unauth + no API key headers)
-    user_type = infer_user_type(request, user=user)
+    provided_key = extract_user_provided_api_key(
+        request,
+        x_api_key=request.headers.get("X-API-Key"),
+        x_gemini_key=request.headers.get("X-Gemini-Key"),
+        authorization=request.headers.get("Authorization"),
+    )
+    user_type = infer_user_type(request, user=user, user_provided_key=provided_key)
+    has_user_key = bool(provided_key)
+    demo_key_pool_enabled = bool(getattr(settings, "enable_demo_key_pool", False))
+
+    # Debug log for confirming demo-mode behavior (no secrets logged)
+    if (path or "").startswith("/api/question"):
+        logger.info(
+            "[DEMO_MODE] path=%s user_type=%s auth=%s user_key_header=%s demo_key_pool_enabled=%s",
+            path,
+            user_type,
+            bool(user),
+            has_user_key,
+            demo_key_pool_enabled,
+        )
 
     limit_override: Optional[int] = None
     window_minutes: int = 1440
@@ -257,6 +281,13 @@ async def rate_limit_middleware(request: Request, call_next):
         user_id = demo_session_id(request)
         tier = UserTier.FREE
         window_minutes = DEMO_WINDOW_MINUTES
+
+        if (path or "").startswith("/api/question"):
+            logger.info(
+                "[DEMO_MODE] demo_session_id=%s demo_window_minutes=%s",
+                user_id,
+                DEMO_WINDOW_MINUTES,
+            )
 
         # Hard global demo budget guard (daily): protect platform spend.
         if int(getattr(settings, "demo_global_daily_request_limit", 0) or 0) > 0:
@@ -347,6 +378,9 @@ async def rate_limit_middleware(request: Request, call_next):
     
     # Add rate limit headers to response
     response = await call_next(request)
+    # Always expose user_type for client-side debugging / telemetry (non-secret).
+    response.headers["X-Stratax-User-Type"] = user_type
+    response.headers["X-Stratax-Demo-Key-Pool-Enabled"] = "1" if demo_key_pool_enabled else "0"
     response.headers["X-RateLimit-Limit"] = str(max_limit)
     if max_limit == -1:
         response.headers["X-RateLimit-Remaining"] = "-1"
