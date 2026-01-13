@@ -7,13 +7,28 @@ import re
 from dotenv import load_dotenv
 
 
-# Ensure .env is loaded eagerly
-load_dotenv(dotenv_path=".env")
+def _env_files() -> list[str]:
+	"""Return env file(s) to load.
+
+	Supports comma-separated ENV_FILE to allow layered configs, e.g.:
+	- ENV_FILE=.env,.env.local
+	- ENV_FILE=.env,.env.docker
+
+	If ENV_FILE is not set, defaults to .env.
+	"""
+	raw = (os.getenv("ENV_FILE", ".env") or ".env").strip()
+	files = [p.strip() for p in raw.split(",") if p.strip()]
+	return files or [".env"]
+
+
+# Ensure env files are loaded eagerly (highest priority is OS env vars, then env files).
+for _p in _env_files():
+	load_dotenv(dotenv_path=_p, override=False)
 
 
 class Settings(BaseSettings):
 	model_config = SettingsConfigDict(
-		env_file=".env",
+		env_file=_env_files(),
 		env_file_encoding="utf-8",
 		extra="ignore",
 	)
@@ -52,6 +67,10 @@ class Settings(BaseSettings):
 
 	# Groq
 	groq_api_key: str | None = None
+	# Demo-mode model override for Groq.
+	# If set, demo requests will be restricted to this model (no fallback) to keep
+	# cost/behavior predictable. If not set, demo uses the normal groq_model.
+	groq_demo_model: str | None = None
 	# Stratax-controlled platform key used ONLY for Demo Mode (no-auth + no user key).
 	# This key must never be exposed to clients. Keep strict demo quotas to cap cost.
 	stratax_demo_api_key: str | None = None
@@ -117,6 +136,13 @@ class Settings(BaseSettings):
 	enable_code_execution: bool = True
 	enable_query_expansion: bool = True
 	enable_streaming: bool = True
+
+	# Qdrant (Vector DB)
+	# If qdrant_url is set, Interview Intelligence will connect to a Qdrant server.
+	# If not set, it will fall back to local-path Qdrant (single-process only).
+	qdrant_url: str | None = None  # env: QDRANT_URL
+	qdrant_api_key: str | None = None  # env: QDRANT_API_KEY
+	qdrant_collection_name: str = "interview_questions"  # env: QDRANT_COLLECTION_NAME
 
 	# Startup / performance flags
 	# Useful for tests, CI, and lightweight deployments.

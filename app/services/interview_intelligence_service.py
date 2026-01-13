@@ -116,8 +116,23 @@ class ModernInterviewIntelligenceService:
         self.session: Optional[aiohttp.ClientSession] = None
         self.vector_client: Optional[QdrantClient] = None
         self.embed_model: Optional[SentenceTransformer] = None
-        self.collection_name = "interview_questions"
+        # Collection name is configurable for multi-tenant / env separation.
+        self.collection_name = getattr(settings, "qdrant_collection_name", "interview_questions")
         self._lock = asyncio.Lock()
+
+    def _create_qdrant_client(self) -> QdrantClient:
+        """Create a Qdrant client.
+
+        - If QDRANT_URL is configured, connect to a server (safe for multi-worker).
+        - Otherwise, fall back to local path (single-process only).
+        """
+        qdrant_url = getattr(settings, "qdrant_url", None)
+        if qdrant_url:
+            logger.info(f"Connecting to Qdrant server: {qdrant_url}")
+            return QdrantClient(url=qdrant_url, api_key=getattr(settings, "qdrant_api_key", None))
+
+        # Local-path mode (default for tests/dev).
+        return QdrantClient(path=str(VECTOR_DB_PATH))
     
     def _get_llm_service(self):
         """Get the LLM service instance - use self.llm_service if available (for Groq override), otherwise use global"""
@@ -132,7 +147,7 @@ class ModernInterviewIntelligenceService:
             # Skip if already shared from another service to avoid Qdrant lock conflicts
             if self.vector_client is None:
                 try:
-                    self.vector_client = QdrantClient(path=str(VECTOR_DB_PATH))
+                    self.vector_client = self._create_qdrant_client()
                 except RuntimeError as e:
                     if "already accessed by another instance" in str(e):
                         logger.error("Qdrant database is locked by another process!")
@@ -166,14 +181,27 @@ class ModernInterviewIntelligenceService:
             collection_exists = any(c.name == self.collection_name for c in collections)
             
             if not collection_exists:
-                self.vector_client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(
-                        size=384,  # all-MiniLM-L6-v2 dimension
-                        distance=Distance.COSINE
+                try:
+                    self.vector_client.create_collection(
+                        collection_name=self.collection_name,
+                        vectors_config=VectorParams(
+                            size=384,  # all-MiniLM-L6-v2 dimension
+                            distance=Distance.COSINE
+                        )
                     )
-                )
-                logger.info(f"Created vector collection: {self.collection_name}")
+                    logger.info(f"Created vector collection: {self.collection_name}")
+                except Exception as e:
+                    # Multi-worker race: another worker may create the collection first.
+                    # Re-check and continue if it now exists.
+                    try:
+                        collections = self.vector_client.get_collections().collections
+                        if any(c.name == self.collection_name for c in collections):
+                            logger.info(f"Collection already exists (race): {self.collection_name}")
+                        else:
+                            raise
+                    except Exception:
+                        logger.error(f"Failed to create vector collection: {e}")
+                        raise
                 
                 # Load any curated questions
                 await self._load_curated_questions()

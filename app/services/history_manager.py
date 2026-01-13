@@ -6,6 +6,11 @@ from typing import List, Optional, Dict, Any
 import logging
 import aiofiles
 import asyncio
+import os
+
+import app.database as _database
+from app.database import get_db_context
+from app.repositories.history_tabs import HistoryTabRepository
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +94,42 @@ class HistoryManager:
         self._loaded = False
         self._last_mtime = 0
         self._lock = asyncio.Lock()  # Prevent concurrent writes
+
+        self._repo = HistoryTabRepository()
+        mode = (os.getenv("STRATAX_HISTORY_STORE", "auto") or "auto").strip().lower()
+        if mode == "db":
+            self._use_db = True
+        elif mode == "file":
+            self._use_db = False
+        else:
+            self._use_db = not (_database.DATABASE_URL or "").startswith("sqlite")
     
     async def initialize(self):
         """Load history from disk if file changed or not yet loaded"""
+        if self._use_db:
+            # DB is the source of truth; always refresh under lock for multi-worker safety.
+            async with self._lock:
+                try:
+                    with get_db_context() as db:
+                        rows = self._repo.list_tabs(db, user_id=self.user_id)
+                    self._tabs = {
+                        r.tab_id: HistoryTab(
+                            tab_id=r.tab_id,
+                            query=r.query,
+                            questions=list(r.questions or []),
+                            created_at=(r.created_at.isoformat() if r.created_at else datetime.now(timezone.utc).isoformat()),
+                            metadata=dict(r.extra_data or {}),
+                        )
+                        for r in rows
+                    }
+                    self._loaded = True
+                except Exception as e:
+                    logger.error(f"❌ Failed to load history from DB: {e}")
+                    if not self._loaded:
+                        self._tabs = {}
+                        self._loaded = True
+            return
+
         mtime = 0
         if self.history_file.exists():
             mtime = self.history_file.stat().st_mtime
@@ -178,12 +216,17 @@ class HistoryManager:
     
     async def _save_to_disk(self):
         """Save all tabs to disk (lock assumed to be handled or managed here)"""
+        if self._use_db:
+            # In DB mode, we do not do full rewrites.
+            return
         # We handle locking inside to ensure atomic writes
         async with self._lock:
             await self._save_to_disk_internal()
 
     async def _save_to_disk_internal(self):
         """Internal save logic WITHOUT locking (must be called under lock)"""
+        if self._use_db:
+            return
         try:
             # Ensure parent directory exists
             HISTORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -248,9 +291,30 @@ class HistoryManager:
         )
         
         self._tabs[tab_id] = tab
-        
-        # Save to disk
-        await self._save_to_disk()
+
+        if self._use_db:
+            try:
+                created_dt: Optional[datetime] = None
+                try:
+                    created_dt = datetime.fromisoformat(tab.created_at)
+                except Exception:
+                    created_dt = datetime.now(timezone.utc)
+                with get_db_context() as db:
+                    self._repo.insert(
+                        db,
+                        user_id=self.user_id,
+                        tab_id=tab_id,
+                        query=query,
+                        questions=questions,
+                        metadata=metadata,
+                        created_at=created_dt,
+                    )
+            except Exception as e:
+                logger.error(f"❌ Failed to save history tab to DB: {e}")
+                raise
+        else:
+            # Save to disk
+            await self._save_to_disk()
         
         logger.info(f"Saved search to history: tab_id={tab_id}, query='{query}', count={len(questions)}")
         
@@ -332,8 +396,23 @@ class HistoryManager:
         if metadata is not None:
             tab.metadata.update(metadata)
         
-        # Save to disk
-        await self._save_to_disk()
+        if self._use_db:
+            try:
+                with get_db_context() as db:
+                    return self._repo.update(
+                        db,
+                        user_id=self.user_id,
+                        tab_id=tab_id,
+                        query=query,
+                        questions=questions,
+                        metadata=metadata,
+                    )
+            except Exception as e:
+                logger.error(f"❌ Failed to update history tab in DB: {e}")
+                raise
+        else:
+            # Save to disk
+            await self._save_to_disk()
         
         logger.info(f"Updated tab: {tab_id}")
         return True
@@ -352,9 +431,17 @@ class HistoryManager:
             return False
         
         del self._tabs[tab_id]
-        
-        # Save to disk
-        await self._save_to_disk()
+
+        if self._use_db:
+            try:
+                with get_db_context() as db:
+                    return self._repo.delete(db, user_id=self.user_id, tab_id=tab_id)
+            except Exception as e:
+                logger.error(f"❌ Failed to delete history tab from DB: {e}")
+                raise
+        else:
+            # Save to disk
+            await self._save_to_disk()
         
         logger.info(f"Deleted tab: {tab_id}")
         return True
@@ -372,8 +459,16 @@ class HistoryManager:
         count = len(self._tabs)
         self._tabs = {}
         
-        # Save empty history
-        await self._save_to_disk()
+        if self._use_db:
+            try:
+                with get_db_context() as db:
+                    return self._repo.delete_all(db, user_id=self.user_id)
+            except Exception as e:
+                logger.error(f"❌ Failed to delete all history tabs from DB: {e}")
+                raise
+        else:
+            # Save empty history
+            await self._save_to_disk()
         
         logger.info(f"Deleted all {count} tabs")
         return count

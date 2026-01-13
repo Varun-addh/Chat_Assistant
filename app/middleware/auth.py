@@ -4,13 +4,24 @@ User authentication middleware for Stratax AI
 Extracts user from JWT token and attaches to request state
 for rate limiting, quotas, and personalized features.
 """
-from fastapi import Request, Header
+from __future__ import annotations
+
+from fastapi import Request
 from typing import Optional
 import logging
-import jwt
 import hashlib
 
 logger = logging.getLogger(__name__)
+
+
+def _looks_like_jwt(token: str) -> bool:
+    """Heuristic: JWTs are dot-separated (header.payload.signature).
+
+    Important: Authorization is also reused for LLM keys in some flows.
+    We must not attempt JWT decode for non-JWT bearer tokens.
+    """
+    t = (token or "").strip()
+    return t.count(".") == 2
 
 
 def _extract_user_from_token(token: str):
@@ -20,13 +31,14 @@ def _extract_user_from_token(token: str):
     Returns User object or None
     """
     try:
-        from app.auth import SECRET_KEY, ALGORITHM
+        # Use the shared auth decoder so claims/expiry validation is consistent
+        # across middleware and route dependencies.
+        from app.auth import decode_access_token
         from app.database import get_db_context
         from app.models import User
-        
-        # Decode JWT
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
+
+        token_data = decode_access_token(token)
+        user_id = getattr(token_data, "user_id", None)
         
         if not user_id:
             return None
@@ -34,6 +46,10 @@ def _extract_user_from_token(token: str):
         # Get user from database
         with get_db_context() as db:
             user = db.query(User).filter(User.id == user_id).first()
+            if user is None:
+                return None
+            if not getattr(user, "is_active", True):
+                return None
             return user
     
     except Exception as e:
@@ -75,11 +91,14 @@ async def user_auth_middleware(request: Request, call_next):
         digest = hashlib.sha256(raw).hexdigest()[:16]
         return f"guest_{digest}"
     
-    # Check Authorization header (JWT token)
+    # Check Authorization header (JWT token).
+    # NOTE: Authorization may also contain an LLM API key for unauthenticated flows.
+    # Only attempt JWT decoding when the token looks like a JWT.
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ")[1]
-        user = _extract_user_from_token(token)
+        token = auth_header.split(" ", 1)[1].strip() if " " in auth_header else ""
+        if token and _looks_like_jwt(token):
+            user = _extract_user_from_token(token)
     
     # Attach user to request state (or None for guests)
     request.state.user = user

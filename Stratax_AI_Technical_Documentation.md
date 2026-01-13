@@ -97,6 +97,8 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 The system is designed as a **monolithic FastAPI service** with optional modular components:
 
 - **Always Available:** Q&A engine, session management, health endpoints
+- **New:** Auth subsystem (JWT + optional Google OAuth) backed by SQLite (`data/stratax.db`)
+- **New:** Tier-based rate limiting middleware (plus demo-mode quotas + debug headers)
 - **Optional Components:**
   - Interview Intelligence (requires Qdrant and sentence-transformers)
   - Practice Mode (requires audio libraries and TTS/STT models)
@@ -771,24 +773,25 @@ allow_origins=[
 
 ## Known Security Gaps
 
-### 1. JWT Verification Not Implemented
+### 1. Mixed identity mechanisms (JWT vs. "user_id" extraction)
 
-**Current State:** Bearer tokens are used directly as `user_id` without signature verification.
+**Current State (as implemented):**
 
-**Risk:** Attackers could forge tokens to access other users' data.
+- JWT verification **is implemented** for authenticated routes using `app/auth.py` (FastAPI `HTTPBearer` + JWT decode).
+- Separately, general request flows still use a convenience middleware that derives `request.state.user_id` from headers/cookies/query params.
+    - That middleware may treat `Authorization: Bearer <token>` as a user_id when present (JWT decode is not applied there).
 
-**Recommendation:** Implement JWT decode and signature verification:
-```python
-import jwt
-payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-user_id = payload["sub"]
-```
+**Risk:** In multi-tenant deployments, using an unverified bearer token as an identifier can allow spoofing of `user_id` in non-authenticated flows.
 
-### 2. No Rate Limiting
+**Recommendation:** Unify identity: prefer deriving `user_id` from validated JWT (when provided), and treat other mechanisms as guest-only identifiers.
 
-**Risk:** API abuse, DDoS, LLM quota exhaustion.
+### 2. Rate limiting is in-memory (not distributed)
 
-**Recommendation:** Implement rate limiting middleware (e.g., `slowapi`, Redis-based).
+**Current State:** A tier-based in-memory sliding-window limiter meters expensive LLM-backed endpoints and returns `X-RateLimit-*` headers; demo sessions have stricter caps.
+
+**Risk:** Limits are not shared across instances/workers.
+
+**Recommendation:** For production horizontal scaling, move rate limiting to Redis (or another shared store) and keep the same header contract.
 
 ### 3. WebSocket STT is Currently a Stub
 
@@ -846,11 +849,9 @@ GET /health
 **Response:**
 ```json
 {
-  "status": "healthy",
-  "version": "1.0",
-  "llm_provider": "groq",
-  "interview_intelligence_enabled": true,
-  "practice_mode_enabled": true
+    "status": "ok",
+    "version": "0.1.0",
+    "llm": {"provider": "gemini", "enabled": true}
 }
 ```
 
@@ -908,6 +909,13 @@ services:
 | `LLM_PROVIDER` | Provider selection: `groq` or `gemini` | Yes |
 | `API_KEY` | Optional bearer auth for protected endpoints | No |
 | `PRACTICE_MODE_ENABLED` | Enable/disable Practice Mode | No (default: true) |
+| `JWT_SECRET_KEY` | JWT signing secret for `/auth/*` | No (auto-generated default; set explicitly in production) |
+| `GOOGLE_CLIENT_ID` | Google OAuth | No |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth | No |
+| `BACKEND_BASE_URL` | OAuth redirect base (backend) | No |
+| `FRONTEND_URL` | OAuth redirect base (frontend) | No |
+| `ENABLE_DEMO_KEY_POOL` | Allow demo users to consume Stratax demo key pool | No |
+| `STRATAX_DEMO_API_KEYS` | Pool of Groq keys for demo traffic | No |
 
 ### Optional Integrations
 
@@ -928,6 +936,16 @@ ENABLE_CODE_EXECUTION=true
 ENABLE_QUERY_EXPANSION=false
 ENABLE_STREAMING=true
 ```
+
+### Demo-mode cost controls (optional)
+
+The backend can operate a public demo mode that is cost-capped by:
+
+- Strict per-session demo quotas (minutes-based window)
+- Optional global daily demo request limit
+- Optional demo key pool with a safety gate to prevent burning demo keys in development
+
+See `app/config.py` and `app/middleware/rate_limit.py`.
 
 ## Monitoring & Observability
 
@@ -1302,9 +1320,9 @@ curl http://localhost:7860/health
 **Expected Response:**
 ```json
 {
-  "status": "healthy",
-  "llm_provider": "groq",
-  "interview_intelligence_enabled": true
+    "status": "ok",
+    "version": "0.1.0",
+    "llm": {"provider": "gemini", "enabled": true}
 }
 ```
 

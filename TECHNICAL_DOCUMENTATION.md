@@ -22,6 +22,10 @@ The backend provides a FastAPI service for an “AI Interview Assistant” with:
   - `app/routers/practice_mode.py`, `app/services/practice_mode_service.py`, `app/services/local_stt_service.py`, `app/services/local_tts_service.py`
 - **Telemetry + learning loops** (structured event stream + deterministic personalization hints)
   - `app/models.py` (`EventRecord`), `app/utils/event_logging.py`, `app/services/learning_loops.py`
+- **Authentication + user profiles** (JWT login, optional Google OAuth, user-stored provider keys)
+  - `app/routers/auth_routes.py`, `app/auth.py`, `app/models.py` (`User`)
+- **Rate limiting + demo-mode cost controls** (tier-based metering for expensive endpoints)
+  - `app/middleware/rate_limit.py`, `app/models.py` (`UserTier`, `TIER_QUOTAS`), `app/config.py` (demo key pool flags)
 - **Real-time partial transcripts over WebSocket** (STT streaming stub)
   - `app/routers/ws.py`, `app/services/stt_service.py`
 
@@ -30,11 +34,18 @@ The backend provides a FastAPI service for an “AI Interview Assistant” with:
 The application entrypoint is `app/main.py`.
 
 - FastAPI app is created with a `lifespan` manager that initializes:
+  - SQLite database tables (and lightweight SQLite migration for OAuth column/index)
+  - In-memory rate limiter cleanup loop
   - Interview Intelligence (if optional deps available; guarded on `qdrant_client` import)
   - Mock interview service
   - History manager
   - Practice Mode service (if enabled)
   - `app/main.py`
+
+- Startup flags affecting initialization:
+  - `settings.fast_startup=true` skips heavier initialization (Interview Intelligence and Practice Mode)
+  - `settings.disable_interview_intelligence=true` force-disables Interview Intelligence even if deps exist
+  - See: `app/config.py`, `app/main.py`
 
 - Health endpoints:
   - `GET /health` (returns version + LLM provider + enabled flag)
@@ -175,7 +186,9 @@ This project installs the following AI/ML/DSP-related libraries (not all are use
 - Creates FastAPI app with lifespan startup/shutdown.
 - Adds permissive CORS middleware (`allow_origins=["*"]`, `allow_methods=["*"]`, `allow_headers=["*"]`).
 - Adds a custom “user auth” middleware that extracts and stores `user_id` on `request.state`.
+- Adds tier-based rate limiting middleware for expensive endpoints (Q&A, evaluate, practice, mock-interview, architecture generation).
 - Includes routers:
+  - `auth_router` at `/auth` (JWT auth + Google OAuth)
   - `history_router` at `/api/history`
   - `questions_router` at `/api`
   - `diagrams_router` at `/api`
@@ -192,9 +205,14 @@ This project installs the following AI/ML/DSP-related libraries (not all are use
 Notable settings (non-exhaustive; see file for full list):
 
 - Server: `host`, `port`, `cors_allow_origins`
+- Environment URLs used for OAuth redirects: `backend_base_url`, `frontend_url`
 - App identity: `app_name`, `app_developer_name`, `app_developer_attribution`
 - API auth: `api_key` (simple bearer), `cookie_secret`
+- JWT auth: `jwt_secret_key`
 - LLM: `llm_provider`, `groq_api_key`, `groq_model`, `gemini_api_key`, `gemini_model`, token/temperature knobs
+- Demo mode key pool (cost-capped public demo):
+  - `stratax_demo_api_key`, `stratax_demo_api_keys`
+  - `enable_demo_key_pool`, `allow_demo_key_pool_in_dev`, `demo_global_daily_request_limit`
 - External features: `serper_api_key`, `cohere_api_key`, `judge0_api_key`
 - Feature flags: `enable_hybrid_search`, `enable_reranking`, `enable_code_execution`, `enable_query_expansion`, `enable_streaming`
 - API key policy: `require_user_api_key`
@@ -202,6 +220,13 @@ Notable settings (non-exhaustive; see file for full list):
 - STT (WebSocket): `stt_provider`
 - Practice mode toggles + audio config (`practice_mode_enabled`, `practice_*`)
 - Architecture detection heuristics (`architecture_detection_*`, `architecture_complexity_signals`)
+
+Provider selection behavior note:
+
+- `settings.get_effective_provider(feature="copilot"|"default")` chooses Gemini for Copilot when both providers exist, and Groq for other features.
+- This is separate from per-request “Bridge Settings” keys (headers) which take precedence.
+
+See: `app/config.py`.
 
 See: `app/config.py`.
 
@@ -215,6 +240,33 @@ See: `app/config.py`.
 4. `user_id` cookie
 
 See: `app/middleware/auth.py`.
+
+### 4.3.1 `app/auth.py` + `app/routers/auth_routes.py` — JWT auth + user profile
+
+This repository includes a full user auth subsystem backed by SQLite:
+
+- `POST /auth/register` — create user and return JWT
+- `POST /auth/login` — return JWT
+- `GET /auth/me` — current user profile (requires JWT)
+- `PUT /auth/me` — update profile (including optional user-stored Groq/Gemini keys)
+- `POST /auth/change-password` — rotate password
+- `GET /auth/quota` — tier limits derived from `TIER_QUOTAS`
+- `GET /auth/google` and `GET /auth/google/callback` — Google OAuth popup flow (optional)
+
+See: `app/auth.py`, `app/routers/auth_routes.py`, `app/models.py`, `app/database.py`.
+
+### 4.3.2 `app/middleware/rate_limit.py` — tier limits + demo mode
+
+Rate limiting is implemented as an in-memory sliding window limiter:
+
+- Only meters expensive, LLM-backed routes by allowlist (keeps UX stable)
+- Uses `TIER_QUOTAS` for authenticated users (`User.tier`)
+- Supports a “demo” mode (unauthenticated + no user-provided API key) with strict session-window caps
+- Adds debug headers:
+  - `X-Stratax-User-Type`: `demo` | `guest` | `registered`
+  - `X-RateLimit-*`: limit/remaining/reset
+
+See: `app/middleware/rate_limit.py`, `app/models.py`.
 
 ### 4.4 `app/services/session_manager.py` — Q&A session state + persistence
 
@@ -422,6 +474,16 @@ See: `app/config.py`.
 - `KROKI_URL` — used by `app/routers/diagrams.py` (via `os.getenv`).
 - `GITHUB_TOKEN` / `GITHUB_API_KEY` — used by GitHub search logic in `app/services/dynamic_interview_sources.py`.
 
+### Demo mode key pool
+
+This backend can optionally power a cost-capped public demo:
+
+- If a user is unauthenticated and provides no `X-API-Key`/`X-Gemini-Key`, the request can be treated as `demo`.
+- When enabled (`ENABLE_DEMO_KEY_POOL=true`), the backend can route those demo requests through a Stratax-controlled Groq key pool (`STRATAX_DEMO_API_KEYS`).
+- In development, demo key pool is **disabled by default** unless `ALLOW_DEMO_KEY_POOL_IN_DEV=true` (safety feature).
+
+See: `app/config.py`, `app/middleware/rate_limit.py`.
+
 ## 7) Build & Deployment
 
 ### Docker
@@ -447,6 +509,14 @@ See: `docker-compose.yml`.
 - `websocket_verify_api_key` enforces API key via `Sec-WebSocket-Protocol` header (when `settings.api_key` is set).
 
 See: `app/utils/security.py`, `app/routers/ws.py`.
+
+### User authentication (JWT)
+
+- User accounts are stored in SQLite (`data/stratax.db`).
+- JWT bearer auth is used for `/auth/*` protected routes (FastAPI `HTTPBearer`).
+- Google OAuth is supported when `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are configured.
+
+See: `app/auth.py`, `app/routers/auth_routes.py`, `app/database.py`, `app/models.py`.
 
 ### Per-user isolation
 
@@ -500,7 +570,25 @@ See: `app/main.py`, `app/utils/audit.py`.
   - Current behavior: backend standard search path skips auto-save; frontend should be the single source of truth (`POST /api/history/`).
   - Evidence: `app/routers/interview_intelligence.py` (`_search_and_build_response`).
 
+7. **Rate limiting is in-memory only**
+  - Good for single-instance deployments; not shared across workers/instances.
+  - Recommendation: use Redis (or another shared store) for distributed rate limiting if scaling horizontally.
+  - Evidence: `app/middleware/rate_limit.py`.
+
 ## 10) Complete API Reference
+
+### Authentication (`/auth`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/auth/register` | Register and receive JWT |
+| POST | `/auth/login` | Login and receive JWT |
+| GET | `/auth/me` | Get current user profile (JWT required) |
+| PUT | `/auth/me` | Update profile (JWT required) |
+| POST | `/auth/change-password` | Change password (JWT required) |
+| GET | `/auth/quota` | Get tier quotas (JWT required) |
+| GET | `/auth/google` | Start Google OAuth flow (optional) |
+| GET | `/auth/google/callback` | OAuth callback (redirects to frontend) |
 
 ### Core Q&A Endpoints (`/api`)
 
@@ -622,7 +710,7 @@ See: `app/main.py`, `app/utils/audit.py`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Main health check (returns version, provider, status) |
+| GET | `/health` | Main health check (returns version + LLM provider + enabled flag) |
 | GET | `/api/identity-check` | Identity guard diagnostic |
 
 ## 11) Data Models & Schemas
@@ -801,21 +889,22 @@ uvicorn app.main:app --log-level debug
 
 ### Health Check Interpretation
 
-**GET /health** returns:
+**GET /health** returns (shape is intentionally small):
+
 ```json
 {
-  "status": "healthy",
-  "version": "...",
-  "llm_provider": "groq",
-  "interview_intelligence_enabled": true,
-  "practice_mode_enabled": true
+  "status": "ok",
+  "version": "0.1.0",
+  "llm": {"provider": "gemini", "enabled": true}
 }
 ```
 
-If `interview_intelligence_enabled: false`, check:
-- `qdrant-client` installed
-- No file lock conflicts
-- Sufficient disk space for vector DB
+For subsystem readiness, prefer the subsystem health endpoints:
+
+- Interview Intelligence: `GET /api/intelligence/health` (only mounted when enabled)
+- Mock Interview: `GET /api/mock-interview/health`
+
+If Interview Intelligence is not available, common causes are missing optional deps (e.g., `qdrant-client`) or Qdrant file-lock conflicts.
 
 ## 15) Development Workflow
 

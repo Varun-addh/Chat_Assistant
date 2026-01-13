@@ -9,6 +9,10 @@ import os
 from pathlib import Path
 import time
 
+import app.database as _database
+from app.database import get_db_context
+from app.repositories.chat_sessions import ChatSessionRepository
+
 
 @dataclass
 class SessionState:
@@ -25,6 +29,17 @@ class SessionManager:
 		self.user_id = user_id
 		self._sessions: Dict[str, SessionState] = {}
 		self._lock = asyncio.Lock()
+		self._repo = ChatSessionRepository()
+		# Storage selection:
+		# - auto: use DB for Postgres/MySQL, keep file store for SQLite (tests/dev)
+		# - override via STRATAX_SESSION_STORE=db|file
+		mode = (os.getenv("STRATAX_SESSION_STORE", "auto") or "auto").strip().lower()
+		if mode == "db":
+			self._use_db = True
+		elif mode == "file":
+			self._use_db = False
+		else:
+			self._use_db = not (_database.DATABASE_URL or "").startswith("sqlite")
 		# Persistence directory - User isolated
 		self._data_dir = Path("data/sessions") / user_id
 		self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -64,6 +79,10 @@ class SessionManager:
 
 	def _load_all(self) -> None:
 		"""Load all persisted sessions for THIS user and sync with disk."""
+		if self._use_db:
+			# DB is the source of truth; we intentionally keep a small in-memory cache.
+			# list_sessions() will query the DB directly.
+			return
 		if not self._data_dir.exists():
 			self._sessions.clear()
 			return
@@ -108,6 +127,33 @@ class SessionManager:
 		a browser refresh (otherwise /api/session/{id}/chat can 404 immediately),
 		so callers may pass force=True.
 		"""
+		if self._use_db:
+			# DB path: persist even empty sessions when force=True so refresh doesn't 404.
+			has_content = (
+				(state.qna and len(state.qna) > 0)
+				or state.custom_title
+				or state.profile_text
+				or state.partial_transcript
+			)
+			if not force and not has_content:
+				return
+			try:
+				with get_db_context() as db:
+					self._repo.upsert(
+						db,
+						user_id=self.user_id,
+						state={
+							"session_id": state.session_id,
+							"qna": list(state.qna or []),
+							"partial_transcript": state.partial_transcript,
+							"profile_text": state.profile_text,
+							"custom_title": state.custom_title,
+							"last_update": state.last_update,
+						},
+					)
+			except Exception as e:
+				print(f"❌ Failed to save session {state.session_id} to DB for user {self.user_id}: {e}")
+			return
 		# Only save sessions that have actual content (Q&A, title, profile, or transcript)
 		has_content = (
 			(state.qna and len(state.qna) > 0)
@@ -178,6 +224,26 @@ class SessionManager:
 		state = self._sessions.get(session_id)
 		if state:
 			return state
+
+		if self._use_db:
+			try:
+				with get_db_context() as db:
+					raw = self._repo.get(db, user_id=self.user_id, session_id=session_id)
+				if not raw:
+					return None
+				loaded = SessionState(
+					session_id=raw["session_id"],
+					qna=list(raw.get("qna") or []),
+					partial_transcript=raw.get("partial_transcript") or "",
+					last_update=raw.get("last_update") or datetime.utcnow(),
+					profile_text=raw.get("profile_text") or "",
+					custom_title=raw.get("custom_title"),
+				)
+				self._sessions[session_id] = loaded
+				return loaded
+			except Exception as e:
+				print(f"⚠️ Failed to load session {session_id} from DB: {e}")
+				return None
 		
 		# If not in memory, try loading from disk (multi-worker scenario)
 		path = self._session_path(session_id)
@@ -236,6 +302,13 @@ class SessionManager:
 
 	async def list_sessions(self) -> List[dict]:
 		"""Return lightweight session summaries for frontend lists."""
+		if self._use_db:
+			try:
+				with get_db_context() as db:
+					return self._repo.list_summaries(db, user_id=self.user_id)
+			except Exception as e:
+				print(f"⚠️ Failed to list sessions from DB for user {self.user_id}: {e}")
+				return []
 		# Reload from disk first to catch sessions created/updated by other workers
 		self._load_all()
 		
@@ -292,6 +365,14 @@ class SessionManager:
 	async def delete_session(self, session_id: str) -> bool:
 		"""Delete an entire session and its persisted file. Returns True if deleted."""
 		async with self._lock:
+			if self._use_db:
+				# Remove from memory cache
+				self._sessions.pop(session_id, None)
+				try:
+					with get_db_context() as db:
+						return self._repo.delete(db, user_id=self.user_id, session_id=session_id)
+				except Exception:
+					return False
 			state = self._sessions.pop(session_id, None)
 			in_memory_deleted = state is not None
 			

@@ -229,7 +229,7 @@ async def submit_question(
 
 	# Demo cost control: use a smaller Groq model for demo traffic only.
 	# (Registered users keep the normal model selection.)
-	demo_groq_model = "llama-3.1-8b-instant"
+	demo_groq_model = settings.groq_demo_model or settings.groq_model
 
 	# 3. Select key to use.
 	# If the user provided a Gemini key in Bridge Settings, we prefer it (higher quality).

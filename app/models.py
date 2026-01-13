@@ -163,6 +163,61 @@ class EventRecord(Base):
         return f"<EventRecord user={self.user_id} type={self.event_type} session={self.session_id}>"
 
 
+class ChatSession(Base):
+    """Persisted chat session state (the same state SessionManager keeps in memory).
+
+    This is distinct from `SessionRecord` which is a lightweight analytics/billing table.
+
+    Design goals:
+    - Preserve current API payloads (SessionManager stores `qna` as a list[dict]).
+    - Keep it simple and Postgres-ready.
+    - Do not FK to users to support guest identities.
+    """
+
+    __tablename__ = "chat_sessions"
+
+    id = Column(String, primary_key=True)  # session_id
+    user_id = Column(String, nullable=False, index=True)
+
+    # Session content/state
+    qna = Column(JSON, nullable=False, default=list)  # list[{question, answer, created_at}]
+    partial_transcript = Column(Text, nullable=False, default="")
+    profile_text = Column(Text, nullable=False, default="")
+    custom_title = Column(String, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    last_update = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return f"<ChatSession {self.id} user={self.user_id}>"
+
+
+class HistoryTabRecord(Base):
+    """Persisted history tabs (Search Intelligence history).
+
+    Current API expects:
+    - tab_id: str
+    - query: str
+    - questions: list[dict]
+    - created_at: ISO str
+    - metadata: dict
+    """
+
+    __tablename__ = "history_tabs"
+
+    tab_id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)
+
+    query = Column(Text, nullable=False)
+    questions = Column(JSON, nullable=False, default=list)
+    extra_data = Column(JSON, nullable=True)  # metadata
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return f"<HistoryTabRecord {self.tab_id} user={self.user_id}>"
+
+
 # Tier quotas (requests per day)
 TIER_QUOTAS = {
     UserTier.FREE: {

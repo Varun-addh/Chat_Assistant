@@ -63,6 +63,14 @@ The application supports flexible API key configuration:
 
 Set your API keys in the Bridge Settings or via environment variables.
 
+Environment files (recommended workflow)
+
+- Copy `.env.example` to `.env` and fill in your secrets (this file is ignored by git).
+- Put machine-specific overrides in `.env.local` (also ignored).
+- Select layered env files without editing `.env` using `ENV_FILE`, e.g.:
+	- `.env,.env.local` for local dev
+	- `.env,.env.docker` for docker-like overrides
+
 ## Development
 
 See [README_DOCKER.md](README_DOCKER.md) for Docker deployment instructions.
