@@ -7,6 +7,8 @@ import json
 import hashlib
 from typing import Dict, Optional
 
+from app.utils.time import utcnow
+
 from app.schemas import EvaluationIn, EvaluationOut, EvaluationScores, StaticSignals
 from app.services.session_manager import get_session_manager
 from app.services.code_evaluation_service import evaluate_code
@@ -387,7 +389,7 @@ async def evaluate(
 		scores=EvaluationScores(**scores_dict),
 		static_signals=StaticSignals(**static),
 		recommendations=_bullets(recs_raw),
-		created_at=datetime.utcnow(),
+		created_at=utcnow(),
 		markdown=f"""
 ### Approach
 

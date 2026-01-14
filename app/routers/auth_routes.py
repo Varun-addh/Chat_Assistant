@@ -19,7 +19,7 @@ from app.auth import (
 )
 from app.models import User, TIER_QUOTAS
 from app.config import settings
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,7 @@ class UserResponse(BaseModel):
     is_verified: bool
     created_at: str
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserUpdate(BaseModel):

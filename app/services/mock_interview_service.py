@@ -8,6 +8,8 @@ from enum import Enum
 import logging
 from pathlib import Path
 
+from app.utils.time import utcnow
+
 logger = logging.getLogger(__name__)
 
 
@@ -283,7 +285,7 @@ class MockInterviewService:
         session = InterviewSession(
             session_id=session_id,
             user_id=user_id,
-            started_at=datetime.utcnow(),
+            started_at=utcnow(),
             questions=questions,
             total_questions=len(questions),
             interview_type=interview_type,
@@ -313,7 +315,7 @@ class MockInterviewService:
         # Track when this question was started
         question_id = current_question.question_id
         if question_id not in session.question_start_times:
-            session.question_start_times[question_id] = datetime.utcnow()
+            session.question_start_times[question_id] = utcnow()
             self._save_sessions()
         
         return current_question
@@ -403,7 +405,7 @@ Keep it under 100 words."""
         
         # Calculate time spent on this question
         if question_id in session.question_start_times:
-            time_spent = (datetime.utcnow() - session.question_start_times[question_id]).total_seconds()
+            time_spent = (utcnow() - session.question_start_times[question_id]).total_seconds()
             session.time_per_question[question_id] = int(time_spent)
         
         # Evaluate the answer
@@ -1100,7 +1102,7 @@ CRITICAL RULES:
     
     async def _complete_session(self, session: InterviewSession):
         """Complete interview session and calculate final stats"""
-        session.completed_at = datetime.utcnow()
+        session.completed_at = utcnow()
         
         # Calculate average score
         if session.evaluations:

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Depends, Header
+from fastapi import APIRouter, HTTPException, Query, Depends, Header, Request
 from typing import Optional
 from pydantic import BaseModel
 import logging
@@ -10,6 +10,8 @@ from app.services.mock_interview_service import (
     InterviewSession,
     EvaluationResult,
 )
+
+from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -66,6 +68,7 @@ class SubmitAnswerResponse(BaseModel):
 @router.post("/sessions/start", response_model=StartSessionResponse)
 async def start_mock_interview(
     request: StartSessionRequest,
+    http_request: Request,
     service = Depends(get_mock_service),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
@@ -91,12 +94,23 @@ async def start_mock_interview(
             else:
                 api_key = settings.groq_api_key or settings.gemini_api_key
 
+        # Demo-mode clamp: mock interview demo is capped to 1 question.
+        user_key = extract_user_provided_api_key(
+            http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+        )
+        effective_num_questions = request.num_questions
+        if infer_user_type(http_request, user_provided_key=user_key) == "demo":
+            effective_num_questions = 1
+
         # Start session
         session = await service.start_session(
             user_id=request.user_id,
             interview_type=request.interview_type,
             difficulty=request.difficulty,
-            num_questions=request.num_questions,
+            num_questions=effective_num_questions,
             topic=request.topic,
             api_key=api_key
         )

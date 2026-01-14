@@ -7,6 +7,8 @@ from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel, Field
 
+from app.utils.time import utcnow
+
 from app.config import settings
 from app.utils.architecture_layers import get_layer_model
 from app.utils.domain_profile import build_domain_profile, render_domain_hints
@@ -75,7 +77,7 @@ class ArchitecturePackage(BaseModel):
     views: List[ArchitectureView] = Field(..., description="All architectural views")
     view_order: List[ArchitectureViewType] = Field(..., description="Recommended viewing order")
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    generated_at: datetime = Field(default_factory=utcnow)
     total_views: int = Field(..., description="Number of views generated")
     
 

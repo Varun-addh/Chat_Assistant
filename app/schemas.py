@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field, AliasChoices
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+from app.utils.time import utcnow
+
 
 class CreateSessionResponse(BaseModel):
 	session_id: str
@@ -218,7 +220,7 @@ class UserProfile(BaseModel):
 	"""User profile for adaptive interview customization."""
 	domain: str = Field(..., description="Primary domain (e.g., 'Python Backend', 'Data Science', 'Frontend React')")
 	experience_years: int = Field(..., ge=0, le=50, description="Years of experience (0-50)")
-	skills: List[str] = Field(..., min_items=1, description="List of skills (e.g., ['Python', 'AWS', 'Docker'])")
+	skills: List[str] = Field(..., min_length=1, description="List of skills (e.g., ['Python', 'AWS', 'Docker'])")
 	job_role: Optional[str] = Field(default=None, description="Target job role (e.g., 'Senior Engineer', 'Tech Lead')")
 	company_preference: Optional[str] = Field(default=None, description="Target company (e.g., 'Google', 'Meta', 'Amazon', 'Microsoft', 'Netflix', 'Apple', 'Startup', 'Enterprise')")
 	interview_focus: Optional[List[str]] = Field(default=None, description="Specific areas to focus on")
@@ -265,7 +267,7 @@ class SpeechMetrics(BaseModel):
 class MicroFeedback(BaseModel):
 	"""Micro-feedback provided after each answer with AI-powered correctness evaluation."""
 	# Delivery Feedback (existing)
-	delivery_tips: List[str] = Field(..., max_items=2, description="1-2 short delivery tips")
+	delivery_tips: List[str] = Field(..., max_length=2, description="1-2 short delivery tips")
 	pace_feedback: str = Field(..., description="Speaking pace feedback")
 	overall_note: str = Field(..., description="Overall feedback note")
 	speech_quality: Optional[str] = Field(default=None, description="Speech quality assessment")
@@ -275,14 +277,14 @@ class MicroFeedback(BaseModel):
 	technical_accuracy: Optional[str] = Field(default=None, description="Technical accuracy assessment (Excellent/Good/Fair/Poor)")
 	key_points_covered: Optional[List[str]] = Field(default=None, description="Key concepts mentioned correctly")
 	key_points_missed: Optional[List[str]] = Field(default=None, description="Important points not mentioned")
-	strengths: Optional[List[str]] = Field(default=None, max_items=2, description="What was good in the answer")
-	improvement_areas: Optional[List[str]] = Field(default=None, max_items=2, description="What could be better")
-	actionable_suggestions: Optional[List[str]] = Field(default=None, max_items=2, description="Specific tips to improve")
+	strengths: Optional[List[str]] = Field(default=None, max_length=2, description="What was good in the answer")
+	improvement_areas: Optional[List[str]] = Field(default=None, max_length=2, description="What could be better")
+	actionable_suggestions: Optional[List[str]] = Field(default=None, max_length=2, description="Specific tips to improve")
 	is_correct: Optional[bool] = Field(default=None, description="Overall correctness (true if score >= 70%)")
 	
 	# Deprecated field (keep for backward compatibility)
 	content_relevance: Optional[str] = Field(default=None, description="[Deprecated] Use correctness_score instead")
-	timestamp: datetime = Field(default_factory=datetime.utcnow)
+	timestamp: datetime = Field(default_factory=utcnow)
 
 
 class AnswerSubmission(BaseModel):
@@ -292,17 +294,17 @@ class AnswerSubmission(BaseModel):
 	metrics: SpeechMetrics = Field(..., description="Speech analytics")
 	micro_feedback: MicroFeedback = Field(..., description="Immediate feedback")
 	audio_duration: float = Field(..., description="Audio duration in seconds")
-	submitted_at: datetime = Field(default_factory=datetime.utcnow)
+	submitted_at: datetime = Field(default_factory=utcnow)
 
 
 class EvaluationStrengths(BaseModel):
 	"""Strengths identified in the evaluation."""
-	items: List[str] = Field(..., min_items=2, max_items=3, description="2-3 specific strengths")
+	items: List[str] = Field(..., min_length=2, max_length=3, description="2-3 specific strengths")
 
 
 class EvaluationImprovements(BaseModel):
 	"""Areas to improve identified in the evaluation."""
-	items: List[str] = Field(..., min_items=2, max_items=3, description="2-3 specific improvement areas")
+	items: List[str] = Field(..., min_length=2, max_length=3, description="2-3 specific improvement areas")
 
 
 class MetricsSummary(BaseModel):
@@ -317,7 +319,7 @@ class MetricsSummary(BaseModel):
 
 class ActionPlan(BaseModel):
 	"""Action plan for improvement."""
-	steps: List[str] = Field(..., min_items=2, max_items=3, description="2-3 concrete action steps")
+	steps: List[str] = Field(..., min_length=2, max_length=3, description="2-3 concrete action steps")
 
 
 class EvaluationReport(BaseModel):
@@ -327,7 +329,7 @@ class EvaluationReport(BaseModel):
 	metrics_summary: MetricsSummary = Field(..., description="Aggregated metrics")
 	action_plan: ActionPlan = Field(..., description="Concrete action steps")
 	practice_recommendation: str = Field(..., description="Estimated practice sessions needed")
-	generated_at: datetime = Field(default_factory=datetime.utcnow)
+	generated_at: datetime = Field(default_factory=utcnow)
 
 
 class PracticeSession(BaseModel):
@@ -337,8 +339,8 @@ class PracticeSession(BaseModel):
 	user_profile: Optional[UserProfile] = Field(default=None, description="User profile used to generate questions")
 	difficulty: Optional[QuestionDifficulty] = Field(default=None, description="Difficulty level used for this session")
 	round_type: Optional[InterviewRound] = Field(default=None, description="Interview round practiced (if any)")
-	started_at: datetime = Field(default_factory=datetime.utcnow)
-	last_activity_at: datetime = Field(default_factory=datetime.utcnow)
+	started_at: datetime = Field(default_factory=utcnow)
+	last_activity_at: datetime = Field(default_factory=utcnow)
 	completed_at: Optional[datetime] = None
 	current_question_index: int = Field(default=0, description="Current question index (0-4)")
 	questions: List[PracticeInterviewQuestion] = Field(default_factory=list)
@@ -684,7 +686,7 @@ class ArchitecturePackageOut(BaseModel):
 	views: List[ArchitectureViewOut] = Field(..., description="All architectural views")
 	view_order: List[ArchitectureViewType] = Field(..., description="Recommended viewing order")
 	total_views: int = Field(..., description="Number of views generated")
-	generated_at: datetime = Field(default_factory=datetime.utcnow)
+	generated_at: datetime = Field(default_factory=utcnow)
 	metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 	
 	# Helpful guidance

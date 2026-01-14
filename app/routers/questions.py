@@ -3,6 +3,8 @@ from typing import Optional, List
 from fastapi.responses import StreamingResponse
 from datetime import datetime
 
+from app.utils.time import utcnow
+
 from app.schemas import (
 	CreateSessionResponse, 
 	QuestionIn, 
@@ -481,7 +483,7 @@ async def submit_question(
 			"answer": identity_answer,
 			"saved_to_history": payload.save_to_history,
 		})
-		return AnswerOut(answer=identity_answer, created_at=datetime.utcnow(), truncated=False)
+		return AnswerOut(answer=identity_answer, created_at=utcnow(), truncated=False)
 
 	# Read any stored profile for this session
 	profile_text = state.profile_text
@@ -536,7 +538,7 @@ async def submit_question(
 				pass
 		return AnswerOut(
 			answer="",
-			created_at=datetime.utcnow(),
+			created_at=utcnow(),
 			truncated=False,
 			ui_action="choose_architecture_mode",
 			ui_payload={
@@ -791,7 +793,7 @@ async def submit_question(
 			final_ans = "".join(chunks)
 			if payload.save_to_history:
 				await manager.append_qna(state.session_id, payload.question, final_ans)
-			return AnswerOut(answer=final_ans, created_at=datetime.utcnow(), truncated=False)
+			return AnswerOut(answer=final_ans, created_at=utcnow(), truncated=False)
 	
 	# Handle single comprehensive architecture (legacy single-diagram behavior)
 	elif is_architecture and arch_mode == "single":
@@ -862,7 +864,7 @@ async def submit_question(
 			final_ans = ("## Single-View Architecture\n\n" + (answer or "").strip()).strip()
 			if payload.save_to_history:
 				await manager.append_qna(state.session_id, payload.question, final_ans)
-			return AnswerOut(answer=final_ans, created_at=datetime.utcnow(), truncated=truncated)
+			return AnswerOut(answer=final_ans, created_at=utcnow(), truncated=truncated)
 		
 
 	
@@ -1000,7 +1002,7 @@ async def submit_question(
 	# Auto-evaluate if response contains code
 	asyncio.create_task(_auto_evaluate_if_code(manager, state.session_id, payload.question, answer, api_key))
 	
-	return AnswerOut(answer=answer, created_at=datetime.utcnow(), truncated=truncated)
+	return AnswerOut(answer=answer, created_at=utcnow(), truncated=truncated)
 
 
 @router.post("/upload_profile")

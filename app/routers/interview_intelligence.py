@@ -19,6 +19,7 @@ from app.services.history_manager import default_history_manager
 from fastapi import WebSocket, WebSocketDisconnect
 import time
 from app.config import settings
+from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1000,6 +1001,17 @@ async def search_questions(
     if not api_key:
         api_key = settings.gemini_api_key or settings.groq_api_key
 
+    # Demo-mode clamp: keep demo responses small/cost-capped.
+    # Demo is inferred as: no authenticated user AND no user-provided LLM key.
+    user_key = extract_user_provided_api_key(
+        request,
+        x_api_key=x_api_key,
+        x_gemini_key=x_gemini_key,
+        authorization=authorization,
+    )
+    if infer_user_type(request, user_provided_key=user_key) == "demo":
+        limit = min(int(limit or 20), 2)
+
     try:
         return await _search_and_build_response(q, limit, refresh, api_key=api_key, save_to_history=save_to_history, request=request)
     except Exception as e:
@@ -1053,6 +1065,16 @@ async def search_questions_post(
     # Fallback to dev keys only in permissive mode
     if not api_key:
         api_key = settings.gemini_api_key or settings.groq_api_key
+
+    # Demo-mode clamp: keep demo responses small/cost-capped.
+    user_key = extract_user_provided_api_key(
+        request,
+        x_api_key=x_api_key,
+        x_gemini_key=x_gemini_key,
+        authorization=authorization,
+    )
+    if infer_user_type(request, user_provided_key=user_key) == "demo":
+        limit = min(int(limit or 20), 2)
 
     try:
         return await _search_and_build_response(query, limit, refresh, api_key=api_key, save_to_history=save_to_history, request=request)

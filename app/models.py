@@ -5,8 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from enum import Enum
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, JSON
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base, relationship
 import uuid
 
 Base = declarative_base()

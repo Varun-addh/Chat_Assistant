@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import uuid
 import asyncio
@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import time
+
+from app.utils.time import utcnow
 
 import app.database as _database
 from app.database import get_db_context
@@ -19,7 +21,7 @@ class SessionState:
 	session_id: str
 	qna: List[dict] = field(default_factory=list)
 	partial_transcript: str = ""
-	last_update: datetime = field(default_factory=datetime.utcnow)
+	last_update: datetime = field(default_factory=utcnow)
 	profile_text: str = ""
 	custom_title: Optional[str] = None
 
@@ -64,10 +66,13 @@ class SessionManager:
 		if isinstance(last_update, str):
 			try:
 				last_dt = datetime.fromisoformat(last_update)
+				# Backward-compat: previously persisted naive timestamps.
+				if last_dt.tzinfo is None:
+					last_dt = last_dt.replace(tzinfo=timezone.utc)
 			except Exception:
-				last_dt = datetime.utcnow()
+				last_dt = utcnow()
 		else:
-			last_dt = datetime.utcnow()
+			last_dt = utcnow()
 		return SessionState(
 			session_id=data["session_id"],
 			qna=list(data.get("qna", [])),
@@ -197,7 +202,7 @@ class SessionManager:
 			for state in self._sessions.values():
 				if not state.qna and not state.custom_title and not state.profile_text:
 					# Update timestamp so it appears at the top
-					state.last_update = datetime.utcnow()
+					state.last_update = utcnow()
 					# Persist the empty session so refresh doesn't lose it
 					self._save(state, force=True)
 					# Update debounce tracking
@@ -235,7 +240,7 @@ class SessionManager:
 					session_id=raw["session_id"],
 					qna=list(raw.get("qna") or []),
 					partial_transcript=raw.get("partial_transcript") or "",
-					last_update=raw.get("last_update") or datetime.utcnow(),
+					last_update=raw.get("last_update") or utcnow(),
 					profile_text=raw.get("profile_text") or "",
 					custom_title=raw.get("custom_title"),
 				)
@@ -265,15 +270,15 @@ class SessionManager:
 		state.qna.append({
 			"question": question,
 			"answer": answer,
-			"created_at": datetime.utcnow().isoformat(),
+			"created_at": utcnow().isoformat(),
 		})
-		state.last_update = datetime.utcnow()
+		state.last_update = utcnow()
 		self._save(state)
 
 	async def set_partial_transcript(self, session_id: str, text: str) -> None:
 		state = await self.get_required(session_id)
 		state.partial_transcript = text
-		state.last_update = datetime.utcnow()
+		state.last_update = utcnow()
 		self._save(state)
 
 	async def append_partial_transcript(self, session_id: str, text: str) -> None:
@@ -281,7 +286,7 @@ class SessionManager:
 		if state.partial_transcript and not state.partial_transcript.endswith(" "):
 			state.partial_transcript += " "
 		state.partial_transcript += text
-		state.last_update = datetime.utcnow()
+		state.last_update = utcnow()
 		self._save(state)
 
 	async def get_required(self, session_id: str) -> SessionState:
@@ -293,7 +298,7 @@ class SessionManager:
 	async def set_profile_text(self, session_id: str, text: str) -> None:
 		state = await self.get_required(session_id)
 		state.profile_text = text.strip()
-		state.last_update = datetime.utcnow()
+		state.last_update = utcnow()
 		self._save(state)
 
 	async def get_profile_text(self, session_id: str) -> str:
@@ -316,7 +321,7 @@ class SessionManager:
 		sessions_to_delete = []
 		for session_id, s in self._sessions.items():
 			has_content = (s.qna and len(s.qna) > 0) or s.custom_title or s.profile_text
-			is_recent = (datetime.utcnow() - s.last_update).total_seconds() < 300  # 5 minutes
+			is_recent = (utcnow() - s.last_update).total_seconds() < 300  # 5 minutes
 			
 			# Mark old empty sessions for deletion
 			if not has_content and not is_recent:
@@ -359,7 +364,7 @@ class SessionManager:
 		"""Set a custom title for the session."""
 		state = await self.get_required(session_id)
 		state.custom_title = title.strip()
-		state.last_update = datetime.utcnow()
+		state.last_update = utcnow()
 		self._save(state)
 
 	async def delete_session(self, session_id: str) -> bool:
@@ -392,7 +397,7 @@ class SessionManager:
 		"""Clear QnA history for a session but keep the session and profile."""
 		state = await self.get_required(session_id)
 		state.qna.clear()
-		state.last_update = datetime.utcnow()
+		state.last_update = utcnow()
 		self._save(state)
 
 	async def remove_qna(self, session_id: str, index: int) -> None:
@@ -401,7 +406,7 @@ class SessionManager:
 		if index < 0 or index >= len(state.qna):
 			raise IndexError("qna index out of range")
 		state.qna.pop(index)
-		state.last_update = datetime.utcnow()
+		state.last_update = utcnow()
 		self._save(state)
 
 

@@ -6,8 +6,14 @@ from typing import List, Optional, Dict, Any, AsyncGenerator
 from datetime import datetime
 import logging
 
+from app.utils.time import utcnow
+
 from langchain_community.retrievers import BM25Retriever
-from langchain_community.embeddings import HuggingFaceEmbeddings
+try:
+    # Newer LangChain split: embeddings moved here.
+    from langchain_huggingface import HuggingFaceEmbeddings
+except Exception:  # pragma: no cover
+    from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Qdrant
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -513,7 +519,7 @@ class RealTimeSearchStream:
         yield {
             'type': 'search_started',
             'query': query,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utcnow().isoformat()
         }
         
         # Search sources in parallel but yield as they complete
@@ -529,7 +535,7 @@ class RealTimeSearchStream:
                 yield {
                     'type': 'source_searching',
                     'source': source_name,
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utcnow().isoformat()
                 }
                 
                 results = await task
@@ -545,7 +551,7 @@ class RealTimeSearchStream:
                             'type': 'result',
                             'source': source_name,
                             'data': result,
-                            'timestamp': datetime.utcnow().isoformat()
+                            'timestamp': utcnow().isoformat()
                         }
                 
                 # Send source complete
@@ -553,7 +559,7 @@ class RealTimeSearchStream:
                     'type': 'source_complete',
                     'source': source_name,
                     'count': len(results),
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utcnow().isoformat()
                 }
             
             except Exception as e:
@@ -561,14 +567,14 @@ class RealTimeSearchStream:
                     'type': 'source_error',
                     'source': source_name,
                     'error': str(e),
-                    'timestamp': datetime.utcnow().isoformat()
+                    'timestamp': utcnow().isoformat()
                 }
         
         # Send completion
         yield {
             'type': 'search_complete',
             'total_results': len(sent_questions),
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utcnow().isoformat()
         }
 
 
@@ -599,7 +605,7 @@ class UserFeedbackSystem:
             'user_id': user_id,
             'vote': vote,
             'feedback': feedback_text,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utcnow().isoformat()
         }
         
         # Store in database
@@ -650,7 +656,7 @@ class UserFeedbackSystem:
             'question_id': question_id,
             'user_id': user_id,
             'reason': reason,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': utcnow().isoformat()
         }
         
         # Store report

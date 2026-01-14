@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime
 import asyncio
 
+from app.utils.time import utcnow
+
 from app.schemas import (
     PracticeSession,
     PracticeModeConfig,
@@ -433,7 +435,7 @@ class PracticeModeService:
                 raise ValueError(f"Session not found: {session_id}")
             
             # Update activity timestamp
-            session.last_activity_at = datetime.utcnow()
+            session.last_activity_at = utcnow()
             
             # Validate question
             question = session.questions[question_id - 1]
@@ -505,7 +507,7 @@ class PracticeModeService:
                 # Interview complete - generate evaluation
                 logger.info("Interview complete, generating evaluation...")
                 session.is_complete = True
-                session.completed_at = datetime.utcnow()
+                session.completed_at = utcnow()
                 
                 try:
                     logger.info(f"Generating final evaluation for {len(session.answers)} answers...")
@@ -541,7 +543,7 @@ class PracticeModeService:
         """Get session by ID."""
         session = self.sessions.get(session_id)
         if session:
-            session.last_activity_at = datetime.utcnow()
+            session.last_activity_at = utcnow()
         return session
     
     async def get_next_question_after_acknowledgment(
@@ -671,7 +673,7 @@ class PracticeModeService:
     async def cleanup_old_sessions(self, max_age_minutes: int = 60):
         """Clean up old inactive sessions."""
         try:
-            now = datetime.utcnow()
+            now = utcnow()
             to_remove = []
             
             for session_id, session in self.sessions.items():

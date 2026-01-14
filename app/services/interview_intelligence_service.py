@@ -15,6 +15,8 @@ from sentence_transformers import SentenceTransformer
 from app.config import settings
 from app.services.llm_service import llm_service
 
+from app.utils.time import utcnow
+
 import logging
 
 from app.services.dynamic_interview_sources import (
@@ -85,7 +87,7 @@ class InterviewQuestion(BaseModel):
     companies: List[str] = Field(default_factory=list, description="Companies known to ask this")
     confidence_score: float = Field(default=1.0, ge=0.0, le=1.0)
     source: str = Field(default="llm_generated")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class SearchIntent(BaseModel):
@@ -333,8 +335,6 @@ class ModernInterviewIntelligenceService:
             return await asyncio.to_thread(_invoke)
 
         async def _call_gemini() -> str:
-            import google.generativeai as genai  # type: ignore
-
             def _invoke():
                 model = client.GenerativeModel(
                     llm_svc._settings.gemini_model,
@@ -637,8 +637,7 @@ class ModernInterviewIntelligenceService:
             
             elif provider == "gemini":
                 try:
-                    import google.generativeai as genai
-                    
+					
                     # Reduce count for Gemini
                     adjusted_count = min(request.count, 3)  # Max 3 at a time
                     if adjusted_count < request.count:
@@ -762,8 +761,7 @@ CRITICAL FORMAT RULES:
                 
                 try:
                     if provider == "gemini":
-                        import google.generativeai as genai
-                        
+						
                         def _call():
                             model = client.GenerativeModel(
                                 llm_svc._settings.gemini_model,
@@ -1065,7 +1063,7 @@ CRITICAL FORMAT RULES:
                         
                         # Set defaults
                         item.setdefault("source", "llm_generated")
-                        item.setdefault("created_at", datetime.utcnow().isoformat())
+                        item.setdefault("created_at", utcnow().isoformat())
                         item.setdefault("confidence_score", 0.8)
                         item.setdefault("topic", request.intent.primary_topic or "general")
                         item.setdefault("difficulty", request.intent.difficulty_preference or "medium")
@@ -1236,7 +1234,7 @@ CRITICAL FORMAT RULES:
                 
                 # Set defaults
                 item["source"] = "llm_generated"
-                item["created_at"] = datetime.utcnow().isoformat()
+                item["created_at"] = utcnow().isoformat()
                 item["confidence_score"] = float(item.get("confidence_score", 0.8))
                 item.setdefault("topic", request.intent.primary_topic or "general")
                 item.setdefault("difficulty", request.intent.difficulty_preference or "medium")
@@ -1349,7 +1347,7 @@ CRITICAL FORMAT RULES:
                 
                 # Set defaults
                 item["source"] = "llm_generated"
-                item["created_at"] = datetime.utcnow().isoformat()
+                item["created_at"] = utcnow().isoformat()
                 item["confidence_score"] = float(item.get("confidence_score", 0.8))
                 item.setdefault("topic", request.intent.primary_topic or "general")
                 item.setdefault("difficulty", request.intent.difficulty_preference or "medium")

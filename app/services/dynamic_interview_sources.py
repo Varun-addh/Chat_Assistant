@@ -5,10 +5,12 @@ import re
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import logging
 
 logger = logging.getLogger(__name__)
+
+from app.utils.time import utcnow
 
 
 # ============================================================================
@@ -75,10 +77,9 @@ class VerifiedQuestion(BaseModel):
     # Metadata
     credibility_score: float = Field(default=0.5, ge=0.0, le=1.0)
     frequency_score: float = Field(default=1.0, ge=0.0, le=10.0)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
     
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 # ============================================================================
@@ -175,7 +176,7 @@ class GitHubSearcher:
             # Check cache
             cache_key = f"{query}_{domain.value}_{limit}"
             if cache_key in self._cache and self._cache_time:
-                if datetime.utcnow() - self._cache_time < self._cache_ttl:
+                if utcnow() - self._cache_time < self._cache_ttl:
                     logger.info(f"✅ Cache hit for GitHub search")
                     return self._cache[cache_key][:limit]
             
@@ -214,7 +215,7 @@ class GitHubSearcher:
                 
                 # Cache results
                 self._cache[cache_key] = questions
-                self._cache_time = datetime.utcnow()
+                self._cache_time = utcnow()
                 
                 logger.info(f"GitHub search extracted {len(questions)} total questions")
                 return questions[:limit]

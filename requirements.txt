@@ -19,6 +19,7 @@ beautifulsoup4
 lxml
 groq
 google-generativeai
+google-genai
 aiofiles
 
 # Authentication & Security
@@ -42,6 +43,7 @@ huggingface_hub==0.17.3
 # LangChain minimal
 langchain-community==0.2.6
 langchain-text-splitters==0.2.2
+langchain-huggingface
 
 # Vector DB
 qdrant-client==1.9.1
@@ -57,6 +59,7 @@ numpy
 scipy
 Pillow
 python-dotenv
+setuptools<81
 pytest
 pytest-asyncio>=0.23.0
 matplotlib

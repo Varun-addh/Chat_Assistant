@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import AsyncIterator, Optional, List, Dict
 from groq import Groq
 try:
-    import google.generativeai as genai
+	from app.services.gemini_adapter import genai
 except Exception:
     genai = None
 
