@@ -148,6 +148,14 @@ async def lifespan(app: FastAPI):
     from app.middleware.rate_limit import rate_limiter
     await rate_limiter.shutdown()
 
+    # Close shared Redis client (used by shared caches)
+    try:
+        from app.services.redis_client import close_redis
+
+        await close_redis()
+    except Exception:
+        pass
+
     # Clean up practice mode TTS resources (only if it was initialized)
     if (not settings.fast_startup) and settings.practice_mode_enabled:
         from app.routers.practice_mode import cleanup_practice_mode

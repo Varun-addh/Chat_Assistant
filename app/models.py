@@ -218,6 +218,77 @@ class HistoryTabRecord(Base):
         return f"<HistoryTabRecord {self.tab_id} user={self.user_id}>"
 
 
+class PracticeAttemptRecord(Base):
+    """A completed Practice Mode attempt (flagship loop persistence).
+
+    Design goals:
+    - Keep inserts cheap.
+    - Store small structured summaries for analytics/progress.
+    - Avoid large raw transcripts by default.
+    """
+
+    __tablename__ = "practice_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False, index=True)
+
+    # Link back to runtime session id (not FK'd; guest + transient allowed)
+    session_id = Column(String, nullable=True, index=True)
+
+    # Context
+    domain = Column(String, nullable=True, index=True)
+    round_type = Column(String, nullable=True, index=True)
+    difficulty = Column(String, nullable=True, index=True)
+    company = Column(String, nullable=True)
+    question_count = Column(Integer, nullable=True)
+
+    # Scoring (0-100)
+    overall_score = Column(Float, nullable=True, index=True)
+    dimension_scores = Column(JSON, nullable=True)  # {dimension: score}
+
+    # Product loop outputs
+    why = Column(JSON, nullable=True)  # list[str]
+    improvement_plan = Column(JSON, nullable=True)  # list[str]
+    next_session_plan = Column(JSON, nullable=True)  # dict
+
+    # Optionally store the evaluation report as JSON (small)
+    evaluation_report = Column(JSON, nullable=True)
+
+    # Timestamps
+    started_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    dimensions = relationship(
+        "PracticeAttemptDimensionRecord",
+        back_populates="attempt",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    def __repr__(self) -> str:
+        return f"<PracticeAttemptRecord id={self.id} user={self.user_id} score={self.overall_score}>"
+
+
+class PracticeAttemptDimensionRecord(Base):
+    """Per-dimension score row, used for trend charts/heatmaps."""
+
+    __tablename__ = "practice_attempt_dimensions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    attempt_id = Column(Integer, ForeignKey("practice_attempts.id"), nullable=False, index=True)
+
+    dimension = Column(String, nullable=False, index=True)
+    score = Column(Float, nullable=False, index=True)  # 0-100
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    attempt = relationship("PracticeAttemptRecord", back_populates="dimensions")
+
+    def __repr__(self) -> str:
+        return f"<PracticeAttemptDimensionRecord attempt={self.attempt_id} {self.dimension}={self.score}>"
+
+
 # Tier quotas (requests per day)
 TIER_QUOTAS = {
     UserTier.FREE: {

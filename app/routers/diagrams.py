@@ -21,6 +21,8 @@ from app.schemas import (
 from app.services.architecture_generator import get_architecture_generator
 from app.services.llm_service import get_llm_service
 from app.utils.mermaid_sanitizer import MermaidSanitizer
+from app.config import settings
+from app.services.redis_client import get_redis, redis_enabled
 
 
 router = APIRouter()
@@ -444,20 +446,53 @@ async def render_mermaid(payload: dict):
     def _attempt_cache_key(label: str, attempt_code: str) -> str:
         return hashlib.md5(f"{label}|{attempt_code}".encode()).hexdigest()
 
+    redis = None
+    if redis_enabled():
+        try:
+            redis = await get_redis()
+        except Exception:
+            redis = None
+
+    def _redis_cache_key(ck: str) -> str:
+        prefix = (getattr(settings, "redis_key_prefix", "stratax") or "stratax").strip() or "stratax"
+        return f"{prefix}:cache:mermaid:{ck}"
+
     for label, attempt_code in attempts:
         ck = _attempt_cache_key(label, attempt_code)
+
+        # First-level cache: in-process LRU
         if ck in render_mermaid._cache:
             # LRU: mark as recently used
             try:
                 render_mermaid._cache.move_to_end(ck)
             except Exception:
                 pass
-            logger.debug(f"✅ Cache hit for diagram {ck[:8]} ({label})")
+            logger.debug(f"✅ Cache hit (local) for diagram {ck[:8]} ({label})")
             return Response(
                 content=render_mermaid._cache[ck],
                 media_type="image/svg+xml",
                 headers={"Cache-Control": "public, max-age=3600"}
             )
+
+        # Second-level cache: Redis (shared across workers/instances)
+        if redis is not None:
+            try:
+                cached_svg = await redis.get(_redis_cache_key(ck))
+            except Exception:
+                cached_svg = None
+
+            if cached_svg:
+                try:
+                    render_mermaid._cache[ck] = cached_svg
+                    render_mermaid._cache.move_to_end(ck)
+                except Exception:
+                    pass
+                logger.debug(f"✅ Cache hit (redis) for diagram {ck[:8]} ({label})")
+                return Response(
+                    content=cached_svg,
+                    media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=3600"}
+                )
 
     # Decide renderer strategy based on size
     svg = None
@@ -559,6 +594,15 @@ async def render_mermaid(payload: dict):
             render_mermaid._cache.move_to_end(cache_key)
         except Exception:
             pass
+
+        if redis is not None:
+            try:
+                ttl = int(getattr(settings, "redis_cache_ttl_seconds", 3600) or 3600)
+                ttl = max(60, ttl)
+                await redis.set(_redis_cache_key(cache_key), svg, ex=ttl)
+            except Exception:
+                # Fail-open: never break diagram rendering if Redis is down
+                pass
     else:
         cache_key = "nocache"
     

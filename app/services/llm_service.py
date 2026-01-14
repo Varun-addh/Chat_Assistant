@@ -49,6 +49,10 @@ CODE_FORWARD_PROMPT = (
     "- Process these classifications internally but do NOT display them to the user\n"
     "- Start your response DIRECTLY with the bullet points - no title, no heading, no 'Complete Answer' label\n"
     "- Jump straight into the 4-8 bullet points as described in the CORE RESPONSE STRUCTURE below\n\n"
+	"BULLET FORMAT (VERY IMPORTANT):\n"
+	"- For ALL bullet lists, use Markdown hyphen bullets only: '- ' (dash + space)\n"
+	"- Put EACH bullet on its own line (do not inline multiple bullets on one line)\n"
+	"- Do NOT use '+' as a bullet marker and do NOT separate bullets with ' + ' on the same line\n\n"
 
 "INTENT ROUTING (MANDATORY - INTERNAL ONLY):\n"
 "- First, classify the user's query into exactly one mode: Technical_Concept | Coding_Implementation | Behavioral_Interview | System_Design | Strategic_Career | Clarification.\n"
@@ -1689,8 +1693,48 @@ class LLMService:
 		# Fix unclosed bold tags near colons: "**Label: value" -> "**Label:** value"
 		# Matches: **Text: (without closing **)
 		text = re.sub(r'(\*\*[^*\n]+:)(?!\*\*)', r'\1**', text)
-		
+
 		return text
+
+	def _split_runon_plus_bullets(self, text: str) -> str:
+		"""Split run-on '+ ' bullets that appear on a single line.
+
+		Some models occasionally emit multiple bullets like:
+		  + Item A + Item B + Item C
+		which renders poorly in the UI. This normalizes them to:
+		  - Item A
+		  - Item B
+		  - Item C
+
+		We apply this only outside fenced code blocks and only when the line
+		*starts* with '+ ' and contains at least two '+ ' bullet segments.
+		"""
+		import re
+		lines = text.split('\n')
+		out: list[str] = []
+		in_code = False
+		for line in lines:
+			stripped = line.strip()
+			if stripped.startswith('```'):
+				in_code = not in_code
+				out.append(line)
+				continue
+			if in_code:
+				out.append(line)
+				continue
+
+			if stripped.startswith('+ ') and ' + ' in stripped:
+				# Capture repeated '+ <text>' segments on the same line.
+				segs = re.findall(r'(?:^|\s)(\+\s+[^+]+?)(?=(?:\s\+\s)|$)', stripped)
+				if len(segs) >= 2:
+					for seg in segs:
+						item = seg.strip()[2:].strip()  # drop leading '+ '
+						if item:
+							out.append(f"- {item}")
+					continue
+
+			out.append(line)
+		return '\n'.join(out)
 
 	def _format_response(self, text: str) -> str:
 		"""Return clean markdown for frontend rendering.
@@ -1746,6 +1790,7 @@ class LLMService:
 		if self._is_explanation_content(text):
 			# For explanation content, convert table-like markdown artifacts conservatively
 			text = self._clean_explanation_formatting(text)
+			text = self._split_runon_plus_bullets(text)
 			# Preserve bold emphasis for headings, side headings, and keywords
 			# Ensure headings are still bolded
 			text = self._format_headings_bold(text)
@@ -1767,6 +1812,8 @@ class LLMService:
 		text = self._format_headings_bold(text)
 		# Remove LaTeX math markers from non-code sections for readability
 		text = self._strip_latex_math(text)
+		# Split any run-on '+ ' bullets (rare, but ugly in chat UIs)
+		text = self._split_runon_plus_bullets(text)
 		# Sanitize Mermaid syntax to fix parse errors (must come before normalization)
 
 		text = self._sanitize_mermaid_syntax(text)

@@ -15,11 +15,15 @@ services:
       - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://stratax:stratax@postgres:5432/stratax}
       # Use Qdrant as a service (fixes local file-lock issues and enables multi-worker)
       - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+      # Redis (distributed rate limiting + shared caches)
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-stratax}
       # Multi-worker
       - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
     depends_on:
       - postgres
       - qdrant
+      - redis
     volumes:
       - ./app:/app/app
       - ./data/history:/app/data/history
@@ -64,7 +68,17 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
 
+  redis:
+    image: redis:7-alpine
+    container_name: interview_ast_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
 volumes:
   postgres_data:
   qdrant_data:
+  redis_data:
 

@@ -150,6 +150,16 @@ class Settings(BaseSettings):
 	fast_startup: bool = False
 	# Force-disable Interview Intelligence startup even if optional deps are installed.
 	disable_interview_intelligence: bool = False
+
+	# Redis (rate limiting + cross-worker caches)
+	# If REDIS_URL is set, rate limiting and selected caches can be backed by Redis,
+	# enabling safe multi-instance scaling.
+	redis_url: str | None = None  # env: REDIS_URL
+	redis_key_prefix: str = "stratax"  # env: REDIS_KEY_PREFIX
+	# If true (default), Redis outages should not take the API down; we fail-open.
+	redis_fail_open: bool = True  # env: REDIS_FAIL_OPEN
+	# TTL for shared caches (seconds)
+	redis_cache_ttl_seconds: int = 3600  # env: REDIS_CACHE_TTL_SECONDS
 	
 	# API Key Policy
 	require_user_api_key: bool = False  # If True, users MUST provide their own API key (server keys won't be used as fallback)

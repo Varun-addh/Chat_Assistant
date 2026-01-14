@@ -1,6 +1,7 @@
 import os
 import logging
 import re
+import asyncio
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 import hashlib
@@ -376,7 +377,7 @@ class LocalTTSService:
         
         # Run in executor with shorter timeout to avoid blocking
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             result = await asyncio.wait_for(
                 loop.run_in_executor(None, _generate),
                 timeout=5.0  # 5 second timeout (reduced from 10s)
@@ -419,7 +420,7 @@ class LocalTTSService:
                 return None
         
         # Run in executor
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _generate)
         
         if result and Path(result).exists():

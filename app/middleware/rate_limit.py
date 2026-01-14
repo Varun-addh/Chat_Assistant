@@ -10,6 +10,7 @@ import asyncio
 import logging
 from contextlib import suppress
 import uuid
+import hashlib
 from app.models import User, UserTier, TIER_QUOTAS
 from app.utils.demo_mode import (
     DEMO_ERROR_PAYLOAD,
@@ -189,8 +190,184 @@ class InMemoryRateLimiter:
                 return usage
 
 
+class RedisRateLimiter:
+    """Redis-backed fixed-window rate limiter.
+
+    Why fixed-window? It's fast and atomic with a small Lua script.
+    This is meant to make multi-worker and multi-instance deployments safe.
+
+    Behavior notes:
+    - We mimic InMemoryRateLimiter's public API.
+    - On Redis errors, we default to fail-open (configurable).
+    """
+
+    def __init__(self, *, redis_url: str, key_prefix: str = "stratax", fail_open: bool = True):
+        self.redis_url = (redis_url or "").strip()
+        self.key_prefix = (key_prefix or "stratax").strip() or "stratax"
+        self.fail_open = bool(fail_open)
+        self._redis = None
+        self._import_ok = False
+
+        try:
+            import redis.asyncio as redis_async  # type: ignore
+
+            self._redis = redis_async.from_url(self.redis_url, decode_responses=True)
+            self._import_ok = True
+        except Exception as e:
+            logger.warning("Redis rate limiter unavailable (falling back): %s", e)
+            self._redis = None
+            self._import_ok = False
+
+        # Atomic conditional increment script.
+        # - If current >= limit: return current (no increment)
+        # - Else: INCR and set EXPIRE on first hit
+        self._lua = (
+            "local current = redis.call('GET', KEYS[1]) "
+            "if not current then current = 0 end "
+            "if tonumber(current) >= tonumber(ARGV[1]) then return tonumber(current) end "
+            "local newv = redis.call('INCR', KEYS[1]) "
+            "if newv == 1 then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2])) end "
+            "return tonumber(newv)"
+        )
+
+    def start(self) -> None:
+        # No cleanup loop needed; Redis TTL handles expiry.
+        return
+
+    async def shutdown(self) -> None:
+        if not self._redis:
+            return
+        try:
+            await self._redis.close()
+        except Exception:
+            pass
+
+    def _endpoint_hash(self, endpoint: str) -> str:
+        ep = (endpoint or "").encode("utf-8", errors="ignore")
+        return hashlib.sha1(ep).hexdigest()
+
+    def _count_key(self, *, user_id: str, endpoint: str, window_seconds: int) -> str:
+        h = self._endpoint_hash(endpoint)
+        return f"{self.key_prefix}:rl:cnt:{user_id}:{h}:{int(window_seconds)}"
+
+    def _endpoints_set_key(self, *, user_id: str, window_seconds: int) -> str:
+        return f"{self.key_prefix}:rl:eps:{user_id}:{int(window_seconds)}"
+
+    async def check_rate_limit(
+        self,
+        user_id: str,
+        endpoint: str,
+        tier: UserTier,
+        window_minutes: int = 1440,
+        limit_override: Optional[int] = None,
+    ) -> Tuple[bool, int, int]:
+        """Check + conditionally consume one unit."""
+
+        # Get tier quota
+        tier_quota = TIER_QUOTAS.get(tier, TIER_QUOTAS[UserTier.FREE])
+        limit = limit_override if limit_override is not None else tier_quota["daily_api_calls"]
+
+        # Unlimited tier
+        if limit == -1:
+            return True, 0, -1
+
+        if not self._redis or not self._import_ok:
+            # If Redis isn't usable, fail-open by default.
+            if self.fail_open:
+                return True, 0, limit
+            return False, limit, limit
+
+        window_seconds = int(max(1, window_minutes * 60))
+        key = self._count_key(user_id=user_id, endpoint=endpoint, window_seconds=window_seconds)
+        set_key = self._endpoints_set_key(user_id=user_id, window_seconds=window_seconds)
+
+        try:
+            # Run atomic check+incr
+            new_count = await self._redis.eval(self._lua, 1, key, int(limit), int(window_seconds))
+
+            # Track endpoints used (for usage reporting) with the same TTL.
+            # This is best-effort; it does not affect the allow/deny decision.
+            try:
+                pipe = self._redis.pipeline()
+                pipe.sadd(set_key, endpoint)
+                pipe.expire(set_key, window_seconds)
+                await pipe.execute()
+            except Exception:
+                pass
+
+            allowed = int(new_count) <= int(limit)
+            return allowed, int(new_count), int(limit)
+        except Exception as e:
+            logger.warning("Redis rate limit error (fail_open=%s): %s", self.fail_open, e)
+            if self.fail_open:
+                return True, 0, int(limit)
+            return False, int(limit), int(limit)
+
+    async def get_usage(self, user_id: str, endpoint: str = None) -> Dict[str, int]:
+        """Get usage for endpoints tracked in the current known windows.
+
+        We avoid SCAN for safety/perf and instead maintain a set of endpoints
+        per user per window.
+        """
+
+        if not self._redis or not self._import_ok:
+            return {}
+
+        # We only use a small number of windows in this app.
+        windows = [DEMO_WINDOW_MINUTES * 60, 86400]
+
+        async def _get_for_window(ws: int) -> Dict[str, int]:
+            set_key = self._endpoints_set_key(user_id=user_id, window_seconds=ws)
+            eps = []
+            try:
+                eps = await self._redis.smembers(set_key)
+            except Exception:
+                eps = []
+
+            if endpoint:
+                eps = [endpoint] if endpoint in eps else [endpoint]
+
+            if not eps:
+                return {}
+
+            pipe = self._redis.pipeline()
+            for ep in eps:
+                pipe.get(self._count_key(user_id=user_id, endpoint=ep, window_seconds=ws))
+            vals = await pipe.execute()
+
+            out: Dict[str, int] = {}
+            for ep, v in zip(eps, vals):
+                try:
+                    if v is None:
+                        continue
+                    out[str(ep)] = int(v)
+                except Exception:
+                    continue
+            return out
+
+        merged: Dict[str, int] = {}
+        for ws in windows:
+            try:
+                part = await _get_for_window(int(ws))
+            except Exception:
+                part = {}
+            for k, v in part.items():
+                # Prefer the larger count if the same endpoint appears in multiple windows
+                merged[k] = max(int(merged.get(k, 0)), int(v))
+
+        return merged
+
+
 # Global rate limiter instance
-rate_limiter = InMemoryRateLimiter()
+_redis_url = (getattr(settings, "redis_url", None) or "").strip()
+if _redis_url:
+    rate_limiter = RedisRateLimiter(
+        redis_url=_redis_url,
+        key_prefix=getattr(settings, "redis_key_prefix", "stratax"),
+        fail_open=bool(getattr(settings, "redis_fail_open", True)),
+    )
+else:
+    rate_limiter = InMemoryRateLimiter()
 
 
 async def rate_limit_middleware(request: Request, call_next):
@@ -218,6 +395,10 @@ async def rate_limit_middleware(request: Request, call_next):
         "/api/render_mermaid",
         "/api/sessions",
         "/api/session",
+        # Practice Mode dashboard endpoints are cheap DB reads and are frequently polled by UI.
+        # Never rate-limit these, especially for demo users.
+        "/api/practice/progress",
+        "/api/practice/insights",
     ]
 
     if any(path.startswith(p) for p in skip_paths):

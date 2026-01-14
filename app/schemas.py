@@ -333,6 +333,10 @@ class EvaluationReport(BaseModel):
 class PracticeSession(BaseModel):
 	"""Complete practice interview session."""
 	session_id: str = Field(..., description="Unique session identifier")
+	# Optional context for persistence/progress (backward-compatible)
+	user_profile: Optional[UserProfile] = Field(default=None, description="User profile used to generate questions")
+	difficulty: Optional[QuestionDifficulty] = Field(default=None, description="Difficulty level used for this session")
+	round_type: Optional[InterviewRound] = Field(default=None, description="Interview round practiced (if any)")
 	started_at: datetime = Field(default_factory=datetime.utcnow)
 	last_activity_at: datetime = Field(default_factory=datetime.utcnow)
 	completed_at: Optional[datetime] = None
@@ -493,6 +497,32 @@ class NextQuestionResponse(BaseModel):
 	complete: bool = Field(default=False, description="True if interview is complete")
 	evaluation_report: Optional[EvaluationReport] = Field(None, description="Final evaluation if complete")
 	progress: str = Field(..., description="Updated progress (e.g., '3/5')")
+
+
+class PracticeProgressSummaryResponse(BaseModel):
+	"""High-level progress rollup for the flagship practice loop."""
+	attempts: int = Field(..., ge=0)
+	average_overall_score: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+	last_completed_at: Optional[datetime] = None
+	best_dimension: Optional[str] = None
+	worst_dimension: Optional[str] = None
+
+
+class PracticeHeatmapPoint(BaseModel):
+	"""One cell in a weekly x dimension heatmap."""
+	week_start: str = Field(..., description="ISO date (YYYY-MM-DD) for the Monday of the week")
+	dimension: str
+	avg_score: float = Field(..., ge=0.0, le=100.0)
+	attempts: int = Field(..., ge=1)
+
+
+class PracticeHeatmapResponse(BaseModel):
+	points: List[PracticeHeatmapPoint] = Field(default_factory=list)
+
+
+class PracticeNextSessionRecommendationResponse(BaseModel):
+	"""Settings the client can use to start the next targeted session."""
+	plan: Optional[Dict[str, Any]] = None
 
 
 # Code Submission Models (for coding questions)

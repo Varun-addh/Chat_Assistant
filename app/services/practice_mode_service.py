@@ -224,6 +224,9 @@ class PracticeModeService:
             # Create session
             session = PracticeSession(
                 session_id=session_id,
+                user_profile=user_profile,
+                difficulty=difficulty,
+                round_type=round_type,
                 questions=questions,
                 company_name=user_profile.company_preference if user_profile else None,
                 current_question_index=0
@@ -568,11 +571,12 @@ class PracticeModeService:
             # Validate the acknowledged question matches current state
             if session.current_question_index != question_id - 1:
                 raise ValueError(f"Invalid question_id {question_id}. Current is {session.current_question_index + 1}")
-            
-            # Increment to next question index
-            session.current_question_index += 1
-            
-            # Check if already complete (after increment)
+
+            # NOTE: session.current_question_index represents the *last answered* question (0-based).
+            # The InterviewerAgent.get_next_question() already advances by +1, so we must NOT
+            # increment here (otherwise we skip a question: Q1 ack would jump to Q3).
+
+            # Check if already complete (last answered was the final question)
             is_complete = self.interviewer_agent.is_interview_complete(
                 session.current_question_index,
                 len(session.questions)

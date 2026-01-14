@@ -24,6 +24,9 @@ from app.schemas import (
     PracticeFeedbackRatedRequest,
     PracticeFeedbackRatedResponse,
     NextQuestionResponse,
+    PracticeProgressSummaryResponse,
+    PracticeHeatmapResponse,
+    PracticeNextSessionRecommendationResponse,
     InterviewRound,
     RoundConfig,
     RoundSelectionRequest,
@@ -36,6 +39,14 @@ from app.database import get_db_context
 from app.middleware.auth import get_user_id_from_request
 from app.utils.event_logging import track_event, stable_question_id, stable_hash
 from app.services.learning_loops import compute_practice_insights, merge_focus_areas
+from app.models import PracticeAttemptRecord
+from app.services.practice_progress import (
+    get_dimension_heatmap,
+    get_latest_next_session_plan,
+    get_progress_summary,
+    save_completed_attempt,
+)
+from app.services.practice_scoring import evaluation_report_to_json, score_session
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +122,32 @@ def _track_practice_event(
             )
     except Exception:
         pass
+
+
+def _persist_completed_practice_attempt(*, user_id: str, session_id: str) -> None:
+    """Persist completed attempt to DB (best-effort, background-safe)."""
+
+    try:
+        if not practice_service:
+            return
+
+        sess = practice_service.get_session(session_id)
+        if not sess or not getattr(sess, "is_complete", False):
+            return
+
+        with get_db_context() as db:
+            existing = (
+                db.query(PracticeAttemptRecord)
+                .filter(PracticeAttemptRecord.user_id == user_id)
+                .filter(PracticeAttemptRecord.session_id == session_id)
+                .first()
+            )
+            if existing:
+                return
+
+            save_completed_attempt(db, user_id=user_id, session=sess)
+    except Exception:
+        return
 
 
 def init_practice_mode(
@@ -231,6 +268,53 @@ async def get_practice_insights(
             domain=domain,
             lookback_days=lookback_days,
         )
+
+
+@router.get("/progress/summary", response_model=PracticeProgressSummaryResponse)
+async def get_progress_summary_endpoint(
+    http_request: Request,
+    domain: Optional[str] = Query(None, description="Optional domain filter"),
+    lookback_days: int = Query(30, ge=1, le=365),
+):
+    """Flagship loop: a tiny, fast summary suitable for a dashboard card."""
+
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+    with get_db_context() as db:
+        s = get_progress_summary(db, user_id=user_id, lookback_days=lookback_days, domain=domain)
+        return PracticeProgressSummaryResponse(
+            attempts=s.attempts,
+            average_overall_score=s.average_overall_score,
+            last_completed_at=s.last_completed_at,
+            best_dimension=s.best_dimension,
+            worst_dimension=s.worst_dimension,
+        )
+
+
+@router.get("/progress/heatmap", response_model=PracticeHeatmapResponse)
+async def get_progress_heatmap_endpoint(
+    http_request: Request,
+    domain: Optional[str] = Query(None, description="Optional domain filter"),
+    lookback_days: int = Query(90, ge=1, le=365),
+):
+    """Flagship loop: weekly x dimension trend points."""
+
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+    with get_db_context() as db:
+        points = get_dimension_heatmap(db, user_id=user_id, lookback_days=lookback_days, domain=domain)
+        return PracticeHeatmapResponse(points=points)
+
+
+@router.get("/progress/next-session", response_model=PracticeNextSessionRecommendationResponse)
+async def get_next_session_plan_endpoint(
+    http_request: Request,
+    domain: Optional[str] = Query(None, description="Optional domain filter"),
+):
+    """Flagship loop: latest recommended settings for the next targeted session."""
+
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+    with get_db_context() as db:
+        plan = get_latest_next_session_plan(db, user_id=user_id, domain=domain)
+        return PracticeNextSessionRecommendationResponse(plan=plan)
 
 
 @router.post("/interview/start-round", response_model=StartInterviewResponse)
@@ -676,6 +760,14 @@ async def submit_answer(
         # Add evaluation report if complete
         if "evaluation_report" in result:
             response.evaluation_report = result["evaluation_report"]
+
+        # Flagship loop: persist completed attempt for progress/trends (best-effort)
+        if bool(result.get("complete")) and bool(result.get("evaluation_report")):
+            background_tasks.add_task(
+                _persist_completed_practice_attempt,
+                user_id=user_id,
+                session_id=session_id,
+            )
         
         logger.info(f"Answer processed successfully for session {session_id}")
         return response
@@ -1065,6 +1157,76 @@ async def get_evaluation(
         raise
     except Exception as e:
         logger.error(f"Error getting evaluation: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/session/{session_id}/score")
+async def get_session_score(
+    session_id: str,
+    http_request: Request,
+):
+    """Get deterministic scoring for a Practice Mode session.
+
+    The frontend expects this endpoint after an interview completes.
+
+    Behavior:
+    - If the session is still in memory, compute score from the runtime session.
+    - Otherwise, fall back to the persisted PracticeAttemptRecord (if available).
+    """
+
+    try:
+        if not practice_service:
+            raise HTTPException(status_code=503, detail="Practice mode not initialized")
+
+        # Prefer runtime session (freshly completed sessions will be here).
+        session = practice_service.get_session(session_id)
+        if session:
+            score = score_session(session=session)
+            return {
+                "status": "success",
+                "source": "runtime",
+                "session_id": session_id,
+                "complete": bool(getattr(session, "is_complete", False)),
+                "overall_score": float(score.overall_score),
+                "dimension_scores": score.dimension_scores,
+                "why": score.why,
+                "improvement_plan": score.improvement_plan,
+                "next_session_plan": score.next_session_plan,
+                "evaluation_report": evaluation_report_to_json(getattr(session, "evaluation_report", None)),
+            }
+
+        # Fall back to persisted attempt (useful after refresh or session cleanup).
+        user_id = get_user_id_from_request(http_request) or "guest_unknown"
+        with get_db_context() as db:
+            q = db.query(PracticeAttemptRecord).filter(PracticeAttemptRecord.session_id == session_id)
+            # Avoid leaking across users if we have a stable user_id.
+            if user_id and user_id != "guest_unknown":
+                q = q.filter(PracticeAttemptRecord.user_id == user_id)
+            rec = q.first()
+
+        if not rec:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        return {
+            "status": "success",
+            "source": "db",
+            "session_id": session_id,
+            "complete": True,
+            "overall_score": rec.overall_score,
+            "dimension_scores": rec.dimension_scores,
+            "why": rec.why,
+            "improvement_plan": rec.improvement_plan,
+            "next_session_plan": rec.next_session_plan,
+            "evaluation_report": rec.evaluation_report,
+            "started_at": rec.started_at,
+            "completed_at": rec.completed_at,
+            "created_at": rec.created_at,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting session score: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

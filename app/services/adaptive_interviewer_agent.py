@@ -306,23 +306,21 @@ Format:
 SPEECH_QUALITY: <assessment>
 CONTENT_RELEVANCE: <assessment>"""
 
-            if api_key:
-                genai.configure(api_key=api_key)
+            # Provider-agnostic: use the shared llm_service (Groq/Gemini/etc)
+            from app.services.llm_service import llm_service
 
-            response = await asyncio.to_thread(
-                self.model.generate_content,
-                prompt,
-                generation_config={"temperature": 0.3, "max_output_tokens": 100},
-                safety_settings=self.safety_settings
+            text = await llm_service.generate_text(
+                prompt=prompt,
+                api_key=api_key,
+                json_mode=False,
+                temperature=0.2,
+                max_tokens=120,
             )
-            
-            # Check if response was blocked
-            if not response.text:
-                logger.warning("⚠️ Gemini response blocked in analyze_answer_quality, using fallback")
-                logger.warning(f"Safety ratings: {response.candidates[0].safety_ratings if response.candidates else 'N/A'}")
-                raise ValueError("Response blocked by safety filters")
-            
-            text = response.text.strip()
+
+            if not text:
+                raise ValueError("Empty LLM response")
+
+            text = text.strip()
             
             # Parse response
             speech_quality = "Good delivery"
@@ -614,11 +612,17 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
         
         text = text.strip()
         
-        # With JSON mode enabled, this should ALWAYS be valid JSON
-        # But keep basic extraction logic as fallback
-        match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            text = match.group(0)
+        # With JSON mode enabled, this should usually be valid JSON, but providers
+        # can still occasionally return extra trailing content. Extract the first
+        # balanced JSON array to avoid "Extra data" parse errors.
+        extracted = self._extract_first_json_array(text)
+        if extracted:
+            text = extracted
+        else:
+            # Fallback: try to locate an array-looking block
+            match = re.search(r'\[.*\]', text, re.DOTALL)
+            if match:
+                text = match.group(0)
         
         try:
             # Direct parse - should work with JSON mode
@@ -631,6 +635,9 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
             
             # Try repair as fallback
             text = self._repair_json(text)
+            extracted = self._extract_first_json_array(text)
+            if extracted:
+                text = extracted
             try:
                 data = json.loads(text)
                 logger.info(f"✅ JSON repaired successfully after basic cleanup")
@@ -638,6 +645,9 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
                 # Last resort: aggressive repair
                 logger.warning(f"⚠️ Basic repair failed, trying aggressive repair")
                 text = self._aggressive_json_repair(text)
+                extracted = self._extract_first_json_array(text)
+                if extracted:
+                    text = extracted
                 try:
                     data = json.loads(text)
                     logger.info(f"✅ JSON repaired with aggressive method")
@@ -714,6 +724,56 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
             # Log the problematic response for debugging
             logger.debug(f"Problematic response (first 500 chars): {response[:500]}")
             return []
+
+    def _extract_first_json_array(self, text: str) -> Optional[str]:
+        """Extract the first balanced JSON array from text.
+
+        Handles common LLM failure modes:
+        - leading/trailing prose
+        - multiple arrays concatenated
+        - valid array followed by extra tokens ("Extra data" JSONDecodeError)
+
+        Returns the array substring (including brackets) or None.
+        """
+
+        if not text:
+            return None
+
+        start = text.find("[")
+        if start < 0:
+            return None
+
+        in_string = False
+        escape = False
+        depth = 0
+
+        for i in range(start, len(text)):
+            ch = text[i]
+
+            if in_string:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == "[":
+                depth += 1
+                continue
+            if ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+                continue
+
+        return None
     
     def _get_company_interview_style(self, company: str) -> str:
         """
@@ -982,7 +1042,7 @@ INTERVIEWER STYLE: Data engineer evaluating data infrastructure knowledge""",
         
         # STEP 7: Add missing commas between consecutive key-value pairs
         # Pattern: "key": "value" "nextkey": should be "key": "value", "nextkey":
-        text = re.sub(r'"\s+"([a-zA-Z_])":', r'", "\1":', text)
+        text = re.sub(r'"\s+"([a-zA-Z_][a-zA-Z0-9_]*)":', r'", "\1":', text)
         
         # STEP 8: Fix array elements without commas
         # Pattern: "text" } { should be "text" }, {
