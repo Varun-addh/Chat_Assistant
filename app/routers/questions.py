@@ -1037,7 +1037,7 @@ async def upload_profile(
 		elif filename.endswith(".docx") or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
 			# Handle Word documents (.docx)
 			try:
-				from docx import Document
+				from docx import Document  # type: ignore[import-not-found]
 				import io
 				doc = Document(io.BytesIO(data))
 				# Extract all paragraphs

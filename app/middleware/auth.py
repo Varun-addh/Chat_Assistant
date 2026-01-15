@@ -10,6 +10,7 @@ from fastapi import Request
 from typing import Optional
 import logging
 import hashlib
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,24 @@ def _looks_like_jwt(token: str) -> bool:
     """
     t = (token or "").strip()
     return t.count(".") == 2
+
+
+_GUEST_ID_COOKIE_NAME = "stratax_guest_id"
+_GUEST_ID_HEADER_CANDIDATES = (
+    "x-stratax-guest-id",
+    "x-client-id",
+)
+
+
+def _is_safe_guest_id(value: str) -> bool:
+    """Validate an identifier that will be used as a user_id and filesystem segment."""
+    v = (value or "").strip()
+    if not v:
+        return False
+    if len(v) > 64:
+        return False
+    # Allow simple, path-safe chars only.
+    return re.fullmatch(r"[A-Za-z0-9_\-]+", v) is not None
 
 
 def _extract_user_from_token(token: str):
@@ -68,6 +87,10 @@ async def user_auth_middleware(request: Request, call_next):
     """
     user = None
 
+    # If we generate/choose a guest id that should be persisted client-side,
+    # set it on the response after call_next.
+    guest_id_to_persist: Optional[str] = None
+
     def _get_client_ip() -> str:
         # Prefer proxy-aware header if present (first hop)
         xff = request.headers.get("x-forwarded-for")
@@ -81,6 +104,20 @@ async def user_auth_middleware(request: Request, call_next):
         return "unknown"
 
     def _guest_user_id() -> str:
+        nonlocal guest_id_to_persist
+
+        # 1) Prefer explicit client-provided stable id (for SPAs / cross-origin clients).
+        for header_name in _GUEST_ID_HEADER_CANDIDATES:
+            h = request.headers.get(header_name)
+            if h and _is_safe_guest_id(h):
+                return h
+
+        # 2) Prefer cookie-stored stable id (best for same-origin UI).
+        cookie_val = request.cookies.get(_GUEST_ID_COOKIE_NAME)
+        if cookie_val and _is_safe_guest_id(cookie_val):
+            return cookie_val
+
+        # 3) Backward-compatible fallback: hash IP + UA so existing histories remain reachable.
         # IMPORTANT:
         # - Do NOT use a single global "guest" bucket (it makes all guests share sessions/quota)
         # - Avoid storing raw IPs in session paths; hash to a short stable ID
@@ -89,7 +126,11 @@ async def user_auth_middleware(request: Request, call_next):
         ua = request.headers.get("user-agent", "")
         raw = f"{ip}|{ua}".encode("utf-8", errors="ignore")
         digest = hashlib.sha256(raw).hexdigest()[:16]
-        return f"guest_{digest}"
+        legacy = f"guest_{digest}"
+
+        # Persist this identifier so future requests don't depend on IP/UA.
+        guest_id_to_persist = legacy
+        return legacy
     
     # Check Authorization header (JWT token).
     # NOTE: Authorization may also contain an LLM API key for unauthenticated flows.
@@ -112,6 +153,33 @@ async def user_auth_middleware(request: Request, call_next):
         logger.debug("Guest request (unauthenticated)")
     
     response = await call_next(request)
+
+    # If this was a guest request and we don't yet have a stable id persisted,
+    # set a cookie (and a header for easier debugging / SPA integration).
+    if user is None:
+        if guest_id_to_persist and _is_safe_guest_id(guest_id_to_persist):
+            try:
+                secure = (request.url.scheme or "").lower() == "https"
+                response.set_cookie(
+                    key=_GUEST_ID_COOKIE_NAME,
+                    value=guest_id_to_persist,
+                    max_age=60 * 60 * 24 * 365,  # 1 year
+                    httponly=True,
+                    samesite="lax",
+                    secure=secure,
+                    path="/",
+                )
+                response.headers["X-Stratax-Guest-Id"] = guest_id_to_persist
+            except Exception:
+                # Never fail the request just because we couldn't set a cookie.
+                pass
+        else:
+            # If we didn't persist a legacy id (e.g., client already supplied one),
+            # still echo the resolved id for easier client-side adoption.
+            resolved = getattr(request.state, "user_id", None)
+            if isinstance(resolved, str) and _is_safe_guest_id(resolved):
+                response.headers["X-Stratax-Guest-Id"] = resolved
+
     return response
 
 

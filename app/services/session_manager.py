@@ -316,29 +316,39 @@ class SessionManager:
 				return []
 		# Reload from disk first to catch sessions created/updated by other workers
 		self._load_all()
-		
-		# 🧹 CLEANUP: Delete old empty sessions from disk and memory
-		sessions_to_delete = []
-		for session_id, s in self._sessions.items():
-			has_content = (s.qna and len(s.qna) > 0) or s.custom_title or s.profile_text
-			is_recent = (utcnow() - s.last_update).total_seconds() < 300  # 5 minutes
+
+		# NOTE: Do not auto-delete sessions by default.
+		# Users expect chat history to persist until manual delete.
+		# If you want the old behavior (delete old empty sessions), enable:
+		# STRATAX_CLEANUP_EMPTY_SESSIONS=1
+		cleanup_empty = (os.getenv("STRATAX_CLEANUP_EMPTY_SESSIONS", "0") or "0").strip().lower() in (
+			"1",
+			"true",
+			"yes",
+		)
+		if cleanup_empty:
+			# 🧹 CLEANUP: Delete old empty sessions from disk and memory
+			sessions_to_delete = []
+			for session_id, s in self._sessions.items():
+				has_content = (s.qna and len(s.qna) > 0) or s.custom_title or s.profile_text
+				is_recent = (utcnow() - s.last_update).total_seconds() < 300  # 5 minutes
+				
+				# Mark old empty sessions for deletion
+				if not has_content and not is_recent:
+					sessions_to_delete.append(session_id)
 			
-			# Mark old empty sessions for deletion
-			if not has_content and not is_recent:
-				sessions_to_delete.append(session_id)
-		
-		# Delete marked sessions from disk and memory
-		for session_id in sessions_to_delete:
-			session_path = self._session_path(session_id)
-			try:
-				if session_path.exists():
-					session_path.unlink()
-					print(f"🗑️ Deleted old empty session: {session_id}")
-			except Exception as e:
-				print(f"⚠️ Failed to delete session {session_id}: {e}")
-			# Remove from memory
-			if session_id in self._sessions:
-				del self._sessions[session_id]
+			# Delete marked sessions from disk and memory
+			for session_id in sessions_to_delete:
+				session_path = self._session_path(session_id)
+				try:
+					if session_path.exists():
+						session_path.unlink()
+						print(f"🗑️ Deleted old empty session: {session_id}")
+				except Exception as e:
+					print(f"⚠️ Failed to delete session {session_id}: {e}")
+				# Remove from memory
+				if session_id in self._sessions:
+					del self._sessions[session_id]
 		
 		items: List[dict] = []
 		for s in self._sessions.values():
