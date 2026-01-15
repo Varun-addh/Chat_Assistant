@@ -60,6 +60,11 @@ CODE_FORWARD_PROMPT = (
     "You are Stratax AI, an advanced AI Interview Assistant. Your goal is to help candidates prepare for technical and behavioral interviews "\
     "by providing professional, structured, and interview-ready answers in a clear and consistent format.\n\n"
 
+	"STYLE (IMPORTANT):\n"
+	"- Be conversational by default. Avoid sounding like a static brochure.\n"
+	"- Do NOT output generic onboarding sections like 'Introduction', 'How I Can Assist You', 'Getting Started', or 'Example Questions' unless the user explicitly asks what you can do.\n"
+	"- For greetings, name introductions, or small talk: reply in 1–2 sentences, no headings, no long lists.\n\n"
+
 	"IDENTITY & ATTRIBUTION (MANDATORY):\n"
 	"- You are Stratax AI (this application). Do NOT claim to be ChatGPT.\n"
 	"- If the user asks who built/developed/created Stratax or who developed you, answer clearly: 'Stratax AI was developed by Varun Bikkumalla (sole developer)'.\n"
@@ -747,6 +752,8 @@ class LLMService:
 		# Normalize common punctuation
 		for ch in ["!", ".", ","]:
 			q = q.replace(ch, "")
+		# Collapse repeated whitespace
+		q = re.sub(r"\s+", " ", q).strip()
 		# Single/two-word salutations and courtesies
 		greetings = {
 			"hi", "hello", "hey", "yo", "hiya", "heya",
@@ -764,7 +771,29 @@ class LLMService:
 			"good morning", "good afternoon", "good evening",
 			"bye", "goodbye", "see you", "see ya",
 		]
-		return any(q.startswith(p) for p in prefixes)
+		if any(q.startswith(p) for p in prefixes):
+			return True
+
+		# Name introductions / role-confusion style openers (keep conservative)
+		name_intro_phrases = [
+			"my name is ",
+			"call me ",
+			"i am ",
+			"im ",
+			"i'm ",
+		]
+		assist_phrases = [
+			"how can i help you",
+			"how can i assist you",
+			"how may i help you",
+			"how may i assist you",
+		]
+		# Treat short name-intros and helper-offers as greetings
+		if any(p in q for p in assist_phrases):
+			return True
+		if any(q.startswith(p) for p in name_intro_phrases) and len(q.split()) <= 12:
+			return True
+		return False
 
 	def _is_off_topic(self, question: str) -> bool:
 		"""Detect if question is off-topic for interview preparation"""
@@ -852,6 +881,8 @@ class LLMService:
 			"- Do NOT start with any 'Complete Answer' bullets or a Summary.\n"
 			"- No headings. Respond briefly (one or two sentences) in a friendly tone.\n"
 			"- Acknowledge the greeting/thanks and offer help if appropriate.\n"
+			"- Do NOT output onboarding sections like 'Introduction', 'How I Can Assist You', 'Getting Started', or 'Example Questions'.\n"
+			"- If the user shares their name, address them by name and ask what they'd like to practice.\n"
 		)
 
 	def _off_topic_overrides(self) -> str:
@@ -1806,6 +1837,91 @@ class LLMService:
 			out.append(line)
 		return "\n".join(out).strip()
 
+	def _rewrite_onboarding_brochure_if_present(self, text: str) -> str:
+		"""Rewrite common brochure-style onboarding into a natural chat reply.
+
+		This targets the frequent pattern of:
+		- 'Introduction'
+		- 'How I Can Assist You'
+		- 'Getting Started'
+		- 'Example Questions'
+
+		We only rewrite when multiple of these markers appear, to avoid harming
+		legitimate content about introductions of a technical topic.
+		"""
+		if not text:
+			return ""
+
+		# Work only outside fenced code blocks.
+		lines = text.split("\n")
+		out: list[str] = []
+		in_code = False
+		for line in lines:
+			stripped = line.strip()
+			if stripped.startswith("```"):
+				in_code = not in_code
+				out.append(line)
+				continue
+			if in_code:
+				out.append(line)
+				continue
+			out.append(line)
+		text_no_code = "\n".join(out)
+
+		markers = [
+			"introduction",
+			"how i can assist you",
+			"getting started",
+			"example questions",
+			"some example questions",
+		]
+		hits = sum(1 for m in markers if m in text_no_code.lower())
+		if hits < 2:
+			return text
+
+		# Debrochureize: remove the generic section headings, keep the lead paragraph.
+		heading_re = re.compile(
+			r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*(introduction|how i can assist you|getting started|example questions|some example questions)\s*(?:\*\*)?\s*$",
+			flags=re.IGNORECASE,
+		)
+		clean_lines: list[str] = []
+		in_code = False
+		for line in text.split("\n"):
+			stripped = line.strip()
+			if stripped.startswith("```"):
+				in_code = not in_code
+				clean_lines.append(line)
+				continue
+			if in_code:
+				clean_lines.append(line)
+				continue
+			# Drop brochure headings (keep everything else)
+			if heading_re.match(stripped):
+				continue
+			clean_lines.append(line)
+
+		# Extract lead paragraph (first non-empty block)
+		lead_lines: list[str] = []
+		for line in clean_lines:
+			if not line.strip():
+				if lead_lines:
+					break
+				continue
+			lead_lines.append(line.strip())
+		lead = " ".join(lead_lines).strip()
+		# If the lead is huge, keep just the first sentence-ish chunk.
+		if len(lead) > 260:
+			m = re.split(r"(?<=[.!?])\s+", lead, maxsplit=1)
+			lead = (m[0] if m else lead[:260]).strip()
+		if not lead:
+			lead = "Got it."
+
+		# Add a single, natural follow-up question.
+		follow_up = "What would you like to practice next—coding, system design, behavioral, or interview strategy?"
+		if lead.endswith("?"):
+			return lead
+		return f"{lead} {follow_up}"
+
 	def _format_response(self, text: str) -> str:
 		"""Return clean markdown for frontend rendering.
 
@@ -1893,6 +2009,9 @@ class LLMService:
 		
 		# Final cleanup for broken markdown syntax
 		text = self._fix_markdown_syntax(text)
+
+		# Guard: rewrite brochure-style onboarding into a natural chat reply.
+		text = self._rewrite_onboarding_brochure_if_present(text)
 
 		# Final guardrail: strip any accidental system-prompt leakage.
 		text = self._strip_internal_prompt_leakage(text)
