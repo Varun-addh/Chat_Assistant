@@ -376,6 +376,35 @@ def _detect_language_from_code(line: str) -> str:
     # Default to Python (most common in data science/ML)
     return 'python'
 
+
+def _unescape_common_whitespace_sequences(text: str) -> str:
+    """Convert common escaped whitespace sequences into real whitespace.
+
+    Some upstream providers return code/explanations with literal "\\n" and "\\t"
+    characters instead of actual newlines/tabs. That breaks markdown rendering.
+
+    Heuristic: only unescape when the string contains escaped newlines but no real
+    newlines (i.e., it looks like a single-line payload).
+    """
+
+    s = text or ""
+    if not s:
+        return s
+
+    # Only convert when it appears to be an escaped single-line blob.
+    if "\\n" in s and "\n" not in s:
+        # Handle common variants first
+        s = s.replace("\\r\\n", "\n")
+        s = s.replace("\\n", "\n")
+        # Occasionally strings contain escaped carriage returns too
+        s = s.replace("\\r", "")
+
+    # Convert tabs only when there are now real newlines (typical code formatting)
+    if "\\t" in s and "\t" not in s and "\n" in s:
+        s = s.replace("\\t", "\t")
+
+    return s
+
 def format_coding_answer_for_interview_tab(
     answer: str,
     code_solution: Optional[str],
@@ -390,10 +419,11 @@ def format_coding_answer_for_interview_tab(
     """
     if not is_coding:
         # For non-coding questions, still apply auto-formatting for any code examples
-        formatted = auto_format_code_blocks(answer or "")
+        formatted = auto_format_code_blocks(_unescape_common_whitespace_sequences(answer or ""))
         return formatted
     
-    text = (answer or "").strip()
+    text = _unescape_common_whitespace_sequences((answer or "").strip())
+    code_solution = _unescape_common_whitespace_sequences((code_solution or "").strip()) or None
     if not text and not code_solution:
         return ""
     
