@@ -1016,8 +1016,18 @@ async def search_questions(
 
     api_key = gemini_key if gemini_key else groq_key
 
+    # Demo-mode detection: no auth + no user-provided key.
+    user_key = extract_user_provided_api_key(
+        request,
+        x_api_key=x_api_key,
+        x_gemini_key=x_gemini_key,
+        authorization=authorization,
+    )
+    is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
+
     # If the server is configured to require user API keys, do NOT fall back to server keys.
-    if settings.require_user_api_key and not api_key:
+    # (Demo mode is handled separately via demo key pool / Groq server key.)
+    if settings.require_user_api_key and not api_key and not is_demo:
         raise HTTPException(
             status_code=401,
             detail=(
@@ -1027,19 +1037,40 @@ async def search_questions(
             ),
         )
 
-    # Fallback to dev keys only in permissive mode
+    # Fallback to server keys only when user provided no keys.
     if not api_key:
-        api_key = settings.gemini_api_key or settings.groq_api_key
+        if is_demo:
+            # DEMO PATH: always prefer Groq (cost-capped) and never fall back to Gemini.
+            if settings.is_demo_key_pool_enabled():
+                try:
+                    from app.services.demo_key_pool import demo_key_pool
+                    demo_key = demo_key_pool.get_key()
+                    if demo_key and demo_key.startswith("gsk_"):
+                        api_key = demo_key
+                except Exception:
+                    # Fall back to env Groq key below
+                    pass
+
+            if not api_key and settings.groq_api_key:
+                api_key = settings.groq_api_key
+
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
+        else:
+            # REGISTERED PATH: use effective provider selection
+            effective = settings.get_effective_provider(feature="default")
+            if effective == "gemini" and settings.gemini_api_key:
+                api_key = settings.gemini_api_key
+            elif effective == "groq" and settings.groq_api_key:
+                api_key = settings.groq_api_key
+            else:
+                api_key = settings.gemini_api_key or settings.groq_api_key
 
     # Demo-mode clamp: keep demo responses small/cost-capped.
-    # Demo is inferred as: no authenticated user AND no user-provided LLM key.
-    user_key = extract_user_provided_api_key(
-        request,
-        x_api_key=x_api_key,
-        x_gemini_key=x_gemini_key,
-        authorization=authorization,
-    )
-    if infer_user_type(request, user_provided_key=user_key) == "demo":
+    if is_demo:
         limit = min(int(limit or 20), 2)
 
     try:
@@ -1081,8 +1112,18 @@ async def search_questions_post(
 
     api_key = gemini_key if gemini_key else groq_key
 
+    # Demo-mode detection: no auth + no user-provided key.
+    user_key = extract_user_provided_api_key(
+        request,
+        x_api_key=x_api_key,
+        x_gemini_key=x_gemini_key,
+        authorization=authorization,
+    )
+    is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
+
     # If the server is configured to require user API keys, do NOT fall back to server keys.
-    if settings.require_user_api_key and not api_key:
+    # (Demo mode is handled separately via demo key pool / Groq server key.)
+    if settings.require_user_api_key and not api_key and not is_demo:
         raise HTTPException(
             status_code=401,
             detail=(
@@ -1092,18 +1133,40 @@ async def search_questions_post(
             ),
         )
 
-    # Fallback to dev keys only in permissive mode
+    # Fallback to server keys only when user provided no keys.
     if not api_key:
-        api_key = settings.gemini_api_key or settings.groq_api_key
+        if is_demo:
+            # DEMO PATH: always prefer Groq (cost-capped) and never fall back to Gemini.
+            if settings.is_demo_key_pool_enabled():
+                try:
+                    from app.services.demo_key_pool import demo_key_pool
+                    demo_key = demo_key_pool.get_key()
+                    if demo_key and demo_key.startswith("gsk_"):
+                        api_key = demo_key
+                except Exception:
+                    # Fall back to env Groq key below
+                    pass
+
+            if not api_key and settings.groq_api_key:
+                api_key = settings.groq_api_key
+
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
+        else:
+            # REGISTERED PATH: use effective provider selection
+            effective = settings.get_effective_provider(feature="default")
+            if effective == "gemini" and settings.gemini_api_key:
+                api_key = settings.gemini_api_key
+            elif effective == "groq" and settings.groq_api_key:
+                api_key = settings.groq_api_key
+            else:
+                api_key = settings.gemini_api_key or settings.groq_api_key
 
     # Demo-mode clamp: keep demo responses small/cost-capped.
-    user_key = extract_user_provided_api_key(
-        request,
-        x_api_key=x_api_key,
-        x_gemini_key=x_gemini_key,
-        authorization=authorization,
-    )
-    if infer_user_type(request, user_provided_key=user_key) == "demo":
+    if is_demo:
         limit = min(int(limit or 20), 2)
 
     try:
@@ -1392,40 +1455,60 @@ async def get_supported_companies():
 
 @router.post("/community/submit")
 async def submit_community_question(
-	question: dict,
-	submitted_by: str = Query(..., description="Anonymous user ID")
+    question: dict,
+    submitted_by: str = Query(..., description="Anonymous user ID")
 ):
-	"""Submit a real interview question from the community"""
-	try:
-		from app.services.interview_sources import VerifiedQuestion as VQ, SourceType as ST, VerificationStatus as VS
-		vq = VQ(
-			question=question.get("question"),
-			answer=question.get("answer", ""),
-			topic=question.get("topic", "general"),
-			difficulty=question.get("difficulty", "medium"),
-			question_type=question.get("question_type", "technical"),
-			source_type=ST.COMMUNITY_VERIFIED,
-			verification_status=VS.LIKELY_REAL,
-			company=question.get("company"),
-			position=question.get("position"),
-			level=question.get("level"),
-			interview_round=question.get("interview_round"),
-			reported_count=1,
-			credibility_score=0.5
-		)
-		success = await enhanced_interview_service.source_manager.community.submit_question(vq, submitted_by)
-		if success:
-			return {
-				"status": "success",
-				"message": "Thank you for contributing! Your question will be reviewed.",
-				"question": question.get("question")[:100],
-				"credibility": 0.5,
-				"note": "Credibility will increase as others verify this question"
-			}
-		else:
-			raise HTTPException(status_code=500, detail="Failed to submit question")
-	except Exception as e:
-		raise HTTPException(status_code=400, detail=str(e))
+    """Submit a real interview question from the community"""
+    try:
+        from app.services.dynamic_interview_sources import (
+            VerifiedQuestion as VQ,
+            SourceType as ST,
+            VerificationStatus as VS,
+            QuestionDomain,
+        )
+
+        # Minimal domain mapping; defaults to general.
+        domain = QuestionDomain.GENERAL_TECHNICAL
+        question_type = (question.get("question_type") or "technical").lower()
+        topic = (question.get("topic") or "general").lower()
+        if "system" in question_type or "design" in question_type or "system" in topic:
+            domain = QuestionDomain.SYSTEM_DESIGN
+        elif "behavior" in question_type:
+            domain = QuestionDomain.BEHAVIORAL
+        elif "devops" in question_type or "docker" in topic or "kubernetes" in topic:
+            domain = QuestionDomain.DEVOPS
+        elif "ml" in question_type or "ai" in question_type or "ml" in topic or "ai" in topic:
+            domain = QuestionDomain.ML_AI
+
+        vq = VQ(
+            question=question.get("question"),
+            answer=question.get("answer", ""),
+            topic=question.get("topic", "general"),
+            difficulty=question.get("difficulty", "medium"),
+            question_type=question.get("question_type", "technical"),
+            domain=domain,
+            source_type=ST.COMMUNITY_VERIFIED,
+            verification_status=VS.LIKELY_REAL,
+            company=question.get("company"),
+            position=question.get("position"),
+            level=question.get("level"),
+            interview_round=question.get("interview_round"),
+            reported_count=1,
+            credibility_score=0.5,
+            submitted_by=submitted_by,
+        )
+        success = await enhanced_interview_service.source_manager.community.submit_question(vq, submitted_by)
+        if success:
+            return {
+                "status": "success",
+                "message": "Thank you for contributing! Your question will be reviewed.",
+                "question": (question.get("question") or "")[:100],
+                "credibility": 0.5,
+                "note": "Credibility will increase as others verify this question",
+            }
+        raise HTTPException(status_code=500, detail="Failed to submit question")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/transparency")

@@ -38,6 +38,7 @@ class QuestionDomain(str, Enum):
 class SourceType(str, Enum):
     """Source types with credibility"""
     GITHUB_CURATED = "github_curated"
+    COMMUNITY_VERIFIED = "community_verified"
     LLM_GENERATED = "llm_generated"
 
 
@@ -78,8 +79,48 @@ class VerifiedQuestion(BaseModel):
     credibility_score: float = Field(default=0.5, ge=0.0, le=1.0)
     frequency_score: float = Field(default=1.0, ge=0.0, le=10.0)
     created_at: datetime = Field(default_factory=utcnow)
+
+    # Community submission metadata (optional)
+    position: Optional[str] = None
+    level: Optional[str] = None
+    interview_round: Optional[str] = None
+    reported_count: int = Field(default=0, ge=0)
+    submitted_by: Optional[str] = None
     
     model_config = ConfigDict(use_enum_values=True)
+
+
+# ==========================================================================
+# COMMUNITY SUBMISSIONS
+# ==========================================================================
+
+class CommunityQuestionStore:
+    """Minimal persistence for community-submitted questions.
+
+    Keeps the API endpoint functional without requiring a DB migration.
+    """
+
+    def __init__(self):
+        from pathlib import Path
+
+        self._path = Path("data/interview_intelligence_v2") / "community_submissions.jsonl"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = asyncio.Lock()
+
+    async def submit_question(self, vq: VerifiedQuestion, submitted_by: str) -> bool:
+        try:
+            payload = vq.model_dump(mode="json")
+            payload["submitted_by"] = submitted_by
+            payload["submitted_at"] = utcnow().isoformat()
+
+            async with self._lock:
+                with self._path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to store community submission: {e}")
+            return False
 
 
 # ============================================================================
@@ -326,6 +367,7 @@ class DynamicUnifiedSourceManager:
     
     def __init__(self):
         self.router = QueryRouter()
+        self.community = CommunityQuestionStore()
     
     async def search_verified_questions(
         self,
