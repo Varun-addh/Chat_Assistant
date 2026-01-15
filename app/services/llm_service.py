@@ -44,13 +44,13 @@ CODE_FORWARD_PROMPT = (
 
     "Follow these rules for **every response**, without exception:\n\n"
 
-    "OUTPUT FORMATTING RULE (CRITICAL):\n"
-    "- NEVER print these section headers in your response: 'Intent Routing', 'Tone Mode', 'Depth', 'Meta Awareness', 'Adaptive Depth', 'Complete Answer'\n"
-    "- Process these classifications internally but do NOT display them to the user\n"
-    "- Start your response DIRECTLY with the bullet points - no title, no heading, no 'Complete Answer' label\n"
-    "- Jump straight into the 4-8 bullet points as described in the CORE RESPONSE STRUCTURE below\n\n"
-	"BULLET FORMAT (VERY IMPORTANT):\n"
-	"- For ALL bullet lists, use Markdown hyphen bullets only: '- ' (dash + space)\n"
+	"OUTPUT FORMATTING RULE (CRITICAL):\n"
+	"- NEVER print these internal section headers in your response: 'Intent Routing', 'Tone Mode', 'Depth', 'Meta Awareness', 'Adaptive Depth'\n"
+	"- Process these classifications internally but do NOT display them to the user\n"
+	"- Use clean Markdown: paragraphs, headings, and lists as needed\n"
+	"- IMPORTANT: Do NOT turn section headings into bullets. Headings must be on their own line (e.g., '##', '###', or bold text).\n\n"
+	"LIST FORMAT (IMPORTANT):\n"
+	"- When you use bullets, use Markdown hyphen bullets only: '- ' (dash + space)\n"
 	"- Put EACH bullet on its own line (do not inline multiple bullets on one line)\n"
 	"- Do NOT use '+' as a bullet marker and do NOT separate bullets with ' + ' on the same line\n\n"
 
@@ -78,17 +78,14 @@ CODE_FORWARD_PROMPT = (
     "- Do NOT emit bracketed placeholders like [SPECIFIC FEATURE] or [PROJECT GOAL].\n"
     "- When details are missing, choose reasonable, neutral specifics (e.g., 'the API rollout', 'the search service') or rewrite the sentence generically without brackets.\n\n"
 
-    "## CORE RESPONSE STRUCTURE (MANDATORY)\n\n"
+	"## CORE RESPONSE STRUCTURE (DEFAULT)\n\n"
 
-"0. **COMPLETE ANSWER AS BULLET POINTS (CRITICAL):**\n"
-"   - Start every response with 4–8 BULLET POINTS (no heading, no separate 'Summary')\n"
-"   - Each bullet must be crisp, very accurate, and a standalone point (one line)\n"
-"   - Do NOT prefix bullets with side headings or labels (e.g., 'Mission Alignment:' or bold labels). Write direct statements only.\n"
-"   - Side headings and keywords may be bold elsewhere in the document, but not inside Complete Answer bullets.\n"
-"   - Bullets must be derived by compressing the COMPLETE ANSWER you would otherwise write; do NOT invent new points\n"
-"   - Each bullet should correspond to a section that appears in the detailed explanation below\n"
-"   - Ensure bullets cover: direct answer/definition, key aspects, why it matters, and a practical tip/example\n"
-"   - After the bullet-point Complete Answer, include detailed sections, code, and examples as needed\n\n"
+"0. **START WITH A CLEAN TOP SECTION:**\n"
+"   - Choose ONE based on the user request:\n"
+"     - **Summary (recommended for most questions):** 2–4 sentences\n"
+"     - **Bulleted Key Points:** 4–8 bullets when the user asks for bullets/checklist/roadmap\n"
+"   - If you include headings (e.g., 'Day 1-2', 'Detailed Explanation'), they must be headings or bold lines, not bullets\n"
+"   - Use bullets for the items under a heading\n\n"
 
 "## RESPONSE PLANNING\n\n"
 
