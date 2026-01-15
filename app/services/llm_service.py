@@ -10,10 +10,34 @@ except Exception:
 from app.config import settings
 import logging
 import json
+import re
 
 from app.services.demo_key_pool import demo_key_pool
 
 logger = logging.getLogger(__name__)
+
+
+_INTERNAL_LEAK_MARKERS = (
+	"identity & attribution",
+	"output formatting rule",
+	"bullet format",
+	"list format",
+	"intent routing",
+	"voice mode",
+	"meta awareness",
+	"adaptive depth",
+	"context & memory",
+	"placeholder policy",
+	"core response structure",
+	"response planning",
+	"question type templates",
+	"response style rules",
+	"adaptive response policy",
+	"code response modes",
+	"code quality standards",
+	"analyze before responding",
+	"response length guidelines",
+)
 
 
 def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
@@ -1733,6 +1757,55 @@ class LLMService:
 			out.append(line)
 		return '\n'.join(out)
 
+	def _is_internal_prompt_leak_line(self, line: str) -> bool:
+		"""Best-effort detection of system-prompt leakage.
+
+		We only filter highly-specific internal headings/instructions that should
+		never be shown to the user.
+		"""
+		s = (line or "").strip()
+		if not s:
+			return False
+
+		# Normalize common markdown prefixes (headings, quotes, list markers, numbering, bold).
+		# Keep this conservative to avoid removing real content.
+		norm = re.sub(r"^\s*(?:[>#\-*]+\s*)?(?:\d+\.?\s*)?", "", s)
+		norm = norm.strip()
+		if norm.startswith("**"):
+			norm = norm.strip("*")
+		norm_lower = norm.lower().strip()
+
+		if "internal only" in norm_lower:
+			return True
+		if "mandatory - internal only" in norm_lower:
+			return True
+
+		return any(marker in norm_lower for marker in _INTERNAL_LEAK_MARKERS)
+
+	def _strip_internal_prompt_leakage(self, text: str) -> str:
+		"""Remove internal instruction headings that a model may accidentally echo.
+
+		Skips fenced code blocks entirely.
+		"""
+		if not text:
+			return ""
+		lines = text.split("\n")
+		out: list[str] = []
+		in_code = False
+		for line in lines:
+			stripped = line.strip()
+			if stripped.startswith("```"):
+				in_code = not in_code
+				out.append(line)
+				continue
+			if in_code:
+				out.append(line)
+				continue
+			if self._is_internal_prompt_leak_line(line):
+				continue
+			out.append(line)
+		return "\n".join(out).strip()
+
 	def _format_response(self, text: str) -> str:
 		"""Return clean markdown for frontend rendering.
 
@@ -1820,7 +1893,10 @@ class LLMService:
 		
 		# Final cleanup for broken markdown syntax
 		text = self._fix_markdown_syntax(text)
-		
+
+		# Final guardrail: strip any accidental system-prompt leakage.
+		text = self._strip_internal_prompt_leakage(text)
+
 		return text
 
 
@@ -3390,6 +3466,9 @@ class LLMService:
 			# Note: This handles the common case where tags arrive in chunks. 
 			# Complex splitting (e.g. <th...ink>) is rare and acceptable transiently.
 			inside_think = False
+			# Stream-time leakage filter: buffer partial lines to reliably strip
+			# internal prompt headings before sending to the client.
+			carry = ""
 			
 			for chunk in stream:
 				piece = getattr(chunk.choices[0].delta, "content", None) or ""
@@ -3404,10 +3483,27 @@ class LLMService:
 					inside_think = False
 				
 				if piece:
-					yield piece
+					combined = carry + piece
+					parts = combined.splitlines(True)
+					carry = ""
+					if parts and not parts[-1].endswith(("\n", "\r")):
+						carry = parts.pop()
+					out_parts: list[str] = []
+					for seg in parts:
+						line = seg.rstrip("\r\n")
+						if self._is_internal_prompt_leak_line(line):
+							continue
+						out_parts.append(seg)
+					emit = "".join(out_parts)
+					if emit:
+						yield emit
 				# Track finish reason to detect truncation
 				if hasattr(chunk.choices[0], 'finish_reason') and chunk.choices[0].finish_reason:
 					finish_reason = chunk.choices[0].finish_reason
+
+			# Flush any remaining partial line (only if it isn't leakage)
+			if carry and not self._is_internal_prompt_leak_line(carry):
+				yield carry
 			
 			# If response was truncated, append a clear user-friendly notice
 			if finish_reason == "length":

@@ -51,6 +51,23 @@ class SessionManager:
 		self._last_created_session_id: Optional[str] = None
 		self._debounce_window_seconds: float = 1.0  # Prevent duplicate sessions within 1 second
 
+	async def ensure_session(self, session_id: str) -> SessionState:
+		"""Ensure a session exists with the provided session_id.
+
+		This is used to keep session selection isolated: if the
+		frontend navigates to a known session_id, we should never silently write
+		that conversation into some other 'most recent' session.
+		"""
+		async with self._lock:
+			state = self._sessions.get(session_id)
+			if state is not None:
+				return state
+			state = SessionState(session_id=session_id)
+			self._sessions[session_id] = state
+			# Persist immediately so refresh/session navigation works reliably.
+			self._save(state, force=True)
+			return state
+
 	def _session_path(self, session_id: str) -> Path:
 		return self._data_dir / f"{session_id}.json"
 

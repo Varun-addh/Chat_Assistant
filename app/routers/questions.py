@@ -332,21 +332,27 @@ async def submit_question(
 		try:
 			state = await manager.get(payload.session_id)
 			if state is None:
-				# Auto-recovery: prefer reusing the most recent session if it was updated recently.
+				# ChatGPT-like isolation: never silently route a selected session_id
+				# into some other 'most recent' session.
 				recovered_from_session_id = payload.session_id
-				recent = await _get_most_recent_session()
-				if recent is not None:
-					state = recent
-					payload.session_id = state.session_id
-					reused_existing_session = True
-					logger.info(
-						f"Session {recovered_from_session_id} not found. Reusing most recent session {state.session_id}"
-					)
+
+				# For guests only: earlier builds stored sessions under "guest_unknown".
+				# If the user_id changed (stable guest id rollout), migrate the session.
+				if user_id.startswith("guest_") and user_id != "guest_unknown":
+					legacy = get_session_manager("guest_unknown")
+					legacy_state = await legacy.get(payload.session_id)
+					if legacy_state is not None:
+						manager._sessions[payload.session_id] = legacy_state  # type: ignore[attr-defined]
+						manager._save(legacy_state, force=True)  # type: ignore[attr-defined]
+						await legacy.delete_session(payload.session_id)
+						response.headers["X-Stratax-Session-Legacy-Migrated"] = "1"
+						state = legacy_state
+					else:
+						state = await manager.ensure_session(payload.session_id)
+						response.headers["X-Stratax-Session-Ensured"] = "1"
 				else:
-					logger.info(f"Session {recovered_from_session_id} not found. Creating new session for recovery.")
-					state = await manager.create_session()
-					payload.session_id = state.session_id
-					logger.info(f"Auto-created new session: {state.session_id} (recovered from {recovered_from_session_id})")
+					state = await manager.ensure_session(payload.session_id)
+					response.headers["X-Stratax-Session-Ensured"] = "1"
 		except KeyError:
 			# Fallback: create new session
 			recovered_from_session_id = payload.session_id
