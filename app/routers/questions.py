@@ -13,12 +13,19 @@ from app.schemas import (
 	QnA, 
 	SessionList, 
 	SessionSummary, 
-	UpdateSessionTitleRequest
+	UpdateSessionTitleRequest,
+	MirrorFeedbackIn,
+	MirrorFeedbackOut,
 )
 from app.services.session_manager import get_session_manager, SessionManager, SessionState
 from app.services.llm_service import get_llm_service
 from app.services.architecture_generator import get_architecture_generator, ArchitectureViewType
 from app.services.code_evaluation_service import evaluate_code
+from app.services.mirror_compare import (
+	compute_mirror_progress,
+	find_previous_mirror_attempt,
+	format_mirror_progress_markdown,
+)
 from app.utils.security import verify_api_key
 from app.utils.audit import auditor
 from app.config import settings
@@ -41,6 +48,49 @@ logger = logging.getLogger(__name__)
 llm_service = get_llm_service(feature="copilot")
 
 router = APIRouter()
+
+
+@router.post("/mirror/feedback", response_model=MirrorFeedbackOut)
+async def mirror_feedback(payload: MirrorFeedbackIn, request: Request):
+	"""Collect explicit user feedback for Mirror Mode outputs.
+
+	This is intentionally lightweight: it logs to the existing audit + event logging
+	systems so you can build a quality dataset over time.
+	"""
+	user_id = get_user_id_from_request(request) or "guest_unknown"
+
+	await auditor.log(
+		{
+			"type": "mirror_feedback",
+			"user_id": user_id,
+			"session_id": payload.session_id,
+			"question": payload.question,
+			"helpful": payload.helpful,
+			"flags": payload.flags,
+			"comment": payload.comment,
+		}
+	)
+
+	if getattr(settings, "enable_event_logging", True):
+		try:
+			with get_db_context() as db:
+				track_event(
+					db,
+					user_id=user_id,
+					session_id=payload.session_id,
+					event_type="chat_mirror_feedback",
+					question_text=payload.question,
+					extra={
+						"helpful": payload.helpful,
+						"flags": list(payload.flags or []),
+						"comment": payload.comment,
+						"has_report": bool(payload.report),
+					},
+				)
+		except Exception:
+			pass
+
+	return MirrorFeedbackOut(ok=True)
 
 
 def _validate_specificity(text: str, system_description: str) -> tuple[bool, list[str]]:
@@ -241,8 +291,20 @@ async def submit_question(
 	# 4. Fallback to server/env keys ONLY if user provided NO keys in Bridge Settings
 	if not api_key:
 		if is_demo:
-			# DEMO PATH: always prefer Groq
-			if settings.is_demo_key_pool_enabled():
+			# DEMO PATH: prefer Stratax demo keys (explicit list or single key),
+			# then the demo key pool (if enabled), and finally the developer GROQ key.
+			# 1) Explicit demo keys configured via STRATAX_DEMO_API_KEYS
+			if getattr(settings, "stratax_demo_api_keys", None):
+				keys = settings.stratax_demo_api_keys or []
+				if keys:
+					api_key = keys[0]
+					logger.info("🔧 [DEMO] Using configured STRATAX_DEMO_API_KEYS")
+			# 2) Single demo key via STRATAX_DEMO_API_KEY
+			elif getattr(settings, "stratax_demo_api_key", None):
+				api_key = settings.stratax_demo_api_key
+				logger.info("🔧 [DEMO] Using configured STRATAX_DEMO_API_KEY")
+			# 3) Demo key pool (rotating) if enabled
+			elif settings.is_demo_key_pool_enabled():
 				try:
 					from app.services.demo_key_pool import demo_key_pool
 					demo_key = demo_key_pool.get_key()
@@ -252,7 +314,7 @@ async def submit_question(
 				except Exception:
 					# Fall back to env Groq key below
 					pass
-
+			# 4) Finally, fall back to server GROQ_API_KEY (developer key)
 			if not api_key and settings.groq_api_key:
 				api_key = settings.groq_api_key
 				logger.info("🔧 [DEMO] Using environment GROQ_API_KEY")
@@ -348,10 +410,12 @@ async def submit_question(
 						response.headers["X-Stratax-Session-Legacy-Migrated"] = "1"
 						state = legacy_state
 					else:
-						state = await manager.ensure_session(payload.session_id)
+						state = await manager.create_session()
+						payload.session_id = state.session_id
 						response.headers["X-Stratax-Session-Ensured"] = "1"
 				else:
-					state = await manager.ensure_session(payload.session_id)
+					state = await manager.create_session()
+					payload.session_id = state.session_id
 					response.headers["X-Stratax-Session-Ensured"] = "1"
 		except KeyError:
 			# Fallback: create new session
@@ -384,7 +448,10 @@ async def submit_question(
 					extra={
 						"stream": bool(payload.stream),
 						"saved_to_history": bool(payload.save_to_history),
+						"mode": getattr(payload, "mode", None),
+						"has_user_answer": bool(getattr(payload, "user_answer", None)),
 						"architecture_mode": payload.architecture_mode,
+						"depth": getattr(payload, "depth", None),
 						"style_mode": getattr(payload, "style_mode", None),
 						"tone": getattr(payload, "tone", None),
 						"layout": getattr(payload, "layout", None),
@@ -493,6 +560,256 @@ async def submit_question(
 
 	# Read any stored profile for this session
 	profile_text = state.profile_text
+
+	# --- MIRROR MODE ---
+	mode = (getattr(payload, "mode", None) or "answer").strip().lower()
+	if mode == "mirror":
+		user_answer = (getattr(payload, "user_answer", None) or "").strip()
+		if not user_answer:
+			if getattr(settings, "enable_event_logging", True):
+				try:
+					with get_db_context() as db:
+						track_event(
+							db,
+							user_id=user_id,
+							session_id=payload.session_id,
+							event_type="chat_mirror_missing_user_answer",
+							question_text=payload.question,
+							extra={"stream": bool(payload.stream)},
+						)
+				except Exception:
+					pass
+			return AnswerOut(
+				answer="",
+				created_at=utcnow(),
+				truncated=False,
+				ui_action="collect_mirror_answer",
+				ui_payload={
+					"title": "Interview Mirror",
+					"message": "Paste your draft answer (in your own words). I’ll analyze gaps and follow-ups.",
+					"field": "user_answer",
+				},
+			)
+
+		if payload.stream:
+			async def _mirror_event_gen():
+				# Compute previous attempt before we append the new one.
+				prev_attempt = find_previous_mirror_attempt(
+					question=payload.question,
+					mirror_history=list(getattr(state, "mirror_history", []) or []),
+				)
+				prev_report = None
+				if isinstance(prev_attempt, dict):
+					pr = prev_attempt.get("report")
+					if isinstance(pr, dict):
+						prev_report = pr
+
+				md, truncated, report = await llm_service.generate_mirror_report_structured(
+					question=payload.question,
+					user_answer=user_answer,
+					depth=getattr(payload, "depth", None),
+					api_key=api_key,
+				)
+
+				progress_md = ""
+				progress_meta = None
+				if isinstance(prev_report, dict) and isinstance(report, dict):
+					try:
+						progress = compute_mirror_progress(prev_report, report)
+						progress_md = format_mirror_progress_markdown(progress)
+						progress_meta = {
+							"confidence_prev": progress.confidence_prev,
+							"confidence_curr": progress.confidence_curr,
+							"confidence_delta": progress.confidence_delta,
+							"gaps_closed": list(progress.gaps_closed),
+							"new_gaps": list(progress.new_gaps),
+							"new_strengths": list(progress.new_strengths),
+							"new_red_flags": list(progress.new_red_flags),
+							"red_flags_resolved": list(progress.red_flags_resolved),
+						}
+					except Exception:
+						progress_md = ""
+						progress_meta = None
+
+				if progress_md:
+					md = (md or "") + "\n\n" + progress_md
+
+				safe = (md or "").replace("\n", "\ndata: ")
+				yield f"data: {safe}\n\n"
+
+				if payload.save_to_history:
+					await manager.append_qna(
+						payload.session_id,
+						payload.question,
+						md,
+						meta={
+							"mode": "mirror",
+							"mirror_user_answer": user_answer,
+							"mirror_report": report,
+							"mirror_progress": progress_meta,
+						},
+					)
+					await manager.append_mirror_attempt(
+						payload.session_id,
+						question=payload.question,
+						user_answer=user_answer,
+						report=report,
+					)
+
+				await auditor.log({
+					"type": "mirror_report",
+					"session_id": payload.session_id,
+					"question": payload.question,
+					"saved_to_history": payload.save_to_history,
+					"topic": (report or {}).get("topic") if isinstance(report, dict) else None,
+					"confidence": (report or {}).get("confidence") if isinstance(report, dict) else None,
+					"progress": progress_meta,
+				})
+
+				if getattr(settings, "enable_event_logging", True):
+					try:
+						meta = (report or {}).get("_meta") if isinstance(report, dict) else {}
+						if not isinstance(meta, dict):
+							meta = {}
+						with get_db_context() as db:
+							track_event(
+								db,
+								user_id=user_id,
+								session_id=payload.session_id,
+								event_type="chat_mirror_report_generated",
+								question_text=payload.question,
+								extra={
+									"stream": True,
+									"truncated": bool(truncated),
+									"topic": (report or {}).get("topic") if isinstance(report, dict) else None,
+									"confidence": (report or {}).get("confidence") if isinstance(report, dict) else None,
+									"gaps_count": len((report or {}).get("gaps") or []) if isinstance(report, dict) else 0,
+									"red_flags_count": len((report or {}).get("red_flags") or []) if isinstance(report, dict) else 0,
+									"mirror_parse_ok": meta.get("parse_ok"),
+									"mirror_validation_ok": meta.get("validation_ok"),
+									"mirror_schema_drift": meta.get("schema_drift"),
+									"mirror_low_conf_guard": meta.get("low_confidence_guard"),
+									"upgrade_rewrite_ok": meta.get("upgrade_rewrite_ok"),
+									"red_flags_soften_ok": meta.get("red_flags_soften_ok"),
+									"mirror_progress": progress_meta,
+								},
+							)
+					except Exception:
+						pass
+
+				yield "event: end\n\n"
+
+			return StreamingResponse(
+				_mirror_event_gen(),
+				media_type="text/event-stream",
+				headers={
+					"X-Stratax-Session-Id": payload.session_id,
+					**(
+						{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
+						if recovered_from_session_id and recovered_from_session_id != payload.session_id
+						else {}
+					),
+				},
+			)
+
+		prev_attempt = find_previous_mirror_attempt(
+			question=payload.question,
+			mirror_history=list(getattr(state, "mirror_history", []) or []),
+		)
+		prev_report = None
+		if isinstance(prev_attempt, dict):
+			pr = prev_attempt.get("report")
+			if isinstance(pr, dict):
+				prev_report = pr
+
+		md, truncated, report = await llm_service.generate_mirror_report_structured(
+			question=payload.question,
+			user_answer=user_answer,
+			depth=getattr(payload, "depth", None),
+			api_key=api_key,
+		)
+
+		progress_md = ""
+		progress_meta = None
+		if isinstance(prev_report, dict) and isinstance(report, dict):
+			try:
+				progress = compute_mirror_progress(prev_report, report)
+				progress_md = format_mirror_progress_markdown(progress)
+				progress_meta = {
+					"confidence_prev": progress.confidence_prev,
+					"confidence_curr": progress.confidence_curr,
+					"confidence_delta": progress.confidence_delta,
+					"gaps_closed": list(progress.gaps_closed),
+					"new_gaps": list(progress.new_gaps),
+					"new_strengths": list(progress.new_strengths),
+					"new_red_flags": list(progress.new_red_flags),
+					"red_flags_resolved": list(progress.red_flags_resolved),
+				}
+			except Exception:
+				progress_md = ""
+				progress_meta = None
+
+		if progress_md:
+			md = (md or "") + "\n\n" + progress_md
+
+		if payload.save_to_history:
+			await manager.append_qna(
+				payload.session_id,
+				payload.question,
+				md,
+				meta={
+					"mode": "mirror",
+					"mirror_user_answer": user_answer,
+					"mirror_report": report,
+					"mirror_progress": progress_meta,
+				},
+			)
+			await manager.append_mirror_attempt(
+				payload.session_id,
+				question=payload.question,
+				user_answer=user_answer,
+				report=report,
+			)
+		await auditor.log({
+			"type": "mirror_report",
+			"session_id": payload.session_id,
+			"question": payload.question,
+			"saved_to_history": payload.save_to_history,
+			"topic": (report or {}).get("topic") if isinstance(report, dict) else None,
+			"confidence": (report or {}).get("confidence") if isinstance(report, dict) else None,
+			"progress": progress_meta,
+		})
+		if getattr(settings, "enable_event_logging", True):
+			try:
+				meta = (report or {}).get("_meta") if isinstance(report, dict) else {}
+				if not isinstance(meta, dict):
+					meta = {}
+				with get_db_context() as db:
+					track_event(
+						db,
+						user_id=user_id,
+						session_id=payload.session_id,
+						event_type="chat_mirror_report_generated",
+						question_text=payload.question,
+						extra={
+							"stream": False,
+							"truncated": bool(truncated),
+							"topic": (report or {}).get("topic") if isinstance(report, dict) else None,
+							"confidence": (report or {}).get("confidence") if isinstance(report, dict) else None,
+							"gaps_count": len((report or {}).get("gaps") or []) if isinstance(report, dict) else 0,
+							"red_flags_count": len((report or {}).get("red_flags") or []) if isinstance(report, dict) else 0,
+							"mirror_parse_ok": meta.get("parse_ok"),
+							"mirror_validation_ok": meta.get("validation_ok"),
+							"mirror_schema_drift": meta.get("schema_drift"),
+							"mirror_low_conf_guard": meta.get("low_confidence_guard"),
+							"upgrade_rewrite_ok": meta.get("upgrade_rewrite_ok"),
+							"red_flags_soften_ok": meta.get("red_flags_soften_ok"),
+							"mirror_progress": progress_meta,
+						},
+					)
+			except Exception:
+				pass
+		return AnswerOut(answer=md, created_at=utcnow(), truncated=truncated)
 
 	# --- ARCHITECTURE DETECTION ---
 	# Smart pattern-based detection (no LLM call needed - saves time and cost)
@@ -678,6 +995,7 @@ async def submit_question(
 							response_text, _ = await llm_service.generate_answer(
 								question=combined_prompt,
 								system_prompt=prompt_data['system_prompt'],
+								depth=getattr(payload, "depth", None),
 								api_key=api_key,
 								apply_auto_overrides=False,
 								allow_provider_fallback=(not is_demo),
@@ -823,6 +1141,7 @@ async def submit_question(
 					payload.system_prompt,
 					profile_text=profile_text,
 					previous_qna=previous_qna[-10:] if previous_qna else None,
+					depth=getattr(payload, "depth", None),
 					style_mode=payload.style_mode,
 					tone=payload.tone,
 					layout=payload.layout,
@@ -855,6 +1174,7 @@ async def submit_question(
 				payload.system_prompt,
 				profile_text=profile_text,
 				previous_qna=previous_qna[-10:] if previous_qna else None,
+				depth=getattr(payload, "depth", None),
 				style_mode=payload.style_mode,
 				tone=payload.tone,
 				layout=payload.layout,
@@ -875,6 +1195,118 @@ async def submit_question(
 
 	
 	# Regular non-architecture questions
+	# Mirror Mode (analyzes user's draft answer instead of answering directly)
+	mode = (getattr(payload, "mode", None) or "answer").strip().lower()
+	if mode == "mirror":
+		user_answer = (getattr(payload, "user_answer", None) or "").strip()
+		if not user_answer:
+			return AnswerOut(
+				answer="",
+				created_at=utcnow(),
+				truncated=False,
+				ui_action="collect_mirror_answer",
+				ui_payload={
+					"prompt": "Paste your draft answer so I can analyze gaps and seniority signals.",
+				},
+			)
+
+		# Mirror supports streaming (one-shot markdown report streamed via SSE)
+		if payload.stream:
+			async def _mirror_event_gen():
+				md, _truncated, report = await llm_service.generate_mirror_report_structured(
+					question=payload.question,
+					user_answer=user_answer,
+					depth=getattr(payload, "depth", None),
+					api_key=api_key,
+				)
+				safe = (md or "").replace("\n", "\ndata: ")
+				yield f"data: {safe}\n\n"
+				if payload.save_to_history:
+					await manager.append_qna(state.session_id, payload.question, md)
+
+				await auditor.log({
+					"type": "mirror_report",
+					"session_id": state.session_id,
+					"question": payload.question,
+					"saved_to_history": payload.save_to_history,
+					"topic": report.get("topic"),
+					"confidence": report.get("confidence"),
+					"gaps": report.get("gaps"),
+				})
+
+				if getattr(settings, "enable_event_logging", True):
+					try:
+						with get_db_context() as db:
+							track_event(
+								db,
+								user_id=user_id,
+								session_id=state.session_id,
+								event_type="chat_mirror_report_generated",
+								question_text=payload.question,
+								extra={
+									"stream": True,
+									"topic": report.get("topic"),
+									"confidence": report.get("confidence"),
+									"gaps_count": len(report.get("gaps") or []),
+									"red_flags_count": len(report.get("red_flags") or []),
+									"mirror_parse_ok": (report.get("_meta") or {}).get("parse_ok"),
+									"mirror_validation_ok": (report.get("_meta") or {}).get("validation_ok"),
+									"mirror_schema_drift": (report.get("_meta") or {}).get("schema_drift"),
+									"mirror_low_conf_guard": (report.get("_meta") or {}).get("low_confidence_guard"),
+								},
+							)
+					except Exception:
+						pass
+
+				yield "event: end\n\n"
+
+			return StreamingResponse(_mirror_event_gen(), media_type="text/event-stream")
+
+		md, truncated, report = await llm_service.generate_mirror_report_structured(
+			question=payload.question,
+			user_answer=user_answer,
+			depth=getattr(payload, "depth", None),
+			api_key=api_key,
+		)
+		if payload.save_to_history:
+			await manager.append_qna(state.session_id, payload.question, md)
+
+		await auditor.log({
+			"type": "mirror_report",
+			"session_id": state.session_id,
+			"question": payload.question,
+			"saved_to_history": payload.save_to_history,
+			"topic": report.get("topic"),
+			"confidence": report.get("confidence"),
+			"gaps": report.get("gaps"),
+		})
+
+		if getattr(settings, "enable_event_logging", True):
+			try:
+				with get_db_context() as db:
+					track_event(
+						db,
+						user_id=user_id,
+						session_id=state.session_id,
+						event_type="chat_mirror_report_generated",
+						question_text=payload.question,
+						extra={
+							"stream": False,
+							"topic": report.get("topic"),
+							"confidence": report.get("confidence"),
+							"gaps_count": len(report.get("gaps") or []),
+							"red_flags_count": len(report.get("red_flags") or []),
+							"mirror_parse_ok": (report.get("_meta") or {}).get("parse_ok"),
+							"mirror_validation_ok": (report.get("_meta") or {}).get("validation_ok"),
+							"mirror_schema_drift": (report.get("_meta") or {}).get("schema_drift"),
+							"mirror_low_conf_guard": (report.get("_meta") or {}).get("low_confidence_guard"),
+						},
+					)
+			except Exception:
+				pass
+
+		return AnswerOut(answer=md, created_at=utcnow(), truncated=truncated)
+
 	if payload.stream:
 		async def event_gen():
 			collected: list[str] = []
@@ -885,6 +1317,7 @@ async def submit_question(
 				payload.system_prompt,
 				profile_text=profile_text,
 				previous_qna=previous_qna,
+				depth=getattr(payload, "depth", None),
 				style_mode=payload.style_mode,
 				tone=payload.tone,
 				layout=payload.layout,
@@ -945,6 +1378,7 @@ async def submit_question(
 			payload.system_prompt,
 			profile_text=profile_text,
 			previous_qna=previous_qna,
+			depth=getattr(payload, "depth", None),
 			style_mode=payload.style_mode,
 			tone=payload.tone,
 			layout=payload.layout,

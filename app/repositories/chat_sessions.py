@@ -33,11 +33,37 @@ class ChatSessionRepository:
         if last_update is None:
             last_update = _utcnow()
 
+        qna = list(row.qna or [])
+        mirror_history: List[Dict[str, Any]] = []
+        for it in qna:
+            try:
+                if not isinstance(it, dict):
+                    continue
+                meta = it.get("meta")
+                if not isinstance(meta, dict):
+                    continue
+                if (meta.get("mode") or "").strip().lower() != "mirror":
+                    continue
+                report = meta.get("mirror_report")
+                if not isinstance(report, dict):
+                    continue
+                mirror_history.append(
+                    {
+                        "question": it.get("question") or "",
+                        "user_answer": meta.get("mirror_user_answer") or "",
+                        "report": report,
+                        "created_at": it.get("created_at") or "",
+                    }
+                )
+            except Exception:
+                continue
+
         return {
             "session_id": row.id,
-            "qna": list(row.qna or []),
+            "qna": qna,
+            "mirror_history": mirror_history,
             "partial_transcript": row.partial_transcript or "",
-            "last_update": last_update,
+            "last_update": last_update.isoformat(),
             "profile_text": row.profile_text or "",
             "custom_title": row.custom_title,
         }

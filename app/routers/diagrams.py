@@ -680,9 +680,9 @@ async def generate_architecture(
     - Security (auth/authz) - if relevant
     """
     try:
-        print(f"\n🚀 [API] Request received: Generate Architecture")
-        print(f"   System: {request.system_description[:50]}...")
-        print(f"   Level: {request.user_level}")
+        logger.debug("[API] Request received: Generate Architecture")
+        logger.debug("System: %s...", (request.system_description or "")[:50])
+        logger.debug("Level: %s", request.user_level)
         
         logger.info(f"🏗️ Generating multi-view architecture for: {request.system_description[:100]}...")
         
@@ -698,7 +698,7 @@ async def generate_architecture(
                 request.user_level
             )
         
-        print(f"📊 Views selected: {[v.value for v in views_to_generate]}")
+        logger.debug("Views selected: %s", [v.value for v in views_to_generate])
         logger.info(f"📊 Generating {len(views_to_generate)} views: {[v.value for v in views_to_generate]}")
         
         # Extract system name from description (first few words)

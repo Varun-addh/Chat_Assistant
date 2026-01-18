@@ -102,6 +102,10 @@ class Settings(BaseSettings):
 	groq_max_tokens_complex: int = 3000  # For complex topics (increased from 2500 for resume reviews)
 	groq_reasoning_effort: str | None = None  # e.g., "medium"
 	groq_stream: bool = True
+	# Dynamic budgeting: how many tokens equals one budget unit. The DynamicBudgetEngine
+	# converts intent/depth/length units -> tokens using this multiplier. Tweak to
+	# reflect model/token pricing and desired verbosity per unit.
+	token_per_budget_unit: int = 400
 
 	# Google Gemini
 	gemini_api_key: str | None = None

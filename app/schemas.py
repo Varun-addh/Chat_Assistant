@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field, AliasChoices
+from pydantic import ConfigDict
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -18,6 +19,21 @@ class QuestionIn(BaseModel):
 	question: str = Field(..., min_length=1)
 	system_prompt: Optional[str] = Field(default=None, description="Override default system role text")
 	stream: Optional[bool] = Field(default=False, description="Hint to stream on supported endpoints")
+	# Copilot mode selection
+	mode: Optional[str] = Field(
+		default="answer",
+		description="Copilot mode: answer|mirror (mirror analyzes user's answer instead of answering directly)",
+	)
+	# Mirror mode input (user answers in their own words; the system analyzes gaps)
+	user_answer: Optional[str] = Field(
+		default=None,
+		description="In mirror mode: the user's draft answer to analyze",
+	)
+	# Response depth (optional UI-controlled knob)
+	depth: Optional[str] = Field(
+		default=None,
+		description="Response depth: quick|standard|deep (overrides auto inference)",
+	)
 	# Architecture mode selection for system design questions
 	architecture_mode: Optional[str] = Field(default=None, description="Architecture generation mode: 'single' for comprehensive diagram, 'multi-view' for focused layers")
 	# Style customization (optional)
@@ -42,6 +58,47 @@ class AnswerOut(BaseModel):
 		default=None,
 		description="Optional UI payload for the ui_action.",
 	)
+
+
+# ===== Mirror Mode Schemas =====
+
+
+class MirrorReport(BaseModel):
+	"""Validated schema for Interview Mirror structured output.
+
+	This is used internally to ensure we never crash or emit malformed reports
+	when the model drifts (extra keys, wrong types, bad confidence values).
+	"""
+
+	model_config = ConfigDict(extra="forbid")
+
+	topic: str = Field(default="General", min_length=1, max_length=120)
+	message: str = Field(default="", max_length=600)
+	strengths: List[str] = Field(default_factory=list, max_length=3)
+	gaps: List[str] = Field(default_factory=list, max_length=5)
+	red_flags: List[str] = Field(default_factory=list, max_length=3)
+	likely_followups: List[str] = Field(default_factory=list, max_length=3)
+	upgrade_lines: List[str] = Field(default_factory=list, max_length=2)
+	confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class MirrorFeedbackIn(BaseModel):
+	"""User feedback on a generated Mirror report.
+
+	This enables building a quality dataset and calibrating heuristics over time.
+	"""
+
+	session_id: str = Field(..., description="Session identifier")
+	question: str = Field(..., min_length=1)
+	user_answer: Optional[str] = Field(default=None, description="The user's draft answer that was analyzed")
+	report: Optional[Dict[str, Any]] = Field(default=None, description="Optional structured report snapshot")
+	helpful: bool = Field(..., description="Whether the report was helpful")
+	flags: List[str] = Field(default_factory=list, description="Optional tags like: too_harsh, incorrect, generic, helpful_upgrade_lines")
+	comment: Optional[str] = Field(default=None, max_length=500, description="Optional free-text feedback")
+
+
+class MirrorFeedbackOut(BaseModel):
+	ok: bool = True
 
 
 class QnA(BaseModel):

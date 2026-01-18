@@ -189,7 +189,7 @@ class MockInterviewService:
                                 if isinstance(v, str):
                                     try:
                                         converted_times[k] = datetime.fromisoformat(v)
-                                    except:
+                                    except Exception:
                                         logger.warning(f"Failed to parse datetime: {v}")
                                 elif isinstance(v, datetime):
                                     converted_times[k] = v
@@ -809,7 +809,7 @@ CRITICAL RULES:
                     if isinstance(item, dict):
                         try:
                             detailed_strengths.append(DetailedFeedbackItem(**item))
-                        except:
+                        except Exception:
                             pass
             
             detailed_weaknesses = []
@@ -819,7 +819,7 @@ CRITICAL RULES:
                     if isinstance(item, dict):
                         try:
                             detailed_weaknesses.append(DetailedFeedbackItem(**item))
-                        except:
+                        except Exception:
                             pass
             
             answer_comparisons = []
@@ -829,7 +829,7 @@ CRITICAL RULES:
                     if isinstance(item, dict):
                         try:
                             answer_comparisons.append(AnswerComparison(**item))
-                        except:
+                        except Exception:
                             pass
             
             return EvaluationResult(

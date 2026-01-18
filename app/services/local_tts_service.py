@@ -111,7 +111,7 @@ class LocalTTSService:
                 # Stop pyttsx3 engine and cleanup threads
                 try:
                     self.engine.stop()
-                except:
+                except Exception:
                     pass
                 self.engine = None
                 self._initialized = False
@@ -466,7 +466,7 @@ class LocalTTSService:
                     info["current_voice"] = self.engine.getProperty('voice')
                     info["rate"] = self.engine.getProperty('rate')
                     info["volume"] = self.engine.getProperty('volume')
-            except:
+            except Exception:
                 pass
         
         return info
@@ -476,7 +476,7 @@ class LocalTTSService:
         if self.engine:
             try:
                 self.engine.stop()
-            except:
+            except Exception:
                 pass
         
         logger.info("TTS cleanup complete")

@@ -407,7 +407,7 @@ class SpeechAnalyticsAgent:
         try:
             audio, sr = librosa.load(audio_path, sr=None)
             duration = librosa.get_duration(y=audio, sr=sr)
-        except:
+        except Exception:
             duration = 0.0
         
         return SpeechMetrics(

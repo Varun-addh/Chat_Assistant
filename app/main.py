@@ -15,6 +15,8 @@ from app.utils.audit import auditor
 from app.services.llm_service import llm_service
 import logging
 
+logger = logging.getLogger(__name__)
+
 # Interview Intelligence depends on optional vector-db packages (qdrant_client).
 # We load it lazily so the rest of the app (incl. architecture generation) can
 # run even when those optional deps are not installed.
@@ -132,14 +134,14 @@ async def lifespan(app: FastAPI):
             config=get_practice_config()
         )
         if settings.gemini_api_key:
-            print("✅ Practice Mode initialized successfully with server key!")
+            logger.info("Practice Mode initialized successfully with server key")
         else:
-            print("🔧 Practice Mode initialized (awaiting Bridge Settings key)")
+            logger.info("Practice Mode initialized (awaiting Bridge Settings key)")
     else:
         if settings.fast_startup:
-            print("⚡ Fast startup enabled: Practice Mode init skipped")
+            logger.info("Fast startup enabled: Practice Mode init skipped")
         else:
-            print("⚠️  Practice Mode disabled in settings")
+            logger.info("Practice Mode disabled in settings")
     
     yield
     

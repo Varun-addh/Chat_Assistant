@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, Header, Request
-from typing import List, Optional
+from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 import logging
 import asyncio
@@ -11,15 +11,36 @@ from app.schemas import (
     SearchQuestionsResponse,
     InterviewSearchRequest,
 )
-from app.services.interview_intelligence_service import interview_intelligence_service, enhanced_interview_service
 from app.utils.audit import auditor
 
-from app.services.interview_intelligence_service import ultra_production_service
 from app.services.history_manager import default_history_manager
 from fastapi import WebSocket, WebSocketDisconnect
 import time
 from app.config import settings
 from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
+
+# NOTE: app.services.interview_intelligence_service imports heavy ML dependencies.
+# To keep router import fast (especially in tests), we lazily load the service singletons.
+interview_intelligence_service = None
+enhanced_interview_service = None
+ultra_production_service = None
+
+
+def _ensure_intelligence_services_loaded() -> None:
+    global interview_intelligence_service, enhanced_interview_service, ultra_production_service
+    if (
+        interview_intelligence_service is None
+        or enhanced_interview_service is None
+        or ultra_production_service is None
+    ):
+        from app.services.interview_intelligence_service import (
+            interview_intelligence_service as _interview_intelligence_service,
+            enhanced_interview_service as _enhanced_interview_service,
+            ultra_production_service as _ultra_production_service,
+        )
+        interview_intelligence_service = _interview_intelligence_service
+        enhanced_interview_service = _enhanced_interview_service
+        ultra_production_service = _ultra_production_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -804,9 +825,10 @@ async def _search_and_build_response(
     refresh: bool = False,
     api_key: Optional[str] = None,
     save_to_history: bool = True,
-    request: Optional[any] = None  # FastAPI Request object for user context
+    request: Optional[Any] = None  # FastAPI Request object for user context
 ) -> SearchQuestionsResponse:
     """Helper to search and format response"""
+    _ensure_intelligence_services_loaded()
     results = await interview_intelligence_service.search_questions(
         query,
         limit=limit,
@@ -868,6 +890,7 @@ async def get_topics():
     Returns topics that have been generated or curated in the system.
     """
     try:
+        _ensure_intelligence_services_loaded()
         topics = await interview_intelligence_service.get_all_topics()
         return TopicListResponse(topics=topics)
     except Exception as e:
@@ -900,6 +923,7 @@ async def get_questions_by_topic(
         api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
+        _ensure_intelligence_services_loaded()
         questions = await interview_intelligence_service.get_questions_by_topic(
             topic,
             limit=limit,
@@ -1026,8 +1050,8 @@ async def search_questions(
     is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
 
     # If the server is configured to require user API keys, do NOT fall back to server keys.
-    # (Demo mode is handled separately via demo key pool / Groq server key.)
-    if settings.require_user_api_key and not api_key and not is_demo:
+    # Use the stricter extractor here so accidental values (e.g. 'undefined') don't bypass the guard.
+    if settings.require_user_api_key and not user_key:
         raise HTTPException(
             status_code=401,
             detail=(
@@ -1036,6 +1060,9 @@ async def search_questions(
                 "or Authorization: Bearer <key>."
             ),
         )
+
+    # Prefer the validated user-provided key when present.
+    api_key = user_key or api_key
 
     # Fallback to server keys only when user provided no keys.
     if not api_key:
@@ -1122,8 +1149,8 @@ async def search_questions_post(
     is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
 
     # If the server is configured to require user API keys, do NOT fall back to server keys.
-    # (Demo mode is handled separately via demo key pool / Groq server key.)
-    if settings.require_user_api_key and not api_key and not is_demo:
+    # Use the stricter extractor here so accidental values (e.g. 'undefined') don't bypass the guard.
+    if settings.require_user_api_key and not user_key:
         raise HTTPException(
             status_code=401,
             detail=(
@@ -1132,6 +1159,9 @@ async def search_questions_post(
                 "or Authorization: Bearer <key>."
             ),
         )
+
+    # Prefer the validated user-provided key when present.
+    api_key = user_key or api_key
 
     # Fallback to server keys only when user provided no keys.
     if not api_key:
@@ -1202,6 +1232,7 @@ async def add_curated_question(question: dict):
     ```
     """
     try:
+        _ensure_intelligence_services_loaded()
         from app.services.interview_intelligence_service import InterviewQuestion
         
         # Validate and create question object
@@ -1250,6 +1281,7 @@ async def search_with_verification(
         api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
+        _ensure_intelligence_services_loaded()
         logger.info(f"Enhanced search: q={q}, limit={limit}")
         
         questions = await enhanced_interview_service.search_questions(
@@ -1338,6 +1370,7 @@ async def search_with_verification_post(
         api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
+        _ensure_intelligence_services_loaded()
         questions = await enhanced_interview_service.search_questions(
             query=request.query,
             limit=request.limit,
@@ -1389,41 +1422,42 @@ async def search_with_verification_post(
 
 @router.get("/sources/stats")
 async def get_source_statistics():
-	"""Get statistics about available question sources"""
-	try:
-		stats = await enhanced_interview_service.source_manager.get_question_stats()
-		return {
-			"status": "ok",
-			"statistics": stats,
-			"source_info": {
-				"leetcode": {
-					"name": "LeetCode",
-					"credibility": 0.95,
-					"description": "Company-tagged coding questions",
-					"verified": True
-				},
-				"glassdoor": {
-					"name": "Glassdoor",
-					"credibility": 0.85,
-					"description": "Interview experiences and questions",
-					"verified": True
-				},
-				"community": {
-					"name": "Community Submitted",
-					"credibility": 0.60,
-					"description": "User-submitted questions with votes",
-					"verified": "partial"
-				},
-				"llm_generated": {
-					"name": "AI-Generated",
-					"credibility": 0.30,
-					"description": "Practice questions generated by AI",
-					"verified": False
-				}
-			}
-		}
-	except Exception as e:
-		raise HTTPException(status_code=500, detail=str(e))
+    """Get statistics about available question sources"""
+    try:
+        _ensure_intelligence_services_loaded()
+        stats = await enhanced_interview_service.source_manager.get_question_stats()
+        return {
+            "status": "ok",
+            "statistics": stats,
+            "source_info": {
+                "leetcode": {
+                    "name": "LeetCode",
+                    "credibility": 0.95,
+                    "description": "Company-tagged coding questions",
+                    "verified": True,
+                },
+                "glassdoor": {
+                    "name": "Glassdoor",
+                    "credibility": 0.85,
+                    "description": "Interview experiences and questions",
+                    "verified": True,
+                },
+                "community": {
+                    "name": "Community Submitted",
+                    "credibility": 0.60,
+                    "description": "User-submitted questions with votes",
+                    "verified": "partial",
+                },
+                "llm_generated": {
+                    "name": "AI-Generated",
+                    "credibility": 0.30,
+                    "description": "Practice questions generated by AI",
+                    "verified": False,
+                },
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/companies")
@@ -1460,6 +1494,7 @@ async def submit_community_question(
 ):
     """Submit a real interview question from the community"""
     try:
+        _ensure_intelligence_services_loaded()
         from app.services.dynamic_interview_sources import (
             VerifiedQuestion as VQ,
             SourceType as ST,
@@ -1567,29 +1602,31 @@ async def get_transparency_info():
 
 @router.get("/health/enhanced")
 async def health_check_enhanced():
-	"""Health check for enhanced service with source integration"""
-	try:
-		service = enhanced_interview_service
-		checks = {
-			"vector_db": service.vector_client is not None,
-			"embedding_model": service.embed_model is not None,
-			"source_manager": service.source_manager is not None,
-			"leetcode_integration": True,
-			"community_db": True,
-		}
-		all_healthy = all(checks.values())
-		return {
-			"status": "healthy" if all_healthy else "degraded",
-			"components": checks,
-			"features": {
-				"verified_sources": True,
-				"llm_generation": True,
-				"community_submissions": True,
-				"source_transparency": True
-			}
-		}
-	except Exception as e:
-		return {"status": "unhealthy", "error": str(e)}
+    """Health check for enhanced service with source integration"""
+    try:
+        _ensure_intelligence_services_loaded()
+        service = enhanced_interview_service
+        checks = {
+            "vector_db": service.vector_client is not None,
+            "embedding_model": service.embed_model is not None,
+            "source_manager": service.source_manager is not None,
+            "leetcode_integration": True,
+            "community_db": True,
+        }
+        all_healthy = all(checks.values())
+        return {
+            "status": "healthy" if all_healthy else "degraded",
+            "components": checks,
+            "features": {
+                "verified_sources": True,
+                "llm_generation": True,
+                "community_submissions": True,
+                "source_transparency": True,
+            },
+        }
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
+
 @router.post("/update")
 async def trigger_update():
     """
@@ -1599,6 +1636,7 @@ async def trigger_update():
     so there's no traditional "update" process. This endpoint exists
     for backward compatibility but is essentially a no-op.
     """
+    _ensure_intelligence_services_loaded()
     await interview_intelligence_service.force_update()
     return {
         "status": "ok",
@@ -1618,6 +1656,7 @@ async def get_statistics():
     - Recent activity
     """
     try:
+        _ensure_intelligence_services_loaded()
         topics = await interview_intelligence_service.get_all_topics()
         
         # Get collection stats from vector DB
@@ -1650,6 +1689,7 @@ async def get_statistics():
 async def health_check():
     """Check if the service is healthy and ready"""
     try:
+        _ensure_intelligence_services_loaded()
         # Verify components are initialized
         service = interview_intelligence_service
         
@@ -1720,6 +1760,7 @@ async def ultra_production_search(
         api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
+        _ensure_intelligence_services_loaded()
         start_time = time.time()
         
         questions = await ultra_production_service.search_questions(
@@ -1782,6 +1823,7 @@ async def ultra_production_search(
 async def execute_code(request: CodeExecutionRequest):
     """🔥 Execute and validate code"""
     try:
+        _ensure_intelligence_services_loaded()
         result = await ultra_production_service.execute_and_validate_code(
             code=request.code,
             language=request.language,
@@ -1801,6 +1843,7 @@ async def vote_question(
 ):
     """👍👎 Vote on question quality"""
     try:
+        _ensure_intelligence_services_loaded()
         await ultra_production_service.record_user_feedback(
             question_id, user_id, vote, feedback
         )
@@ -1812,6 +1855,7 @@ async def vote_question(
 @router.get("/features")
 async def get_features():
     """🎯 List available features"""
+    _ensure_intelligence_services_loaded()
     return {
         "features": {
             "hybrid_search": {"available": True, "impact": "30-50% better relevance"},
@@ -1862,6 +1906,7 @@ async def websocket_search(websocket: WebSocket):
     logger.info("WebSocket connection accepted for real-time search")
     
     try:
+        _ensure_intelligence_services_loaded()
         # Wait for search request
         request_data = await websocket.receive_json()
         
@@ -2035,10 +2080,10 @@ async def websocket_search(websocket: WebSocket):
                 'error': str(e),
                 'timestamp': time.time()
             })
-        except:
+        except Exception:
             pass
     finally:
         try:
             await websocket.close()
-        except:
+        except Exception:
             pass

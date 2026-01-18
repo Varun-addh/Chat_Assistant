@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import time
+import logging
 
 from app.utils.time import utcnow
 
@@ -16,10 +17,15 @@ from app.database import get_db_context
 from app.repositories.chat_sessions import ChatSessionRepository
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class SessionState:
 	session_id: str
 	qna: List[dict] = field(default_factory=list)
+	# Mirror-specific history (used for multi-turn compare and dataset building)
+	mirror_history: List[dict] = field(default_factory=list)
 	partial_transcript: str = ""
 	last_update: datetime = field(default_factory=utcnow)
 	profile_text: str = ""
@@ -80,7 +86,9 @@ class SessionManager:
 
 	def _deserialize(self, data: dict) -> SessionState:
 		last_update = data.get("last_update")
-		if isinstance(last_update, str):
+		if isinstance(last_update, datetime):
+			last_dt = last_update
+		elif isinstance(last_update, str):
 			try:
 				last_dt = datetime.fromisoformat(last_update)
 				# Backward-compat: previously persisted naive timestamps.
@@ -93,6 +101,7 @@ class SessionManager:
 		return SessionState(
 			session_id=data["session_id"],
 			qna=list(data.get("qna", [])),
+			mirror_history=list(data.get("mirror_history", [])),
 			partial_transcript=data.get("partial_transcript", ""),
 			last_update=last_dt,
 			profile_text=data.get("profile_text", ""),
@@ -174,7 +183,11 @@ class SessionManager:
 						},
 					)
 			except Exception as e:
-				print(f"❌ Failed to save session {state.session_id} to DB for user {self.user_id}: {e}")
+				logger.exception(
+					"Failed to save session %s to DB for user %s",
+					state.session_id,
+					self.user_id,
+				)
 			return
 		# Only save sessions that have actual content (Q&A, title, profile, or transcript)
 		has_content = (
@@ -184,7 +197,7 @@ class SessionManager:
 			or state.partial_transcript
 		)
 		if not force and not has_content:
-			print(f"⏭️ Skipping save of empty session {state.session_id} (no content yet)")
+			logger.debug("Skipping save of empty session %s (no content yet)", state.session_id)
 			return
 		
 		path = self._session_path(state.session_id)
@@ -195,9 +208,14 @@ class SessionManager:
 				json.dump(self._serialize(state), f, ensure_ascii=False, indent=2)
 				f.flush()  # Explicitly flush to disk
 				os.fsync(f.fileno())  # Force OS to write to disk
-			print(f"✅ Saved session {state.session_id} for user {self.user_id} ({len(state.qna)} Q&A pairs)")
+			logger.debug(
+				"Saved session %s for user %s (%s Q&A pairs)",
+				state.session_id,
+				self.user_id,
+				len(state.qna),
+			)
 		except Exception as e:
-			print(f"❌ Failed to save session {state.session_id} for user {self.user_id}: {e}")
+			logger.exception("Failed to save session %s for user %s", state.session_id, self.user_id)
 
 	async def create_session(self) -> SessionState:
 		async with self._lock:
@@ -212,7 +230,10 @@ class SessionManager:
 				# Return the recently created session instead of creating a new one
 				recent_session = self._sessions.get(self._last_created_session_id)
 				if recent_session:
-					print(f"🛡️ Debounce: Prevented duplicate session creation. Returning session {self._last_created_session_id}")
+					logger.debug(
+						"Debounce prevented duplicate session creation; returning %s",
+						self._last_created_session_id,
+					)
 					return recent_session
 			
 			# 🚀 Optimization: Reuse existing empty session if possible to prevent sidebar spam
@@ -233,7 +254,7 @@ class SessionManager:
 			self._sessions[session_id] = state
 			# Persist immediately so a browser refresh can still fetch /chat successfully.
 			self._save(state, force=True)
-			print(f"📝 Created new session {session_id} in memory (saved stub to disk)")
+			logger.debug("Created new session %s in memory (saved stub to disk)", session_id)
 			
 			# Update debounce tracking
 			self._last_session_creation = current_time
@@ -253,18 +274,11 @@ class SessionManager:
 					raw = self._repo.get(db, user_id=self.user_id, session_id=session_id)
 				if not raw:
 					return None
-				loaded = SessionState(
-					session_id=raw["session_id"],
-					qna=list(raw.get("qna") or []),
-					partial_transcript=raw.get("partial_transcript") or "",
-					last_update=raw.get("last_update") or utcnow(),
-					profile_text=raw.get("profile_text") or "",
-					custom_title=raw.get("custom_title"),
-				)
+				loaded = self._deserialize(raw)
 				self._sessions[session_id] = loaded
 				return loaded
 			except Exception as e:
-				print(f"⚠️ Failed to load session {session_id} from DB: {e}")
+				logger.exception("Failed to load session %s from DB", session_id)
 				return None
 		
 		# If not in memory, try loading from disk (multi-worker scenario)
@@ -275,20 +289,47 @@ class SessionManager:
 					raw = json.load(f)
 					state = self._deserialize(raw)
 					self._sessions[session_id] = state  # Cache it
-					print(f"📥 Loaded session {session_id} from disk for user {self.user_id}")
+					logger.debug("Loaded session %s from disk for user %s", session_id, self.user_id)
 					return state
 			except Exception as e:
-				print(f"⚠️ Failed to load session {session_id} from disk: {e}")
+				logger.exception("Failed to load session %s from disk", session_id)
 		
 		return None
 
-	async def append_qna(self, session_id: str, question: str, answer: str) -> None:
+	async def append_qna(self, session_id: str, question: str, answer: str, *, meta: Optional[dict] = None) -> None:
 		state = await self.get_required(session_id)
-		state.qna.append({
+		item = {
 			"question": question,
 			"answer": answer,
 			"created_at": utcnow().isoformat(),
-		})
+		}
+		if meta:
+			item["meta"] = meta
+		state.qna.append(item)
+		state.last_update = utcnow()
+		self._save(state)
+
+	async def append_mirror_attempt(
+		self,
+		session_id: str,
+		*,
+		question: str,
+		user_answer: str,
+		report: dict,
+	) -> None:
+		"""Persist a structured Mirror attempt for multi-turn compare.
+
+		Stored alongside normal QnA to survive restarts in file/DB session stores.
+		"""
+		state = await self.get_required(session_id)
+		state.mirror_history.append(
+			{
+				"question": question,
+				"user_answer": user_answer,
+				"report": report,
+				"created_at": utcnow().isoformat(),
+			}
+		)
 		state.last_update = utcnow()
 		self._save(state)
 
@@ -329,7 +370,7 @@ class SessionManager:
 				with get_db_context() as db:
 					return self._repo.list_summaries(db, user_id=self.user_id)
 			except Exception as e:
-				print(f"⚠️ Failed to list sessions from DB for user {self.user_id}: {e}")
+				logger.exception("Failed to list sessions from DB for user %s", self.user_id)
 				return []
 		# Reload from disk first to catch sessions created/updated by other workers
 		self._load_all()
@@ -360,9 +401,9 @@ class SessionManager:
 				try:
 					if session_path.exists():
 						session_path.unlink()
-						print(f"🗑️ Deleted old empty session: {session_id}")
+						logger.debug("Deleted old empty session: %s", session_id)
 				except Exception as e:
-					print(f"⚠️ Failed to delete session {session_id}: {e}")
+					logger.exception("Failed to delete session %s", session_id)
 				# Remove from memory
 				if session_id in self._sessions:
 					del self._sessions[session_id]

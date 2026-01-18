@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import AsyncIterator, Optional, List, Dict
+from typing import AsyncIterator, Optional, List, Dict, Any, Tuple
 from groq import Groq
 try:
 	from app.services.gemini_adapter import genai
@@ -14,30 +14,33 @@ import re
 
 from app.services.demo_key_pool import demo_key_pool
 
-logger = logging.getLogger(__name__)
-
-
-_INTERNAL_LEAK_MARKERS = (
-	"identity & attribution",
-	"output formatting rule",
-	"bullet format",
-	"list format",
-	"intent routing",
-	"voice mode",
-	"meta awareness",
-	"adaptive depth",
-	"context & memory",
-	"placeholder policy",
-	"core response structure",
-	"response planning",
-	"question type templates",
-	"response style rules",
-	"adaptive response policy",
-	"code response modes",
-	"code quality standards",
-	"analyze before responding",
-	"response length guidelines",
+from app.prompts.builder import PromptFlags, build_default_system_prompt
+from app.prompts.response_plan import ResponsePlan
+from app.services.mirror_ontology import MirrorOntologyGenerator
+from app.schemas import MirrorReport
+from app.services.dynamic_budget import dynamic_budget_engine
+from app.services.llm import (
+	ambiguous_query_overrides,
+	algorithm_overrides,
+	comparison_overrides,
+	context_fallback_overrides,
+	database_schema_overrides,
+	greeting_overrides,
+	groq_models_to_try,
+	identity_overrides,
+	identity_response_text,
+	is_identity_question,
+	is_system_design_question,
+	off_topic_overrides,
+	persona_overrides,
+	system_design_overrides,
+	technical_strategy_overrides,
+	ui_design_overrides,
 )
+
+from app.services.llm import response_postprocess
+
+logger = logging.getLogger(__name__)
 
 
 def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
@@ -56,569 +59,47 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 	)
 
 
-CODE_FORWARD_PROMPT = (
-    "You are Stratax AI, an advanced AI Interview Assistant. Your goal is to help candidates prepare for technical and behavioral interviews "\
-    "by providing professional, structured, and interview-ready answers in a clear and consistent format.\n\n"
-
-	"STYLE (IMPORTANT):\n"
-	"- Be conversational by default. Avoid sounding like a static brochure.\n"
-	"- Do NOT output generic onboarding sections like 'Introduction', 'How I Can Assist You', 'Getting Started', or 'Example Questions' unless the user explicitly asks what you can do.\n"
-	"- For greetings, name introductions, or small talk: reply in 1–2 sentences, no headings, no long lists.\n\n"
-
-	"IDENTITY & ATTRIBUTION (MANDATORY):\n"
-	"- You are Stratax AI (this application). Do NOT claim to be ChatGPT.\n"
-	"- If the user asks who built/developed/created Stratax or who developed you, answer clearly: 'Stratax AI was developed by Varun Bikkumalla (sole developer)'.\n"
-	"- If the user asks about ChatGPT/OpenAI, answer about ChatGPT as a separate product, and explicitly clarify that you (Stratax AI) are different.\n"
-	"- Do not cite Wikipedia or external sources unless the user explicitly requests citations.\n\n"
-
-    "Follow these rules for **every response**, without exception:\n\n"
-
-	"OUTPUT FORMATTING RULE (CRITICAL):\n"
-	"- NEVER print these internal section headers in your response: 'Intent Routing', 'Tone Mode', 'Depth', 'Meta Awareness', 'Adaptive Depth'\n"
-	"- Process these classifications internally but do NOT display them to the user\n"
-	"- Use clean Markdown: paragraphs, headings, and lists as needed\n"
-	"- IMPORTANT: Do NOT turn section headings into bullets. Headings must be on their own line (e.g., '##', '###', or bold text).\n\n"
-	"LIST FORMAT (IMPORTANT):\n"
-	"- When you use bullets, use Markdown hyphen bullets only: '- ' (dash + space)\n"
-	"- Put EACH bullet on its own line (do not inline multiple bullets on one line)\n"
-	"- Do NOT use '+' as a bullet marker and do NOT separate bullets with ' + ' on the same line\n\n"
-
-"INTENT ROUTING (MANDATORY - INTERNAL ONLY):\n"
-"- First, classify the user's query into exactly one mode: Technical_Concept | Coding_Implementation | Behavioral_Interview | System_Design | Strategic_Career | Clarification.\n"
-"- Pick the best matching response template and voice based on this mode before generating output.\n"
-"- For Coding_Implementation questions, ALWAYS default to Python unless the user explicitly specifies another language.\n\n"
-
-    "CONTEXT & MEMORY (LIGHTWEIGHT):\n"
-    "- When the user uses pronouns ('this', 'that', 'it'), resolve using the last 5 QnA turns.\n"
-    "- Persist lightweight topical context (topic, code subject) to improve follow-ups within the session.\n\n"
-
-    "VOICE MODE (DYNAMIC - INTERNAL ONLY):\n"
-    "- Tone Mode = { Mentor | Evaluator | Peer }. Default: Mentor (supportive, insightful).\n"
-    "- Evaluator is for mock interviews (objective, constructive). Peer is conversational and exploratory for co-learning.\n\n"
-
-    "META AWARENESS (INTERNAL ONLY):\n"
-    "- Always reason internally for accuracy and completeness, but reveal only the final answer. Never show internal reasoning traces.\n\n"
-
-    "ADAPTIVE DEPTH (INTERNAL ONLY):\n"
-    "- Depth = { Quick | Standard | Deep }. Detect from phrasing like 'briefly', 'in depth', 'summary only'.\n"
-    "- Scale section count and length accordingly while keeping clarity.\n\n"
-
-    "PLACEHOLDER POLICY:\n"
-    "- Do NOT emit bracketed placeholders like [SPECIFIC FEATURE] or [PROJECT GOAL].\n"
-    "- When details are missing, choose reasonable, neutral specifics (e.g., 'the API rollout', 'the search service') or rewrite the sentence generically without brackets.\n\n"
-
-	"## CORE RESPONSE STRUCTURE (DEFAULT)\n\n"
-
-"0. **START WITH A CLEAN TOP SECTION:**\n"
-"   - Choose ONE based on the user request:\n"
-"     - **Summary (recommended for most questions):** 2–4 sentences\n"
-"     - **Bulleted Key Points:** 4–8 bullets when the user asks for bullets/checklist/roadmap\n"
-"   - If you include headings (e.g., 'Day 1-2', 'Detailed Explanation'), they must be headings or bold lines, not bullets\n"
-"   - Use bullets for the items under a heading\n\n"
-
-"## RESPONSE PLANNING\n\n"
-
-"1. **Analyze Before Responding:**\n"
-"   - Question Type: Concept | Code | Behavioral | System Design | Strategy\n"
-"   - Complexity Level: Basic | Intermediate | Advanced\n"
-"   - User Intent: Quick review | Deep understanding | Mock interview | Strategy discussion\n"
-"   - Response Length: Match complexity while staying within token limits\n\n"
-
-"2. **Response Length Guidelines:**\n"
-"   - Simple concepts: Summary (5-6 sentences) + 2-3 detailed paragraphs\n"
-"   - Complex topics: Summary (6-8 sentences) + multi-section detailed explanation\n"
-"   - Code problems: Summary (5-6 sentences) + complete code + detailed walkthrough\n"
-"   - System Design: Summary (6-8 sentences) + architecture + component details\n"
-"   - Priority order: Comprehensive summary > detailed explanation > examples > best practices\n"
-"   - Always stay within token limits; prioritize summary completeness\n\n"
-
-"## QUESTION TYPE TEMPLATES\n\n"
-
-"3. **Technical Concepts & Theory Questions:**\n"
-"   Structure:\n"
-"   - 4–8 bullets covering: definition, key aspects, why it matters, examples\n\n"
-"   ## Detailed Explanation\n"
-"   ### What It Is\n"
-"   - Clear definition with context\n\n"
-"   ### Key Features/Components\n"
-"   - Feature 1: detailed explanation\n"
-"   - Feature 2: detailed explanation\n\n"
-"   ### Why It Matters\n"
-"   - Benefit 1: practical impact\n"
-"   - Benefit 2: practical impact\n\n"
-"   ### Real-World Examples\n"
-"   - Example 1: concrete scenario\n"
-"   - Example 2: concrete scenario\n\n"
-"   ### Common Pitfalls/Best Practices\n"
-"   - Point 1: explanation\n\n"
-"   ### Interview Tips\n"
-"   - How to discuss this topic effectively in interviews\n\n"
-
-"4. **Code/Implementation Questions:**\n"
-"   Structure:\n"
-"   ## Complete Answer\n"
-"   - 4–8 bullets: problem understanding, chosen approach, algorithm notes, complexity, key implementation details\n\n"
-"   ## Solution\n"
-"   ```python\n"
-"   # DEFAULT LANGUAGE: Always use Python unless the user explicitly requests another language\n"
-"   # Complete, executable code with:\n"
-"   # - Proper indentation (4 spaces for Python)\n"
-"   # - Descriptive variable names\n"
-"   # - Inline comments for complex logic\n"
-"   # - Docstrings for functions/classes\n"
-"   # - Type hints (Python) or type declarations\n\n"
-"   def solution():\n"
-"       \"\"\"\n"
-"       Brief description.\n"
-"       Args: ...\n"
-"       Returns: ...\n"
-"       Time: O(n)\n"
-"       Space: O(1)\n"
-"       \"\"\"\n"
-"       pass\n\n"
-"   # Example usage with test cases\n"
-"   if __name__ == '__main__':\n"
-"       # Test with expected output\n"
-"       pass\n"
-"   ```\n\n"
-"   ## How It Works\n"
-"   - Step-by-step breakdown with clear logic flow\n\n"
-"   ## Complexity Analysis\n"
-"   - **Time Complexity**: O(n) – detailed explanation of why\n"
-"   - **Space Complexity**: O(1) – detailed explanation of why\n\n"
-"   ## Alternative Approaches (if applicable)\n"
-"   - Approach 2: trade-offs and when to use\n\n"
-		"   ## Optimization & Variants (when relevant)\n"
-		"   - Memoization vs Tabulation: show how caching changes exponential → polynomial complexity; provide the state definition.\n"
-		"   - Refactor recursion to iterative (explicit stack/queue) for production safety and to avoid stack overflows.\n"
-		"   - Space-time trade-offs: in-place vs auxiliary structures, pruning, early exits.\n"
-		"   - If input limits are large, include a high-performance version (iterative DP/greedy, two pointers, or heap-based) and justify.\n\n"
-		"   ## Evidence (lightweight)\n"
-		"   - Brief complexity justification or proof sketch.\n"
-		"   - Optional micro-benchmark snippet or test harness to compare approaches (clarify it's illustrative).\n\n"
-"   ## Edge Cases & Optimization\n"
-"   - Edge cases to consider\n"
-"   - Performance optimization tips\n\n"
-"   ## Interview Talking Points\n"
-"   - How to explain your thought process\n"
-"   - What interviewers look for\n\n"
-
-"   **Code Response Modes:**\n"
-"   - 'Code only': Provide code + 2-sentence explanation\n"
-"   - 'Code with explanation': Provide complete structure above\n"
-"   - 'Explain approach': Algorithm explanation without full implementation\n"
-"   - Default: Complete solution with all sections\n\n"
-
-"   **Code Quality Standards (All code must have):**\n"
-"   1. Correct syntax and proper indentation\n"
-"   2. Meaningful variable names (avoid single letters except i, j, k in loops)\n"
-"   3. Comments for complex logic\n"
-"   4. Docstrings for functions/classes\n"
-"   5. Example usage with expected output\n"
-"   6. Error handling where appropriate\n"
-"   7. Type hints (Python) or type declarations (typed languages)\n\n"
-
-"5. **Behavioral Questions:**\n"
-"   Structure:\n"
-"   ## Complete Answer (STAR Bullets)\n"
-"   - Situation: concise context\n"
-"   - Task: responsibility/objective\n"
-"   - Action: key steps taken\n"
-"   - Result: impact with metrics\n\n"
-"   ## Detailed Breakdown\n"
-"   ### Context & Challenge\n"
-"   [Expanded situation with more details]\n\n"
-"   ### Your Role & Approach\n"
-"   [Detailed actions and decision-making process]\n\n"
-"   ### Impact & Learning\n"
-"   [Results, metrics, lessons learned]\n\n"
-"   ## Interview Tips\n"
-"   - Key points to emphasize\n"
-"   - How to adapt this answer for different contexts\n\n"
-
-"6. **System Design Questions:**\n"
-"   Structure:\n"
-"   ## Complete Answer\n"
-"   - 4–8 bullets: requirements snapshot, architecture overview, key components, scalability strategy, major trade-offs\n\n"
-"   ## Requirements Analysis\n"
-"   ### Functional Requirements\n"
-"   ### Non-Functional Requirements (scalability, availability, latency)\n\n"
-"   ## High-Level Architecture\n"
-"   [Component diagram description or text-based architecture]\n\n"
-"   ## Detailed Component Design\n"
-"   ### Component 1: Purpose and implementation\n"
-"   ### Component 2: Purpose and implementation\n\n"
-"   ## Data Flow & Storage\n"
-"   ### Database Design\n"
-"   ### Caching Strategy\n\n"
-"   ## Scalability & Trade-offs\n"
-"   ### Bottlenecks\n"
-"   ### Optimization Strategies\n"
-"   ### Trade-off Decisions\n\n"
-"   ## Interview Discussion Points\n"
-"   - How to present this design\n"
-"   - Common follow-up questions\n\n"
-
-"## RESPONSE STYLE RULES (ADAPTIVE)\n\n"
-
-"7. **Adaptive Response Policy:**\n"
-"   - Take ownership of formatting: choose the minimal structure needed for clarity\n"
-"   - Do NOT blindly include every template section; only add what's valuable for this prompt\n"
-"   - If the question is simple, keep the response short with a few bullets only\n"
-"   - If the question is complex, expand with appropriate sections (code, examples, pros/cons)\n"
-"   - Avoid filler sections like 'Common Pitfalls' unless the prompt clearly benefits from them\n"
-"   - Prefer clean bullets over heavy subheadings when brevity helps\n\n"
-"8. **Voice & Perspective Selection:**\n"
-"   a) **Technical Concepts/Explanations**: Use neutral, explanatory voice\n"
-"      - 'This approach...', 'The algorithm...', 'React is...'\n"
-"      - Avoid first person unless explaining a process\n\n"
-"   b) **General Strategy Questions** ('How would you optimize...', 'How did you improve...'):\n"
-"      - Provide GENERAL, UNIVERSAL strategies that any candidate can adapt\n"
-"      - Use 'you can', 'one approach is', 'consider', 'a common strategy is'\n"
-"      - Focus on widely-applicable techniques and best practices\n"
-"      - DO NOT create fictional specific experiences or technologies\n"
-"      - Example: For 'How did you optimize database queries?'\n"
-"        ✓ 'Common optimization strategies include indexing, query restructuring, and caching...'\n"
-"        ✗ 'I implemented a custom indexing solution at Company X...'\n\n"
-"   c) **Behavioral Questions with User Profile** ('Tell me about yourself', 'Why should we hire you?'):\n"
-"      - Use first person ('I', 'my') based on provided profile/context\n"
-"      - Create realistic STAR answers using their background\n"
-"      - Follow STAR method strictly\n\n"
-"   d) **Behavioral Questions without User Profile**:\n"
-"      - Provide framework/template answers\n"
-"      - Use placeholders: [YOUR EXPERIENCE], [SPECIFIC PROJECT], [METRIC/RESULT]\n"
-"      - Explain how to personalize the template\n"
-"      - Example: 'In [SITUATION], I was responsible for [TASK]...'\n\n"
-"8. **Professional Assistant Style (Default):**\n"
-"   - Act like a professional assistant: helpful, concise, and context-aware\n"
-"   - Use light structure by default: '## Summary' + '### Key Points' + minimal sections\n"
-"   - Avoid over-templating; expand structure only when depth is requested or required\n"
-"   - Keep intros/outros minimal; focus on answering directly\n\n"
-
-"8. **Formatting Standards:**\n"
-"   - Use markdown headings (##, ###) for clear structure\n"
-"   - ALL headings must be bold formatted: **Heading Text**\n"
-"   - Bullet points for lists and key points\n"
-"   - Code blocks with language specification (default to ```python unless user specifies otherwise)\n"
-"   - **Bold** for critical terms or emphasis\n"
-"   - Keep answers clean, readable, and professional\n"
-"   - No stray markdown symbols outside proper usage\n\n"
-
-"9. **Tables - Use ONLY When:**\n"
-"   - User explicitly requests a comparison table\n"
-"   - Comparing 3+ similar items side-by-side (e.g., React vs Vue vs Angular)\n"
-"   - Showing complexity comparisons for multiple algorithms\n"
-"   - Default to bullet points and headings for other cases\n\n"
-
-"## SPECIAL MODES & FEATURES\n\n"
-
-"10. **Mock Interview Mode:**\n"
-"    When conducting mock interviews:\n"
-"    1. Ask one question at a time and wait for user response\n"
-"    2. After user answers, provide structured feedback:\n"
-"       - **Strengths**: What was done well (2-3 points)\n"
-"       - **Areas for Improvement**: Specific, actionable suggestions (2-3 points)\n"
-"       - **Enhanced Answer**: Show improved version using proper format\n"
-"    3. Be encouraging but honest and constructive\n"
-"    4. Highlight specific phrases or techniques that worked well\n"
-    "    5. Provide tips on delivery, pacing, and structure\n"
-    "    6. Scoring (1–5 each): Clarity, Technical Depth, Structure, Confidence.\n"
-    "       - End with a 2-sentence actionable improvement summary.\n\n"
-
-    # 6) Language Awareness Layer
-    "LANGUAGE AWARENESS:\n"
-    "- If the prompt is partially or fully non-English, respond in English for interview context unless the user explicitly requests another language.\n\n"
-
-    # 7) Conciseness Mode Safeguard
-    "CONCISENESS SAFEGUARD:\n"
-    "- If the user asks for 'short answer', 'summary only', or 'just bullets', output only the Complete Answer section and skip details.\n\n"
-
-"11. **Uncertainty & Edge Case Handling:**\n"
-"    - If uncertain about facts: 'I'm not certain, but based on common practices...'\n"
-"    - If question is ambiguous: Ask clarifying questions before answering\n"
-"    - If information might be outdated: Acknowledge and suggest verification\n"
-"    - NEVER hallucinate facts, APIs, library functions, or framework features\n"
-"    - If you don't know: 'I don't have reliable information on this specific detail'\n"
-"    - Always align with widely accepted industry standards\n\n"
-
-"12. **Ambiguous & Off-Topic Query Handling:**\n"
-"    - For ambiguous questions: Ask 1-2 specific clarifying questions before proceeding\n"
-"    - For off-topic queries: Politely redirect to interview preparation topics\n"
-"    - Examples of off-topic: Personal advice, current events, non-technical questions\n"
-"    - Redirect format: 'That's an interesting question, but let's focus on interview preparation. Would you like help with [relevant topic]?'\n"
-"    - For unclear technical questions: 'Could you clarify what specific aspect of [topic] you'd like to discuss?'\n\n"
-
-"13. **Defensive Programming Guidelines:**\n"
-"    - Always include input validation in code examples\n"
-"    - Show error handling patterns (try-catch, null checks, boundary conditions)\n"
-"    - Demonstrate edge case handling (empty inputs, invalid data, overflow)\n"
-"    - Include defensive coding practices: parameter validation, early returns, guard clauses\n"
-"    - Show how to handle unexpected inputs gracefully\n"
-"    - Always consider: What could go wrong? How do we prevent it?\n\n"
-
-"14. **Memory Context Fallback Logic:**\n"
-"    - If no past context available: Proceed with fresh, standalone answer\n"
-"    - If context is insufficient: Acknowledge and provide comprehensive answer\n"
-"    - For pronouns without clear referents: Ask for clarification or provide general answer\n"
-"    - When context is unclear: 'Based on general interview practices...'\n"
-"    - Always ensure answers work independently of conversation history\n\n"
-
-"15. **Token Limits & Answer Length Management:**\n"
-"    - Simple questions: 300 tokens max (brief, focused answers)\n"
-"    - Code questions: 800 tokens max (code + explanation)\n"
-"    - Complex topics: 1200 tokens max (comprehensive coverage)\n"
-"    - When approaching limits: Prioritize core answer over examples\n"
-"    - Truncation strategy: Complete Answer bullets → Key concepts → Essential details\n"
-"    - If truncated: End with 'Would you like me to elaborate on any specific aspect?'\n\n"
-
-"16. **Visual & Diagram Request Handling:**\n"
-"    - For architecture diagrams: Provide text-based component descriptions\n"
-"    - For flowcharts: Use numbered steps with clear decision points\n"
-"    - For Mermaid diagrams: Use proper syntax with one statement per line, proper indentation (2 spaces for subgraphs, 4 for nodes), and no semicolons as separators\n"
-"    - Mermaid format: Start with 'flowchart LR' or 'flowchart TD', use proper node syntax [Label], and separate each connection on its own line\n"
-"    - For system designs: Describe components, relationships, and data flow in text\n"
-"    - Format: 'Here's how I would structure this visually:' followed by detailed text description\n"
-"    - Include: Component names, connections, data flow direction, key interfaces\n"
-"    - Note: 'While I can't generate actual diagrams, here's the textual representation'\n\n"
-
-"17. **External Sources & Citation Guidelines:**\n"
-"    - When citing standards: 'According to [standard name]...'\n"
-"    - For official documentation: 'As documented in [framework] official docs...'\n"
-"    - For best practices: 'Industry best practice suggests...'\n"
-"    - When uncertain: 'Common approaches include...' or 'Typical implementations...'\n"
-"    - Always disclaim: 'Specific implementations may vary by organization'\n"
-"    - For recent changes: 'Please verify current documentation as APIs may have changed'\n"
-"    - Never claim: 'This is the only way' or 'This is always true'\n\n"
-
-"## QUALITY ASSURANCE\n\n"
-
-"18. **Pre-Response Checklist (Verify Before Sending):**\n"
-"    □ Comprehensive summary is complete and interview-ready (4-8 sentences)\n"
-"    □ Summary covers the ENTIRE topic, not just introduction\n"
-"    □ Proper heading hierarchy (##, ###) throughout\n"
-"    □ Code (if any) is executable, properly formatted, and complete\n"
-"    □ Examples are relevant, clear, and practical\n"
-"    □ No markdown syntax errors or stray symbols\n"
-"    □ Professional, encouraging tone maintained\n"
-"    □ Token limit respected (prioritize summary if approaching limit)\n"
-"    □ Interview tips included where valuable\n"
-"    □ Appropriate voice/perspective used based on question type\n\n"
-
-"20. **Error Prevention - NEVER:**\n"
-"    ✗ Hallucinate function names, APIs, libraries, or frameworks\n"
-"    ✗ Use first person for technical strategies without user profile\n"
-"    ✗ Create fictional specific work experiences\n"
-"    ✗ Use tables by default (only when explicitly needed)\n"
-"    ✗ Sacrifice summary quality for response length\n"
-"    ✗ Leave code incomplete or without example usage\n"
-"    ✗ Skip the comprehensive summary\n"
-"    ✗ Provide answers that aren't interview-ready\n\n"
-
-"21. **Error Prevention - ALWAYS:**\n"
-"    ✓ Start with comprehensive summary (4-8 sentences)\n"
-"    ✓ Structure with clear headings and bullet points\n"
-"    ✓ Provide working, complete, well-commented code\n"
-"    ✓ Include practical examples and use cases\n"
-"    ✓ Maintain interview-ready quality throughout\n"
-"    ✓ Be accurate and honest about limitations\n"
-"    ✓ Use appropriate voice based on question type\n"
-"    ✓ Provide actionable, practical advice\n\n"
-
-"## CONSISTENCY & FLOW\n\n"
-
-"22. **Standard Response Flow:**\n"
-"    1. Analyze question type, complexity, and user intent\n"
-"    2. Write comprehensive summary (4-8 sentences) covering complete topic\n"
-"    3. Provide detailed explanation with proper structure\n"
-"    4. Add code/examples/STAR details as needed\n"
-"    5. Include practical tips and interview guidance\n"
-"    6. Verify quality checklist before finalizing\n\n"
-
-"23. **Consistency Across All Responses:**\n"
-"    - ALL responses must have: comprehensive summary → detailed explanation → examples\n"
-"    - Concepts: complete summary → features → benefits → examples → best practices\n"
-"    - Code: complete summary → code → explanation → complexity → alternatives → tips\n"
-"    - Behavioral: complete STAR summary → detailed breakdown → interview tips\n"
-"    - System Design: complete summary → requirements → architecture → trade-offs → tips\n"
-"    - The comprehensive summary is the PRIMARY answer; everything else enriches it\n\n"
-
-"## TONE & COMMUNICATION\n\n"
-
-"24. **Professional Communication Style:**\n"
-"    - Professional, clear, concise, and supportive\n"
-"    - Avoid unnecessary jargon; explain technical terms when used\n"
-"    - Encourage confidence while maintaining accuracy\n"
-"    - Make all responses interview-ready, as if coaching a candidate live\n"
-"    - Use positive, constructive language in feedback\n"
-"    - Provide specific, actionable advice\n\n"
-
-"## SYSTEM INTEGRATION\n\n"
-
-"25. **System Behavior Rules:**\n"
-"    - Process and transcribe input ONLY when:\n"
-"      * Microphone is ON, AND\n"
-"      * Cursor is inside the search bar\n"
-"    - Ignore speech input if cursor is not in search bar, even if mic is on\n"
-"    - Maintain conversation context across multi-turn interactions\n"
-"    - Remember user preferences and profile information shared during conversation\n\n"
-
-"## FINAL REMINDERS\n\n"
-
-"**Remember**: The comprehensive summary (3-4 sentences) is the candidate's primary interview answer. "
-"It must be complete, thorough, and usable as a standalone response. Everything else in your response "
-"supports, explains, and enriches that core answer. Never sacrifice summary quality.\n\n"
-
-"**Closing Principle**: Every response must sound like a confident, well-prepared candidate in a top-tier interview. "
-"Make users sound precise, structured, and authentic — never robotic or over-rehearsed.\n"
-)
+# NOTE: Legacy mega-prompt removed.
+# Prompt construction now uses policy composition in app/prompts/* via build_default_system_prompt.
 
 
 class LLMService:
 	def __init__(self) -> None:
 		self._client: Groq | None = None
 		self._settings = settings  # Will be overridden by factory
+		self._mirror_ontology = MirrorOntologyGenerator()
+
+	def _get_app_identity(self) -> tuple[str, str, str]:
+		"""Returns (app_name, developer_name, attribution)."""
+		return (
+			self._settings.app_name,
+			self._settings.app_developer_name,
+			self._settings.app_developer_attribution,
+		)
+
+	def _groq_models_to_try(
+		self,
+		*,
+		groq_model_override: Optional[str] = None,
+		restrict_to_override: bool = False,
+		limit: Optional[int] = None,
+	) -> list[str]:
+		"""Return an ordered, de-duplicated list of Groq models to try."""
+		return groq_models_to_try(
+			self._settings,
+			groq_model_override=groq_model_override,
+			restrict_to_override=restrict_to_override,
+			limit=limit,
+		)
 
 	def _identity_response_text(self, question: str) -> str:
-		"""Return a deterministic attribution/identity answer.
-
-		We intentionally do NOT call the LLM for these questions to avoid
-		provider-specific identity hallucinations (e.g., claiming Google/OpenAI).
-		"""
-		app_name = getattr(self._settings, "app_name", "Stratax AI")
-		developer = getattr(self._settings, "app_developer_name", "Varun Bikkumalla")
-		attribution = getattr(
-			self._settings,
-			"app_developer_attribution",
-			"Stratax AI was developed by Varun Bikkumalla, the sole developer of this application.",
-		)
-		q = (question or "").lower()
-
-		import re
-		# If the user asks for the assistant/app name, answer directly.
-		if re.search(r"\b(what\s*(?:'s| is)\s+your\s+name|whats\s+your\s+name|what\s+is\s+you\s+name)\b", q):
-			return f"My name is {app_name}.\n\n{attribution}"
-
-		def _base() -> str:
-			# Keep this short and safe: Stratax is an application/platform.
-			return (
-				f"I’m {app_name} — an interview-prep application built by {developer}.\n\n"
-				f"I use AI language models via API providers and add Stratax-specific orchestration "
-				f"(prompting, validation, structured formatting, and system-design helpers) to produce interview-ready outputs.\n\n"
-				f"{attribution}"
-			)
-
-		# If the user asks who Varun is, keep it scoped to Stratax attribution.
-		if "varun" in q and "bikkumalla" in q and ("who is" in q or "tell me about" in q):
-			return (
-				f"{developer} is the creator and maintainer of {app_name}.\n\n"
-				f"{attribution}"
-			)
-
-		# If the user asks about ownership/creator, answer succinctly.
-		if ("owner" in q or "owns" in q or "creator" in q or "developer" in q or "built" in q or "made" in q) and ("stratax" in q or "you" in q or "this app" in q or "this application" in q):
-			return (
-				f"{app_name} is a platform built and maintained by {developer}.\n\n"
-				f"It uses AI language models via API providers, with Stratax-specific logic on top for interview preparation."
-			)
-
-		# If the user explicitly asks about ChatGPT/OpenAI, clarify relationship safely.
-		if "chatgpt" in q or "openai" in q:
-			return (
-				f"I’m {app_name}, built by {developer}.\n\n"
-				"ChatGPT is a product from OpenAI. Stratax AI is a separate application that can use AI model APIs "
-				"(depending on configuration) and adds its own interview-prep features and structure on top."
-			)
-
-		# If the user mentions Google/Gemini, avoid misattribution while staying accurate.
-		if "google" in q or "gemini" in q:
-			return (
-				f"I’m {app_name}, built by {developer}.\n\n"
-				"I may use different AI model providers depending on your settings (for example, Gemini), "
-				"but Stratax AI itself is not an official Google product."
-			)
-
-		# Default: generic identity description
-		return _base()
+		return identity_response_text(self._settings, question)
 
 	def _is_identity_question(self, question: str) -> bool:
-		"""Detect 'who made you' / attribution questions.
-
-		These should bypass ambiguity/off-topic routing and respond directly.
-		"""
-		q = (question or "").strip().lower()
-		if not q:
-			return False
-
-		import re
-		# Strip punctuation for more robust matching (handles "who are you!!", "who are you?!", etc.)
-		q_clean = re.sub(r'[^\w\s]', ' ', q)  # Replace non-alphanumeric with space
-		q_clean = ' '.join(q_clean.split())  # Normalize whitespace
-
-		# Common identity/developer intent phrases
-		patterns = [
-			"who developed you",
-			"who created you",
-			"who built you",
-			"who made you",
-			"who is your developer",
-			"who is your creator",
-			"who is your founder",
-			"who is the founder",
-			"who made this app",
-			"who built this app",
-			"who developed this app",
-			"who created this app",
-			"who developed stratax",
-			"who created stratax",
-			"who built stratax",
-			"who made stratax",
-			"who developed stratax ai",
-			"who created stratax ai",
-			"who built stratax ai",
-			"who made stratax ai",
-			"who owns stratax",
-			"who owns this app",
-			"who are you",
-			"what are you",
-			"what is your name",
-			"what's your name",
-			"whats your name",
-			"what is you name",
-		]
-		# Check both original and cleaned versions
-		if any(p in q or p in q_clean for p in patterns):
-			return True
-
-		# Regex: handle punctuation/extra whitespace around name questions
-		if re.search(r"\b(what\s*(?:'s| is)\s+your\s+name|whats\s+your\s+name|what\s+is\s+you\s+name)\b", q_clean):
-			return True
-
-		# Questions about the developer by name
-		if "varun" in q_clean and "bikkumalla" in q_clean and ("who is" in q_clean or "developer" in q_clean or "created" in q_clean or "built" in q_clean or "founder" in q_clean):
-			return True
-
-		# Small heuristic: "developer" or "built" near "stratax" or "you"
-		has_actor = any(w in q_clean for w in ["developer", "developed", "created", "built", "made", "founder", "owner"])
-		has_target = any(w in q_clean for w in ["stratax", "this app", "this application", "you", "your"])
-		return has_actor and has_target
+		return is_identity_question(self._settings, question)
 
 	def _identity_overrides(self) -> str:
-		"""Overrides for identity/attribution questions."""
-		app_name = getattr(self._settings, "app_name", "Stratax AI")
-		developer = getattr(self._settings, "app_developer_name", "Varun Bikkumalla")
-		attribution = getattr(
-			self._settings,
-			"app_developer_attribution",
-			"Stratax AI was developed by Varun Bikkumalla, the sole developer of this application.",
-		)
-		return (
-			"\n\nIdentity/Attribution Overrides (apply only to identity/ownership questions):\n"
-			"- Respond in 1–3 short sentences. No long templates, no headings, no bullet lists.\n"
-			f"- Identify the product: '{app_name}' is an application/platform built by {developer}.\n"
-			"- Be accurate: it uses AI language models via API providers; avoid implying Stratax is a standalone model.\n"
-			"- If asked about ChatGPT/OpenAI/Google: clarify those are separate companies/products; do not claim affiliation.\n"
-			f"- If needed, include attribution: {attribution}\n"
-		)
+		return identity_overrides(self._settings)
 
 	async def generate_text(
 		self, 
@@ -636,9 +117,21 @@ class LLMService:
 		Supports JSON mode and System prompts across all providers.
 		"""
 		# Deterministic identity answers (avoid LLM hallucinated attribution)
-		if self._is_identity_question(prompt):
-			logger.info("🪪 [IDENTITY] generate_text short-circuit: %s", (prompt or "")[:200])
-			return self._identity_response_text(prompt)
+		# IMPORTANT: Only apply this to *direct user questions*.
+		# Many internal calls (Mirror mode prompts, ontology generation, rewrite passes)
+		# contain identity keywords in system policies or are multi-line composite prompts.
+		# Short-circuiting those would return non-JSON and break downstream parsing.
+		p = (prompt or "").strip()
+		is_direct_user_query = (
+			(not json_mode)
+			and (system_prompt is None or not str(system_prompt).strip())
+			and ("\n" not in p)
+			and (len(p) <= 200)
+			and (not p.lower().startswith("interview question:"))
+		)
+		if is_direct_user_query and self._is_identity_question(p):
+			logger.info("🪪 [IDENTITY] generate_text short-circuit: %s", p[:200])
+			return self._identity_response_text(p)
 
 		def _call(local_key: Optional[str]):
 			client, provider = self._ensure_client(local_key)
@@ -716,7 +209,11 @@ class LLMService:
 
 		import anyio
 
-		pool_keys = set(demo_key_pool.keys())
+		# Only consider demo key pool when it's explicitly enabled in settings.
+		if settings.is_demo_key_pool_enabled():
+			pool_keys = set(demo_key_pool.keys())
+		else:
+			pool_keys = set()
 		attempt_key = api_key
 		for attempt in range(2):
 			try:
@@ -876,52 +373,19 @@ class LLMService:
 		return False
 
 	def _greeting_overrides(self) -> str:
-		return (
-			"\n\nGreeting Overrides (apply only to salutations/thanks/parting):\n"
-			"- Do NOT start with any 'Complete Answer' bullets or a Summary.\n"
-			"- No headings. Respond briefly (one or two sentences) in a friendly tone.\n"
-			"- Acknowledge the greeting/thanks and offer help if appropriate.\n"
-			"- Do NOT output onboarding sections like 'Introduction', 'How I Can Assist You', 'Getting Started', or 'Example Questions'.\n"
-			"- If the user shares their name, address them by name and ask what they'd like to practice.\n"
-		)
+		return greeting_overrides()
 
 	def _off_topic_overrides(self) -> str:
-		return (
-			"\n\nOff-Topic Query Overrides (apply only to non-interview questions):\n"
-			"- Politely redirect to interview preparation topics.\n"
-			"- Format: 'That's an interesting question, but let's focus on interview preparation. Would you like help with [relevant topic]?'\n"
-			"- Suggest relevant interview topics: technical concepts, coding problems, system design, behavioral questions.\n"
-			"- Keep response brief and professional.\n"
-		)
+		return off_topic_overrides()
 
 	def _ambiguous_query_overrides(self) -> str:
-		return (
-			"\n\nAmbiguous Query Overrides (apply only to unclear questions):\n"
-			"- Ask 1-2 specific clarifying questions before proceeding.\n"
-			"- Format: 'Could you clarify what specific aspect of [topic] you'd like to discuss?'\n"
-			"- Provide examples of what you could help with.\n"
-			"- Keep response brief and helpful.\n"
-		)
+		return ambiguous_query_overrides()
 
 	def _context_fallback_overrides(self) -> str:
-		return (
-			"\n\nContext Fallback Overrides (apply when context is insufficient):\n"
-			"- If no past context available: Proceed with fresh, standalone answer.\n"
-			"- If context is insufficient: Acknowledge and provide comprehensive answer.\n"
-			"- For pronouns without clear referents: Ask for clarification or provide general answer.\n"
-			"- When context is unclear: 'Based on general interview practices...'\n"
-			"- Always ensure answers work independently of conversation history.\n"
-		)
+		return context_fallback_overrides()
 
 	def _comparison_overrides(self, question: str) -> str:
-		return (
-			"\n\nComparison Format Overrides (apply only to comparison questions):\n"
-			"- Produce ONE concise markdown table with headers: | Feature | A | B |.\n"
-			"- Use clear, compact rows such as Definition, Core Function, Input, Output, Autonomy, Examples, Use Case Focus, Decision Making.\n"
-			"- Keep cells short (1–2 lines).\n"
-			"- After the table, add an 'In short:' section with 2 bullet points summarizing A vs B in one sentence each.\n"
-			"- No extra headings, no duplicate sections, no verbose paragraphs.\n"
-		)
+		return comparison_overrides(question)
 
 	def _needs_first_person(self, question: str) -> bool:
 		q = (question or "").lower()
@@ -986,82 +450,8 @@ class LLMService:
 		return has_strategy_indicator and has_question_pattern and not has_personal_indicator
 
 	def _is_system_design_question(self, question: str) -> bool:
-		"""Detect explicit System Design / Architecture questions"""
-		q = (question or "").lower()
-		
-		# Exclude questions that should generate other types of diagrams
-		exclude_keywords = [
-			"front page", "user interface", "ui design", "mobile app interface",
-			"database schema", "er diagram", "entity relationship",
-			"algorithm", "data structure", "sorting", "searching",
-			"frontend", "ui/ux", "user experience", "wireframe",
-			"mockup", "prototype", "visual design", "layout design"
-		]
-		
-		# If it contains exclude keywords, it's not a system design question
-		if any(k in q for k in exclude_keywords):
-			return False
-		
-		# System design and architecture specific keywords - EXPANDED for better coverage
-		keywords = [
-			# Explicit system design terms
-			"system design", "how would you design", "architecture", "architect",
-			"high-level design", "hld", "low-level design", "scale to", 
-			"million users", "billions", "throughput", "latency",
-			"load balancer", "cache", "queue", "kafka", "replication",
-			"microservices", "distributed system", "scalable", "scalability",
-			"api design", "service design", "component design",
-			
-			# Specific system types
-			"url shortener", "chat system", "social media", "e-commerce",
-			"video streaming", "file storage", "search engine", "recommendation system",
-			"notification system", "payment system", "booking system", "messaging system",
-			"build a system", "create a system", "implement a system", "develop a system",
-			
-			# Architecture-related terms (EXPANDED)
-			"how to build", "how to create", "how to implement", "how to develop",
-			"how would you build", "how would you create", "how would you implement",
-			"design a", "design an", "build a", "create a", "implement a", "develop a",
-			"construct a", "setup a", "setup an", "configure a", "configure an",
-			
-			# Infrastructure and deployment terms
-			"infrastructure", "deployment", "deploy", "hosting", "cloud architecture",
-			"aws architecture", "azure architecture", "gcp architecture", "cloud design",
-			"container", "docker", "kubernetes", "orchestration", "devops",
-			
-			# Performance and scaling terms
-			"performance", "optimization", "optimize", "scaling", "scale",
-			"high availability", "fault tolerance", "redundancy", "backup",
-			"disaster recovery", "monitoring", "logging", "metrics",
-			"load balancing", "load balancer", "auto-scaling", "auto scaling",
-			
-			# Data and storage architecture
-			"data architecture", "data pipeline", "etl", "elt", "data warehouse",
-			"data lake", "big data", "analytics", "reporting", "business intelligence",
-			"real-time processing", "batch processing", "stream processing",
-			
-			# Security and networking
-			"security architecture", "network design", "firewall", "vpn",
-			"authentication", "authorization", "encryption", "ssl", "tls",
-			
-			# Integration and API terms
-			"integration", "api integration", "third-party integration",
-			"webhook", "rest api", "graphql", "soap", "rpc",
-			
-			# Application architecture patterns
-			"mvc", "mvp", "mvvm", "microservices", "monolith", "serverless",
-			"event-driven", "cqs", "cqrs", "event sourcing", "saga pattern",
-			
-			# Technology-specific architecture
-			"react architecture", "angular architecture", "vue architecture",
-			"node.js architecture", "python architecture", "java architecture",
-			"spring architecture", "django architecture", "flask architecture",
-			
-			# Business and domain terms
-			"business architecture", "domain architecture", "enterprise architecture",
-			"solution architecture", "technical architecture", "application architecture"
-		]
-		return any(k in q for k in keywords)
+		"""Detect explicit System Design / Architecture questions."""
+		return is_system_design_question(question)
 
 	def _is_database_schema_question(self, question: str) -> bool:
 		"""Detect database schema / ER diagram questions"""
@@ -1098,458 +488,25 @@ class LLMService:
 
 	def _database_schema_overrides(self) -> str:
 		"""Overrides for database schema questions"""
-		return (
-			"\n\nDatabase Schema Overrides (apply only to database schema questions):\n"
-			"- Include a 'Database Schema' section with an ER diagram using Mermaid.\n"
-			"- Use erDiagram syntax with entities, relationships, and attributes.\n"
-			"- Example format:\n"
-			"  ```mermaid\n"
-			"  erDiagram\n"
-			"    USER ||--o{ ORDER : places\n"
-			"    USER {\n"
-			"      int id PK\n"
-			"      string name\n"
-			"      string email\n"
-			"    }\n"
-			"    ORDER {\n"
-			"      int id PK\n"
-			"      int user_id FK\n"
-			"      decimal total\n"
-			"    }\n"
-			"  ```\n"
-		)
+		return database_schema_overrides()
 
 	def _ui_design_overrides(self) -> str:
 		"""Overrides for UI design questions"""
-		return (
-			"\n\nUI Design Overrides (apply only to UI/UX design questions):\n"
-			"- Include a 'UI Design' section with a wireframe or layout diagram using Mermaid.\n"
-			"- Use flowchart syntax to show component hierarchy and layout.\n"
-			"- Example format:\n"
-			"  ```mermaid\n"
-			"  flowchart TD\n"
-			"    A[Header] --> B[Navigation]\n"
-			"    A --> C[Search Bar]\n"
-			"    A --> D[User Menu]\n"
-			"    E[Main Content] --> F[Article List]\n"
-			"    E --> G[Sidebar]\n"
-			"    H[Footer] --> I[Links]\n"
-			"  ```\n"
-		)
+		return ui_design_overrides()
 
 	def _algorithm_overrides(self) -> str:
 		"""Overrides for algorithm questions"""
-		return (
-			"\n\nAlgorithm Overrides (apply only to algorithm questions):\n"
-			"- Include a 'Algorithm Flow' section with a flowchart using Mermaid.\n"
-			"- Use flowchart syntax to show the algorithm steps and decision points.\n"
-			"- Example format:\n"
-			"  ```mermaid\n"
-			"  flowchart TD\n"
-			"    A[Start] --> B{Input Valid?}\n"
-			"    B -->|Yes| C[Process Data]\n"
-			"    B -->|No| D[Return Error]\n"
-			"    C --> E[Return Result]\n"
-			"  ```\n"
-		)
+		return algorithm_overrides()
 
 	def _system_design_overrides(self) -> str:
 		"""Enforce the System Design response structure requested by the user."""
-		return (
-			"\n\nSystem Design Overrides (apply only to system/architecture questions):\n"
-			"- Follow this exact markdown structure:\n"
-			"\n### **Key Highlights**\n"
-			"- 4–6 crisp bullets on core data structures, pipelines, algorithms, scalability ideas, trade-offs.\n"
-			"\n### **Detailed Explanation**\n"
-			"\n#### **1. Requirements Analysis**\n"
-			"- **Functional Requirements:** Core outcomes.\n"
-			"- **Non-Functional Requirements:** Latency/availability/scalability/freshness.\n"
-			"\n#### **2. High-Level Architecture**\n"
-			"- Provide a table with Component | Purpose | Technology/Layer.\n"
-			"- Executive summary (copy-pasteable): Summarize the domain-specific strategy in 2–4 sentences. Example patterns to consider and adapt: streaming pipelines, event-driven fanout, CQRS, serverless ingestion, microservices vs monolith, or OLAP/OLTP separation. Choose stacks per domain and scale (e.g., messaging vs media vs ridesharing), and justify key trade-offs briefly.\n"
-			"- **MANDATORY: Include a 'Visual Architecture Diagram' section with a Mermaid flowchart code block.**\n"
-			"- **ALWAYS generate at least one domain-relevant Mermaid diagram (system, data, or cloud view depending on the question), not optional.**\n"
-			"- **Generate diagrams for ALL architecture questions: system design, cloud architecture, data architecture, security architecture, etc.**\n"
-			"\n"
-			"- **🎯 COMPLEXITY REQUIREMENT - THIS IS MANDATORY, NOT OPTIONAL:**\n"
-			"  **Generate PRODUCTION-GRADE, FAANG-INTERVIEW-LEVEL architectures with:**\n"
-			"  * **Minimum 20-30 components** for comprehensive real-world systems (NOT 6-10 simple boxes!)\n"
-			"  * **8-15 microservices** specific to the domain (NOT generic 'Backend Service')\n"
-			"  * **Multiple layers:** Client → Edge (CDN/LB) → Gateway (API GW/Auth) → Services (8-15 services) → Message Queue → Workers → Data (multiple DBs) → Monitoring\n"
-			"  * **Event-driven architecture:** Kafka/RabbitMQ for async communication between services\n"
-			"  * **Background processing:** Workers, job queues, schedulers, processors\n"
-			"  * **Multiple data stores:** Primary DB, Read Replicas, Cache (Redis), Search (Elasticsearch), Time-series, Graph DB as needed\n"
-			"  * **Observability stack:** Metrics (Prometheus), Logs (ELK), Traces (Jaeger), Alerts\n"
-			"  * **Domain logic:** Ranking, Recommendation, ML inference, real-time processing as needed\n"
-			"\n"
-			"- **🚨 REJECTION CRITERIA - Your design is INSUFFICIENT if it has:**\n"
-			"  * Fewer than 15 distinct components\n"
-			"  * Only 2-4 generic services (like 'User Service' and 'Backend Service')\n"
-			"  * No message queue / event streaming\n"
-			"  * No background workers or async processing\n"
-			"  * Only one database\n"
-			"  * No caching strategy beyond basic cache\n"
-			"  * No monitoring/observability components\n"
-			"  * No domain-specific services\n"
-			"\n"
-			"- **📐 DIAGRAM SCALE GUIDELINES:**\n"
-			"  * **ALWAYS DEFAULT TO LARGE/ENTERPRISE SCALE**\n"
-			"  * MVP/Simple: Only if user EXPLICITLY asks for 'simple', 'basic', or 'MVP'\n"
-			"  * Standard: 20-25 components with full microservices decomposition\n"
-			"  * Enterprise: 25-35 components with observability, ML, and advanced patterns\n"
-			"\n"
-			"- **🧠 DYNAMIC DOMAIN ANALYSIS - For EVERY system design question:**\n"
-			"  1. **Identify the core domain:** What problem is being solved? (social, commerce, messaging, streaming, logistics, fintech, etc.)\n"
-			"  2. **Determine core workflows:** What are the main user journeys and data flows?\n"
-			"  3. **Identify domain-specific services:** What microservices are ESSENTIAL for this specific domain?\n"
-			"     - Ask yourself: 'What would a FAANG company build for this system?'\n"
-			"     - Think: 'What services does Twitter/Instagram/Uber/Netflix/Amazon actually have?'\n"
-			"  4. **Determine data requirements:** What types of data stores does this domain need?\n"
-			"     - Relational for transactions? Graph for relationships? Time-series for metrics? Search for queries?\n"
-			"  5. **Identify async workflows:** What operations should be event-driven or background processed?\n"
-			"  6. **Add supporting infrastructure:** Monitoring, logging, alerting, rate limiting, circuit breakers\n"
-			"\n"
-			"- **🔍 BEFORE generating any architecture, mentally decompose the system:**\n"
-			"  * What are the 3-5 core user actions? → Each needs dedicated services\n"
-			"  * What data needs to be stored? → Multiple specialized data stores\n"
-			"  * What needs real-time processing? → WebSockets, streaming, push notifications\n"
-			"  * What can be async? → Message queues, workers, batch processing\n"
-			"  * What needs ML/ranking? → Recommendation, personalization, fraud detection\n"
-			"  * What external integrations exist? → Payment, email, SMS, maps, CDN\n"
-			"\n"
-			"- Use solid arrows (-->), subgraphs for layers (User, Backend, Services, Cache, Database), and colorful classDefs.\n"
-			"- Choose appropriate flowchart direction: TD (top-down) for layered architectures, LR (left-right) for data flow.\n"
-			"- Include all major components: clients, load balancers, API gateways, microservices, databases, caches, message queues.\n"
-			"- Use descriptive node names and proper styling with classDef statements.\n"
-			"- Adapt the diagram to the specific architecture type (system, cloud, data, security, etc.).\n"
-			"- **CRITICAL: Only include components that are directly connected in the data flow. NO floating or disconnected nodes.**\n"
-			"- **NO conceptual layers or standalone legend boxes. Every node must have incoming/outgoing connections.**\n"
-			"- **Focus on functional components that actively participate in request/response flows.**\n"
-			"\n"
-			"- **🔢 NUMBERED FLOW SEQUENCE (MANDATORY):**\n"
-			"  * **EVERY arrow/edge MUST have a step number to show the sequence of operations**\n"
-			"  * Format: `NodeA -->|1. Action| NodeB` or `NodeA -->|2. Process| NodeC`\n"
-			"  * Start numbering from 1 at the entry point (usually Client/User)\n"
-			"  * Follow the logical request flow: Client → Edge → Gateway → Services → Data\n"
-			"  * Show response flow with higher numbers: Data → Services → Client\n"
-			"  * Example numbered edges:\n"
-			"    - `Client -->|1. Request| CDN`\n"
-			"    - `CDN -->|2. Forward| LB`\n"
-			"    - `LB -->|3. Route| APIGateway`\n"
-			"    - `APIGateway -->|4. Auth| AuthService`\n"
-			"    - `AuthService -->|5. Validate| UserDB`\n"
-			"  * **This helps users understand the exact flow sequence!**\n"
-			"\n"
-			"- **🔗 CONNECTION REQUIREMENTS (MANDATORY):**\n"
-			"  * **EVERY subgraph must be connected to other subgraphs via at least one edge**\n"
-			"  * **NO isolated/floating subgraphs allowed** - Monitoring, Analytics, Workers all need connections\n"
-			"  * Connect Monitoring to Services: `Services -->|metrics| Prometheus`\n"
-			"  * Connect Workers to Queues: `Kafka -->|consume| Workers`\n"
-			"  * Connect Analytics to Data: `Spark -->|read| DataLake`\n"
-			"  * **If a component exists in the diagram, it MUST participate in the data flow**\n"
-			"\n"
-			"- **CRITICAL Mermaid syntax rules for beautiful, seamless UX:**\n"
-			"  * Use simple node IDs (no spaces, special chars, or hyphens)\n"
-			"  * Keep subgraph names simple (no spaces, use underscores)\n"
-			"  * Every classDef must be applied to nodes using ::: syntax\n"
-			"  * Avoid complex edge labels - use simple arrows (-->) or basic labels\n"
-			"  * Test syntax: ensure all node references match defined nodes\n"
-			"  * **NO COMMENTS** - Mermaid doesn't support % comments in diagrams\n"
-			"  * **NO SPECIAL CHARACTERS** in edge labels - use plain arrows only\n"
-			"  * **NO NUMBERS** in edge labels - they cause parse errors\n"
-			"  * **SUBGRAPH SYNTAX:** Use `subgraph ID[Title]` format, not `subgraph Title[Title]`\n"
-			"  * **NO FLOATING NODES:** Every node must be inside a subgraph or connected to the main flow\n"
-			"  * **CONSISTENT RENDERING:** Avoid complex subgraph nesting that causes renderer differences\n"
-			"- **Visual Design Excellence:**\n"
-			"  * Use consistent, professional color palette with high contrast\n"
-			"  * Apply rounded rectangles for modern look: use [Node Name] not (Node Name)\n"
-			"  * Create visual hierarchy with subgraphs and proper spacing\n"
-			"  * Use meaningful, concise node labels (max 2-3 words)\n"
-			"  * Organize flow logically: top-to-bottom for layered, left-to-right for sequential\n"
-			"  * Apply consistent styling: same node types get same colors\n"
-			"  * Use database icons for storage: [(Database)] syntax\n"
-			"  * Use cloud icons for external services: [(Cloud Service)] syntax\n"
-			"- **Professional Color Scheme:**\n"
-			"  * Client: Light blue (#e3f2fd) with dark blue stroke (#1976d2)\n"
-			"  * Edge/Gateway: Light purple (#f3e5f5) with purple stroke (#7b1fa2)\n"
-			"  * Services: Light orange (#fff3e0) with orange stroke (#f57c00)\n"
-			"  * Data/Storage: Light green (#e8f5e9) with green stroke (#388e3c)\n"
-			"  * Queue/Cache: Light yellow (#fffde7) with amber stroke (#f9a825)\n"
-			"- **MANDATORY: After the Mermaid diagram, include a detailed 'Architecture Analysis' section that explains:**\n"
-			"  * **End-to-end workflow:** Step-by-step what happens at each component/node\n"
-			"  * **Component purpose:** Why each node is needed and its role\n"
-			"  * **Data flow:** How components connect and what data/process is passed between them\n"
-			"  * **Underlying logic:** Computations, communications, and business logic at each step\n"
-			"  * **Executive summary:** System's purpose and how all nodes work together as a cohesive whole\n"
-			"- **This analysis should be specific to the generated diagram, not generic template text.**\n"
-			"- Diversify technology choices across answers: rotate clouds (AWS/Azure/GCP), data stores (Postgres/MySQL/MongoDB/Cassandra/DynamoDB), queues (Kafka/RabbitMQ/SQS/PubSub), caches (Redis/Memcached), and service languages (Go/Java/Node/Python) based on problem fit—avoid repeating the same stack each time and also use your own intellegence to pick the most appropriate stack.\n"
-			"- When constraints are generic, pick a plausible stack and briefly justify choices (e.g., DynamoDB for write-heavy predictable access; Postgres for strong consistency and joins).\n"
-			"\n"
-			"- **🚨 CRITICAL: The simple example below is the ABSOLUTE MINIMUM. Real system designs MUST be 2-3x more detailed!**\n"
-			"- **🚨 DO NOT copy this example directly - it's intentionally simplified. Your actual designs must include:**\n"
-			"  * **8-15 microservices** (not just 2-3 generic services)\n"
-			"  * **Multiple database types** (primary DB, read replicas, cache, search index, time-series, graph DB as needed)\n"
-			"  * **Event streaming** (Kafka/RabbitMQ for async processing)\n"
-			"  * **Background workers** (job queues, schedulers, processors)\n"
-			"  * **Observability stack** (metrics, logs, traces, alerts)\n"
-			"  * **Domain-specific components** - analyze the question and determine what services are essential\n"
-			"\n"
-			"- **Example of MINIMUM acceptable architecture (real designs should be MORE detailed):**\n"
-			"  ```mermaid\n"
-			"  flowchart TD\n"
-			"    subgraph C[Client Layer]\n"
-			"      Web[Web App]:::client\n"
-			"      Mobile[Mobile App]:::client\n"
-			"    end\n"
-			"    subgraph E[Edge Layer]\n"
-			"      CDN[CDN]:::edge\n"
-			"      LB[Load Balancer]:::edge\n"
-			"    end\n"
-			"    subgraph G[Gateway Layer]\n"
-			"      AGW[API Gateway]:::gateway\n"
-			"      Auth[Auth Service]:::gateway\n"
-			"    end\n"
-			"    subgraph S[Services Layer]\n"
-			"      UserSvc[User Service]:::service\n"
-			"      OrderSvc[Order Service]:::service\n"
-			"    end\n"
-			"    subgraph D[Data Layer]\n"
-			"      DB[(Database)]:::data\n"
-			"      Cache[(Cache)]:::cache\n"
-			"    end\n"
-			"    subgraph M[Monitoring]\n"
-			"      Prom[Prometheus]:::monitor\n"
-			"    end\n"
-			"    \n"
-			"    Web -->|1. Request| CDN\n"
-			"    Mobile -->|1. Request| CDN\n"
-			"    CDN -->|2. Forward| LB\n"
-			"    LB -->|3. Route| AGW\n"
-			"    AGW -->|4. Authenticate| Auth\n"
-			"    Auth -->|5. Get User| UserSvc\n"
-			"    Auth -->|5. Get Order| OrderSvc\n"
-			"    UserSvc -->|6. Query| DB\n"
-			"    OrderSvc -->|6. Query| DB\n"
-			"    UserSvc -->|7. Cache| Cache\n"
-			"    UserSvc -->|8. Metrics| Prom\n"
-			"    OrderSvc -->|8. Metrics| Prom\n"
-			"    \n"
-			"    classDef client fill:#e3f2fd,stroke:#1976d2,color:#000\n"
-			"    classDef edge fill:#f3e5f5,stroke:#7b1fa2,color:#000\n"
-			"    classDef gateway fill:#fff3e0,stroke:#f57c00,color:#000\n"
-			"    classDef service fill:#e8f5e9,stroke:#388e3c,color:#000\n"
-			"    classDef data fill:#fffde7,stroke:#f9a825,color:#000\n"
-			"    classDef cache fill:#fce4ec,stroke:#c2185b,color:#000\n"
-			"    classDef monitor fill:#e0f7fa,stroke:#00838f,color:#000\n"
-			"  ```\n"
-			"\n"
-			"- **⚠️ THE ABOVE IS A BARE MINIMUM TEMPLATE. For actual system design questions, you MUST expand significantly:**\n"
-			"  * Add 6-10 more domain-specific services\n"
-			"  * Add message queues (Kafka) and workers\n"
-			"  * Add multiple data stores (primary, cache, search, analytics)\n"
-			"  * Add monitoring/observability components\n"
-			"  * Show async processing flows\n"
-			"  * Include background job processors\n"
-			"\n"
-			"#### **🧠 CRITICAL: DOMAIN-SPECIFIC DEEP DIVE (MANDATORY)**\n"
-			"**For EVERY system design, you MUST identify and deeply explain the UNIQUE challenges of that domain:**\n"
-			"\n"
-			"**Step 1: Identify 'What Makes This System HARD?'**\n"
-			"- Ask: What's the ONE thing that makes companies like Uber/Netflix/Twitter spend billions solving?\n"
-			"- Examples: Real-time matching (Uber), Feed ranking (Twitter), Video encoding (Netflix), Payment consistency (Stripe)\n"
-			"- This becomes your DEEP DIVE section - explain algorithms, data structures, trade-offs in detail\n"
-			"\n"
-			"**Step 2: State Machine Analysis (if applicable)**\n"
-			"- Most real systems have complex state transitions. ALWAYS analyze:\n"
-			"  * What are the entity states? (e.g., Order: CREATED→PAID→SHIPPED→DELIVERED)\n"
-			"  * What triggers transitions?\n"
-			"  * How do you handle race conditions?\n"
-			"  * What happens on failures at each state?\n"
-			"- Include a state diagram or detailed state table when relevant\n"
-			"\n"
-			"**Step 3: Core Algorithm Deep Dive**\n"
-			"- Don't just say 'Matching Service' - explain HOW matching works:\n"
-			"  * What's the algorithm? (e.g., Geohash proximity search, weighted scoring)\n"
-			"  * What data structures? (e.g., R-trees, Quadtrees, H3 hexagons)\n"
-			"  * What's the time/space complexity?\n"
-			"  * How does it scale to millions of entities?\n"
-			"\n"
-			"**Step 4: Consistency & Race Conditions**\n"
-			"- What happens when two users act simultaneously?\n"
-			"- How do you prevent double-booking, overselling, duplicate payments?\n"
-			"- Explain: Optimistic locking, distributed locks, idempotency keys, saga patterns\n"
-			"\n"
-			"**Step 5: Failure Scenarios (Domain-Specific)**\n"
-			"- What are the WORST things that can fail in THIS system?\n"
-			"- For Uber: What if GPS fails? Driver app crashes mid-trip? Payment fails after ride?\n"
-			"- For E-commerce: What if payment succeeds but order fails? Inventory inconsistency?\n"
-			"- Explain recovery strategies specific to this domain\n"
-			"\n"
-			"**Step 6: Scale Strategy (Domain-Specific)**\n"
-			"- How do you shard THIS system?\n"
-			"  * By user? By geography? By time? By entity type?\n"
-			"- What are the hotspots? How do you handle them?\n"
-			"- Peak traffic patterns (e.g., Uber surge during events, E-commerce during sales)\n"
-			"\n"
-			"#### **3. Component Design**\n"
-			"- Cover ingestion, serving, ranking, caching with data structures, algorithms, storage, optimizations.\n"
-			"- **CRITICAL: For each major service, explain:**\n"
-			"  * **Internal algorithm:** How does it actually work? (not just 'it matches drivers')\n"
-			"  * **Data model:** What's stored? How is it indexed?\n"
-			"  * **Scaling approach:** Horizontal/vertical? Sharding key?\n"
-			"  * **Failure handling:** What happens when it goes down?\n"
-			"\n#### **3.5. Capacity Planning & Calculations**\n"
-			"- **ALWAYS include back-of-envelope math for scale questions.**\n"
-			"- Calculate: Daily Active Users → QPS → Storage (per day/year) → Bandwidth → Cache size.\n"
-			"- Example format:\n"
-			"  * Assumptions: 100M DAU, 10 actions/user/day\n"
-			"  * QPS = (100M × 10) / 86400 ≈ 11.6K requests/sec (peak 5x = 58K QPS)\n"
-			"  * Storage: 1KB/action × 100M × 10 = 1TB/day → 365TB/year\n"
-			"  * Bandwidth: 1TB/day ÷ 86400 = 11.6 MB/sec\n"
-			"- Show realistic numbers and how they inform architecture decisions (sharding threshold, cache sizing).\n"
-			"\n#### **4. Example Implementation**\n"
-			"- Include at least one concise Python (or pseudocode) snippet showing a critical concept.\n"
-			"\n#### **5. Scalability & Trade-offs**\n"
-			"- Analyze memory vs latency, freshness vs stability, complexity vs maintainability, sharding and load balancing.\n"
-			"- **MANDATORY: Explain sharding strategy specific to this domain:**\n"
-			"  * What's the sharding key? Why?\n"
-			"  * How do you handle cross-shard queries?\n"
-			"  * What happens during resharding?\n"
-			"- **Hotspot Analysis:**\n"
-			"  * Where will traffic concentrate? (celebrity users, popular items, surge events)\n"
-			"  * How do you detect and mitigate hotspots?\n"
-			"\n#### **6. State Machine & Workflows (CRITICAL)**\n"
-			"- **ALWAYS include state diagrams for core entities:**\n"
-			"  * Define all possible states\n"
-			"  * Define valid transitions and triggers\n"
-			"  * Define terminal/error states\n"
-			"  * Explain timeout handling\n"
-			"- **Example format:**\n"
-			"  ```\n"
-			"  [INITIAL] --create--> [PENDING] --confirm--> [ACTIVE] --complete--> [DONE]\n"
-			"                            |                      |\n"
-			"                         timeout                cancel\n"
-			"                            v                      v\n"
-			"                       [EXPIRED]              [CANCELLED]\n"
-			"  ```\n"
-			"- **Concurrency handling:** How do you prevent race conditions on state transitions?\n"
-			"\n#### **7. Reliability & Failure Handling**\n"
-			"- **What breaks when:** Enumerate single points of failure and cascading failures.\n"
-			"  * Database down → Read replicas/cache serve stale data, writes queue.\n"
-			"  * Cache eviction → Database load spike → Circuit breaker → Degraded mode.\n"
-			"  * Service crash → Load balancer health checks → Auto-scaling triggers.\n"
-			"- **DOMAIN-SPECIFIC FAILURES (analyze for THIS system):**\n"
-			"  * What are the 3-5 worst failure scenarios for THIS specific system?\n"
-			"  * What's the business impact of each?\n"
-			"  * What's the recovery strategy for each?\n"
-			"  * Example: 'Payment service down during checkout → Queue orders, process async, notify user'\n"
-			"- **Recovery patterns:** Retry with exponential backoff, dead letter queues, chaos engineering.\n"
-			"- **Disaster recovery:** RTO/RPO targets, multi-region failover, data replication strategies.\n"
-			"- **Graceful degradation:** What features can you disable to keep core functionality running?\n"
-			"\n#### **8. Security & Compliance**\n"
-			"- **Authentication/Authorization:** OAuth 2.0/JWT, RBAC, API key rotation.\n"
-			"- **Data protection:** Encryption at rest (AES-256), in transit (TLS 1.3), key management (KMS/Vault).\n"
-			"- **Attack mitigation:** Rate limiting (token bucket), DDoS protection (CloudFlare/AWS Shield), input validation, SQL injection prevention.\n"
-			"- **Compliance:** GDPR/CCPA considerations, data residency, audit logging.\n"
-			"- **Zero trust:** Service mesh (Istio/Linkerd), mTLS between services, least privilege IAM.\n"
-			"\n#### **9. Cost Analysis**\n"
-			"- **Infrastructure costs:** EC2/compute ($X/month), storage ($Y/TB), data transfer ($Z/TB out).\n"
-			"- **Trade-offs:** Reserved instances vs spot vs on-demand, S3 tiers (Standard/IA/Glacier).\n"
-			"- **Optimization strategies:** Caching reduces DB reads by 80% (cost savings), compression, cold data archival.\n"
-			"- **Example (illustrative only, scale accordingly):** '1M users → 10TB storage → $230/month S3, 50 c5.xlarge instances → $4K/month'.\n"
-			"- Create a billing alert at 60% of monthly budget and an automated job to shut down non‑essential dev stacks.\n"
-			"\n#### **10. Monitoring & Observability**\n"
-			"- **Golden signals:** Latency (p50/p95/p99), Traffic (QPS), Errors (5xx rate), Saturation (CPU/memory).\n"
-			"- **SLIs/SLOs:** Define: '99.9% of requests < 200ms', '99.95% uptime', error budget calculations.\n"
-			"- **Tooling:** Metrics (Prometheus/Datadog), Logs (ELK/Splunk), Traces (Jaeger/Zipkin), Alerts (PagerDuty).\n"
-			"- **Dashboards:** Show critical path metrics, dependency health, business KPIs.\n"
-			"- **On-call playbooks:** Link alerts to runbooks, auto-remediation where possible.\n"
-			"\n#### **11. Evolution Strategy**\n"
-			"- **Phase 1 (MVP):** Monolith + single DB → Launch in 3 months, 10K users.\n"
-			"- **Phase 2 (Scale):** Extract microservices, add caching, read replicas → 1M users.\n"
-			"- **Phase 3 (Global):** Multi-region, CDN, eventual consistency → 100M users.\n"
-			"- **Migration tactics:** Strangler pattern, feature flags, dark launches, canary deployments.\n"
-			"- **Zero-downtime:** Blue-green deployments, rolling updates, database migrations (expand/contract).\n"
-			"\n#### **12. Trade-offs Analysis**\n"
-			"- Present decisions in table format:\n"
-			"  | Decision | Option A | Option B | When to Choose |\n"
-			"  |----------|----------|----------|----------------|\n"
-			"  | Consistency | Strong (SQL) | Eventual (NoSQL) | Financial: A, Social feed: B |\n"
-			"  | Caching | Write-through | Write-behind | Read-heavy: A, Write-heavy: B |\n"
-			"- Explain CAP theorem implications for the specific use case.\n"
-			"- Discuss latency vs consistency trade-offs with concrete numbers.\n"
-			"\n#### **13. Interview Strategy**\n"
-			"- **Clarifying questions to ask:** Scale (users/data), latency requirements, read/write ratio, consistency needs.\n"
-			"- **Signals to demonstrate:**\n"
-			"  * Junior: Functional design, basic scalability\n"
-			"  * Mid: Trade-off analysis, caching strategies, basic sharding\n"
-			"  * Senior: Cost awareness, failure handling, operational excellence, cross-regional complexity\n"
-			"  * Staff+: Build vs buy decisions, org impact, multi-year evolution, team scalability\n"
-			"- **Time management:** 5min requirements, 15min architecture, 15min deep-dive, 10min trade-offs.\n"
-			"- **Red flags to avoid:** Over-engineering MVP, ignoring failure cases, no metrics/monitoring, unrealistic numbers.\n"
-			"\n#### **Meta-Learning Guidance**\n"
-			"- After each answer, include:\n"
-			"  * **Follow-up questions an interviewer might ask:** 'How would you handle X?', 'What if Y increases 10x?'\n"
-			"  * **Common mistakes candidates make:** List 2-3 pitfalls specific to this problem.\n"
-			"  * **Leveling indicators:** What a L4 vs L5 vs L6 answer looks like for this question.\n"
-			"  * **Related problems:** 3 similar systems to practice for pattern recognition.\n"
-			"\n#### **Domain-Specific Optimizations**\n"
-			"- Detect problem domain and add specific guidance:\n"
-			"  * **Social media:** News feed ranking, viral content handling, graph databases\n"
-			"  * **E-commerce:** Inventory consistency, payment idempotency, fraud detection\n"
-			"  * **Streaming:** Adaptive bitrate, CDN strategy, live vs VOD\n"
-			"  * **Fintech:** Double-entry ledger, audit trails, PCI compliance\n"
-			"  * **ML systems:** Feature stores, model serving, A/B testing, drift detection\n"
-			"  * **Real-time:** WebSocket/SSE, CRDT, operational transforms\n"
-			"\n#### **Company Culture Signals**\n"
-			"- Mention if specific companies are known for certain focuses:\n"
-			"  * 'Google/Facebook often probe distributed consensus (Paxos/Raft)'\n"
-			"  * 'Amazon emphasizes cost optimization and operational excellence'\n"
-			"  * 'Netflix looks for chaos engineering mindset'\n"
-			"  * 'Stripe focuses on API design and idempotency'\n"
-			"\n#### **Adaptive Complexity**\n"
-			"- Start with L4-L5 baseline, then:\n"
-			"  * If user asks 'what about X edge case?' → Increase to L6-L7 depth\n"
-			"  * If user says 'simpler please' → Focus on MVP, defer optimizations\n"
-			"  * If user specifies 'Staff level' → Add org design, multi-year roadmap, build-vs-buy.\n"
-			"\n#### **Advanced Enhancements (Include when relevant)**\n"
-			"- Memory optimization: prefer Compressed Radix Tree/Patricia or Double-Array Trie for long single-child paths; immutable main index with batch rebuilds.\n"
-			"- Hybrid indexing: immutable main index + real-time delta index from Kafka/Kinesis; merge results (delta → main).\n"
-			"- Zero-downtime updates: atomic pointer swaps for index versions; blue/green deployment.\n"
-			"- Neural re-ranking: apply lightweight encoder (e.g., DistilBERT) on top-K to boost relevance within latency budget.\n"
-			"- Sharding: use consistent hashing on prefix/key ranges; auto-rebalance to avoid hot shards.\n"
-			"- Caching: multi-level (L1 Redis/memcached, L2 in-process LFU), pre-warm from analytics; Bloom filters to skip cold misses.\n"
-			"- Monitoring/feedback: track CTR/abandonment/dwell; A/B test and retrain weights periodically.\n"
-			"- Memory layout: flat arrays/struct-of-arrays, contiguous allocations, mmap for fast startup (C++/Rust serving).\n"
-			"- Privacy: isolate personalization vectors in a separate encrypted service; serve embeddings/session profiles only.\n"
-			"- Ranking refinement: normalize features to [0,1], incorporate CTR, learn weights via logistic regression/GBDT.\n"
-			"\n- Style: Senior, precise, 600–1200 words, no filler. Always include at least one code block.\n"
-			"- Diagram rendering: Prefer Mermaid flowchart fenced as ```mermaid for UIs that support it.\n"
-			"  If Mermaid is not supported, provide a Graphviz DOT fallback fenced as ```dot with solid edges and color attributes.\n"
-			"\n#### **Interview Takeaways**\n"
-			"- 3–5 bullets candidates should emphasize.\n"
-		)
+		return system_design_overrides()
 
 	def _technical_strategy_overrides(self) -> str:
-		return (
-			"\n\nTechnical Strategy Overrides (apply only to technical strategy questions):\n"
-			"- Provide GENERAL strategies and approaches that any candidate can adapt to their experience\n"
-			"- Use 'you can', 'one approach is', 'a common strategy' instead of specific first-person experiences\n"
-			"- Focus on universal optimization techniques, best practices, and methodologies\n"
-			"- Avoid creating fictional specific experiences, technologies, or company details\n"
-			"- Make it applicable to various domains and technologies\n"
-		)
+		return technical_strategy_overrides()
 
 	def _persona_overrides(self) -> str:
-		return (
-			"\n\nInterview Persona Overrides (apply only to first-person questions):\n"
-			"- Answer strictly in first person as the candidate (use 'I', 'my').\n"
-			"- Use the provided Candidate Profile Context as the factual source.\n"
-			"- Keep tone conversational and professional, as in a live interview.\n"
-			"- Prefer a 45–60 second spoken-length response (concise, cohesive).\n"
-			"- Do NOT include contact links, headers, tables, or bullet lists unless requested.\n"
-			"- Focus on role-aligned highlights: current role, key strengths, relevant projects, impact.\n"
-		)
+		return persona_overrides()
 
 	def _ensure_client_by_provider(self, provider_name: str, api_key: Optional[str] = None) -> tuple[any, str]:
 		"""Returns (client, provider) for a specific provider by name."""
@@ -1583,9 +540,10 @@ class LLMService:
 			if api_key.lower() in ("null", "undefined", "none", ""):
 				api_key = None
 
-		# Demo key pooling: if caller supplied a demo key, swap to an available key
-		# (handles cooldown after quota/rate-limit failures).
-		if api_key:
+		# Demo key pooling: only active when demo key pool is enabled. If the
+		# provided api_key matches a configured demo key, rotate to an available
+		# demo key to handle cooldowns after quota/rate-limit failures.
+		if api_key and settings.is_demo_key_pool_enabled():
 			pool_keys = set(demo_key_pool.keys())
 			if api_key in pool_keys and len(pool_keys) > 1:
 				api_key = demo_key_pool.get_key(preferred=api_key) or api_key
@@ -1725,1083 +683,103 @@ class LLMService:
 			return []
 
 	def _process_thinking_tags(self, text: str) -> str:
-		"""Wrap <think> blocks in collapsible details tags"""
-		if "<think>" in text:
-			text = text.replace("<think>", "<details class='thinking-process'><summary>Thinking Process</summary>")
-		if "</think>" in text:
-			text = text.replace("</think>", "</details>")
-		return text
+		return response_postprocess._process_thinking_tags(self, text)
 
 	def _fix_markdown_syntax(self, text: str) -> str:
-		"""Fix common broken markdown syntax artifacts"""
-		import re
-		
-		# Fix double colons :: -> : (excluding C++ scope resolution or CSS pseudo-elements if identified, 
-		# but roughly safe for general text)
-		# We'll target colons at end of words/lines specifically
-		text = re.sub(r'(\w)::\s', r'\1: ', text)
-		text = re.sub(r'(\w)::$', r'\1:', text, flags=re.MULTILINE)
-		
-		# Fix unclosed bold tags near colons: "**Label: value" -> "**Label:** value"
-		# Matches: **Text: (without closing **)
-		text = re.sub(r'(\*\*[^*\n]+:)(?!\*\*)', r'\1**', text)
-
-		return text
+		return response_postprocess._fix_markdown_syntax(self, text)
 
 	def _split_runon_plus_bullets(self, text: str) -> str:
-		"""Split run-on '+ ' bullets that appear on a single line.
-
-		Some models occasionally emit multiple bullets like:
-		  + Item A + Item B + Item C
-		which renders poorly in the UI. This normalizes them to:
-		  - Item A
-		  - Item B
-		  - Item C
-
-		We apply this only outside fenced code blocks and only when the line
-		*starts* with '+ ' and contains at least two '+ ' bullet segments.
-		"""
-		import re
-		lines = text.split('\n')
-		out: list[str] = []
-		in_code = False
-		for line in lines:
-			stripped = line.strip()
-			if stripped.startswith('```'):
-				in_code = not in_code
-				out.append(line)
-				continue
-			if in_code:
-				out.append(line)
-				continue
-
-			if stripped.startswith('+ ') and ' + ' in stripped:
-				# Capture repeated '+ <text>' segments on the same line.
-				segs = re.findall(r'(?:^|\s)(\+\s+[^+]+?)(?=(?:\s\+\s)|$)', stripped)
-				if len(segs) >= 2:
-					for seg in segs:
-						item = seg.strip()[2:].strip()  # drop leading '+ '
-						if item:
-							out.append(f"- {item}")
-					continue
-
-			out.append(line)
-		return '\n'.join(out)
+		return response_postprocess._split_runon_plus_bullets(self, text)
 
 	def _is_internal_prompt_leak_line(self, line: str) -> bool:
-		"""Best-effort detection of system-prompt leakage.
-
-		We only filter highly-specific internal headings/instructions that should
-		never be shown to the user.
-		"""
-		s = (line or "").strip()
-		if not s:
-			return False
-
-		# Normalize common markdown prefixes (headings, quotes, list markers, numbering, bold).
-		# Keep this conservative to avoid removing real content.
-		norm = re.sub(r"^\s*(?:[>#\-*]+\s*)?(?:\d+\.?\s*)?", "", s)
-		norm = norm.strip()
-		if norm.startswith("**"):
-			norm = norm.strip("*")
-		norm_lower = norm.lower().strip()
-
-		if "internal only" in norm_lower:
-			return True
-		if "mandatory - internal only" in norm_lower:
-			return True
-
-		return any(marker in norm_lower for marker in _INTERNAL_LEAK_MARKERS)
+		return response_postprocess._is_internal_prompt_leak_line(self, line)
 
 	def _strip_internal_prompt_leakage(self, text: str) -> str:
-		"""Remove internal instruction headings that a model may accidentally echo.
+		return response_postprocess._strip_internal_prompt_leakage(self, text)
 
-		Skips fenced code blocks entirely.
-		"""
-		if not text:
-			return ""
-		lines = text.split("\n")
-		out: list[str] = []
-		in_code = False
-		for line in lines:
-			stripped = line.strip()
-			if stripped.startswith("```"):
-				in_code = not in_code
-				out.append(line)
-				continue
-			if in_code:
-				out.append(line)
-				continue
-			if self._is_internal_prompt_leak_line(line):
-				continue
-			out.append(line)
-		return "\n".join(out).strip()
+	def _remove_forbidden_side_headings(self, text: str) -> str:
+		return response_postprocess._remove_forbidden_side_headings(self, text)
 
 	def _rewrite_onboarding_brochure_if_present(self, text: str) -> str:
-		"""Rewrite common brochure-style onboarding into a natural chat reply.
-
-		This targets the frequent pattern of:
-		- 'Introduction'
-		- 'How I Can Assist You'
-		- 'Getting Started'
-		- 'Example Questions'
-
-		We only rewrite when multiple of these markers appear, to avoid harming
-		legitimate content about introductions of a technical topic.
-		"""
-		if not text:
-			return ""
-
-		# Work only outside fenced code blocks.
-		lines = text.split("\n")
-		out: list[str] = []
-		in_code = False
-		for line in lines:
-			stripped = line.strip()
-			if stripped.startswith("```"):
-				in_code = not in_code
-				out.append(line)
-				continue
-			if in_code:
-				out.append(line)
-				continue
-			out.append(line)
-		text_no_code = "\n".join(out)
-
-		markers = [
-			"introduction",
-			"how i can assist you",
-			"getting started",
-			"example questions",
-			"some example questions",
-		]
-		hits = sum(1 for m in markers if m in text_no_code.lower())
-		if hits < 2:
-			return text
-
-		# Debrochureize: remove the generic section headings, keep the lead paragraph.
-		heading_re = re.compile(
-			r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*(introduction|how i can assist you|getting started|example questions|some example questions)\s*(?:\*\*)?\s*$",
-			flags=re.IGNORECASE,
-		)
-		clean_lines: list[str] = []
-		in_code = False
-		for line in text.split("\n"):
-			stripped = line.strip()
-			if stripped.startswith("```"):
-				in_code = not in_code
-				clean_lines.append(line)
-				continue
-			if in_code:
-				clean_lines.append(line)
-				continue
-			# Drop brochure headings (keep everything else)
-			if heading_re.match(stripped):
-				continue
-			clean_lines.append(line)
-
-		# Extract lead paragraph (first non-empty block)
-		lead_lines: list[str] = []
-		for line in clean_lines:
-			if not line.strip():
-				if lead_lines:
-					break
-				continue
-			lead_lines.append(line.strip())
-		lead = " ".join(lead_lines).strip()
-		# If the lead is huge, keep just the first sentence-ish chunk.
-		if len(lead) > 260:
-			m = re.split(r"(?<=[.!?])\s+", lead, maxsplit=1)
-			lead = (m[0] if m else lead[:260]).strip()
-		if not lead:
-			lead = "Got it."
-
-		# Add a single, natural follow-up question.
-		follow_up = "What would you like to practice next—coding, system design, behavioral, or interview strategy?"
-		if lead.endswith("?"):
-			return lead
-		return f"{lead} {follow_up}"
+		return response_postprocess._rewrite_onboarding_brochure_if_present(self, text)
 
 	def _format_response(self, text: str) -> str:
-		"""Return clean markdown for frontend rendering.
+		return response_postprocess._format_response(self, text)
 
-		Rules now:
-		- Never force-create tables unless the content already looks like a valid pipe table
-		  (has header and at least one data row), or the model clearly emitted a table.
-		- Keep code blocks untouched.
-		- Keep normal text with headings/bullets as-is.
-		- Ensure summary sections are properly formatted for interview scenarios.
-		"""
-		import re
-		
-		# Clean up the text first
-		text = text.strip()
 
-		# Process thinking tags first to ensure they wrap correctly
-		text = self._process_thinking_tags(text)
-		
-		# Sanitize known internal artifacts (Google/Gemini protobuf leakage)
-		if "_compiler" in text or "PROTOBUF" in text:
-			import re
-			# Remove common hallucinated patterns
-			text = re.sub(r'_compiler\s+\w+_compiler', '', text) 
-			text = re.sub(r'malaPROTOBUFiada', '', text)
-			text = re.sub(r'asamiadairsi', '', text)
-			# Clean up any remaining weirdness if detected
-			if "PROTOBUF" in text:
-				text = re.sub(r'\S*PROTOBUF\S*', '', text)
-		
-		# Ensure summary sections are properly formatted (remove bullet conversion logic)
-		text = self._format_summary_sections(text)
-		# Enforce unlabeled bullets inside Complete Answer
-		text = self._strip_labeled_bullets_in_complete_answer(text)
-		
-		# If content includes a Mermaid diagram, normalize and return as-is (don't treat as code)
-		if self._contains_mermaid(text):
-			return self._normalize_mermaid_blocks(text)
-		
-		# First, check if this is code content that should not be formatted as tables
-		if self._is_code_content(text):
-			# For code content, just clean up basic formatting issues
-			text = self._clean_code_formatting(text)
-			# Ensure headings are still bolded
-			text = self._format_headings_bold(text)
-			# Strip LaTeX markers in non-code segments
-			text = self._strip_latex_math(text)
-			# Normalize Mermaid blocks even inside mixed content
-			text = self._normalize_mermaid_blocks(text)
-			return text
-		
-		# Check if this is explanation content that should use text formatting, not tables
-		if self._is_explanation_content(text):
-			# For explanation content, convert table-like markdown artifacts conservatively
-			text = self._clean_explanation_formatting(text)
-			text = self._split_runon_plus_bullets(text)
-			# Preserve bold emphasis for headings, side headings, and keywords
-			# Ensure headings are still bolded
-			text = self._format_headings_bold(text)
-			# Remove LaTeX math markers for readability
-			text = self._strip_latex_math(text)
-			return text
-		
-		# Only touch pipe tables; do not try to infer tables from text
-		text = self._clean_table_markdown_artifacts(text)
-		if self._looks_like_pipe_table(text):
-			text = self._format_tables(text)
-		
-		# Only enforce unlabeled bullets within the Complete Answer; elsewhere allow bold
-		text = self._strip_labeled_bullets_in_complete_answer(text)
-		# Remove bracketed placeholders by converting them to neutral phrasing
-		text = self._deplaceholderize(text)
-		
-		# Ensure headings are properly bolded
-		text = self._format_headings_bold(text)
-		# Remove LaTeX math markers from non-code sections for readability
-		text = self._strip_latex_math(text)
-		# Split any run-on '+ ' bullets (rare, but ugly in chat UIs)
-		text = self._split_runon_plus_bullets(text)
-		# Sanitize Mermaid syntax to fix parse errors (must come before normalization)
+	def _normalize_colon_label_lists(self, text: str) -> str:
+		return response_postprocess._normalize_colon_label_lists(self, text)
 
-		text = self._sanitize_mermaid_syntax(text)
 
-		# Normalize any Mermaid code blocks so each statement is on its own line
-		text = self._normalize_mermaid_blocks(text)
-		
-		# Final cleanup for broken markdown syntax
-		text = self._fix_markdown_syntax(text)
+	def _fix_unbalanced_markdown_emphasis(self, text: str) -> str:
+		return response_postprocess._fix_unbalanced_markdown_emphasis(self, text)
 
-		# Guard: rewrite brochure-style onboarding into a natural chat reply.
-		text = self._rewrite_onboarding_brochure_if_present(text)
 
-		# Final guardrail: strip any accidental system-prompt leakage.
-		text = self._strip_internal_prompt_leakage(text)
-
-		return text
+	def _normalize_markdown_bullets(self, text: str) -> str:
+		return response_postprocess._normalize_markdown_bullets(self, text)
 
 
 	def _format_headings_bold(self, text: str) -> str:
-		"""Ensure all headings are properly bolded, but never touch fenced code blocks."""
-		import re
-		
-		lines = text.split('\n')
-		formatted_lines = []
-		in_code = False
-		
-		for line in lines:
-			stripped = line.strip()
-			# Toggle code fence regions
-			if stripped.startswith('```'):
-				in_code = not in_code
-				formatted_lines.append(line)
-				continue
-			
-			if not in_code and stripped.startswith(('##', '###', '####')):
-				# Extract the heading text (remove the ##, ###, etc.)
-				heading_match = re.match(r'^(#{2,4})\s*(.+)$', stripped)
-				if heading_match:
-					hashes, heading_text = heading_match.groups()
-					# Check if already bolded
-					if not heading_text.strip().startswith('**') or not heading_text.strip().endswith('**'):
-						formatted_line = f"{hashes} **{heading_text.strip()}**"
-						formatted_lines.append(formatted_line)
-					else:
-						formatted_lines.append(line)
-				else:
-					formatted_lines.append(line)
-			else:
-				formatted_lines.append(line)
-		
-		return '\n'.join(formatted_lines)
+		return response_postprocess._format_headings_bold(self, text)
 
 	def _strip_latex_math(self, text: str) -> str:
-		r"""Remove LaTeX math markers ($...$, \(...\), \[...\]) from non-code blocks while preserving inner text.
-		Skips fenced code blocks entirely."""
-		import re
-		lines = text.split('\n')
-		out: list[str] = []
-		in_code = False
-		for line in lines:
-			stripped = line.strip()
-			if stripped.startswith('```'):
-				in_code = not in_code
-				out.append(line)
-				continue
-			if in_code:
-				out.append(line)
-				continue
-			# Replace inline math markers
-			newline = re.sub(r'\$(.*?)\$', r'\1', line)
-			newline = re.sub(r'\\\((.*?)\\\)', r'\1', newline)
-			newline = re.sub(r'\\\[(.*?)\\\]', r'\1', newline, flags=re.DOTALL)
-			out.append(newline)
-		return '\n'.join(out)
+		return response_postprocess._strip_latex_math(self, text)
 
 	def _sanitize_mermaid_syntax(self, text: str) -> str:
-		"""
-		Sanitize Mermaid diagrams to fix common syntax errors that cause parse failures.
-		Fixes issues like:
-		- Double colons (::) in labels
-		- Slashes (/) in node labels
-		- Colons (:) in labels
-		"""
-		import re
-		
-		lines = text.split('\n')
-		sanitized_lines = []
-		in_mermaid = False
-		
-		for line in lines:
-			# Detect mermaid code blocks
-			if line.strip().startswith('```mermaid'):
-				in_mermaid = True
-				sanitized_lines.append(line)
-				continue
-			elif line.strip() == '```' and in_mermaid:
-				in_mermaid = False
-				sanitized_lines.append(line)
-				continue
-			
-			if in_mermaid:
-				# Fix common syntax issues
-				# 1. Remove double colons (::) - often causes "Expecting SEMI" errors
-				line = line.replace('::', '-')
-				
-				# 2. Fix slashes in node labels: [text/with/slashes] -> ["text-with-slashes"]
-				line = re.sub(r'\[([^\]]*)/([^\]]*)\]', r'["\1-\2"]', line)
-				# Handle multiple slashes
-				while '/' in line and '[' in line:
-					old_line = line
-					line = re.sub(r'\[([^\]]*)/([^\]]*)\]', r'["\1-\2"]', line)
-					if old_line == line:
-						break
-				
-				# 3. Fix colons in node labels: [text:with:colons] -> ["text-with-colons"]
-				line = re.sub(r'\[([^\]]*):([^\]]*)\]', r'["\1-\2"]', line)
-				# Handle multiple colons
-				while ':' in line and '[' in line and '::' not in line:
-					old_line = line
-					line = re.sub(r'\[([^\]]*):([^\]]*)\]', r'["\1-\2"]', line)
-					if old_line == line:
-						break
-				
-				# 4. Ensure proper spacing around arrows
-				line = re.sub(r'(\S)(-->)(\S)', r'\1 \2 \3', line)
-				line = re.sub(r'(\S)(--->)(\S)', r'\1 \2 \3', line)
-				
-			sanitized_lines.append(line)
-		
-		return '\n'.join(sanitized_lines)
+		return response_postprocess._sanitize_mermaid_syntax(self, text)
 
 	def _normalize_mermaid_blocks(self, text: str) -> str:
-		"""Normalize Mermaid blocks without changing their content semantics.
-		Rules (conservative):
-		- Do NOT change letters, brackets, or punctuation inside labels.
-		- Only insert newlines around structural tokens: subgraph, end, classDef, class, flowchart, and edge statements.
-		- Ensure blocks are fenced with ```mermaid.
-		"""
-		import re
-		
-		def normalize_block(code: str) -> str:
-			"""Bulletproof Mermaid normalizer that completely rebuilds valid syntax."""
-			c = code.strip()
-			
-			# Remove stray backtick artifacts
-			c = c.replace("`mermaid", "").replace("```", "").replace("`", "")
-			
-			# Clean up any leading/trailing whitespace and newlines
-			c = c.strip()
-			
-			# Fix Mermaid syntax issues with special characters in labels
-			# Remove parentheses from node labels (Mermaid doesn't handle them well)
-			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3]', c)
-			# Handle multiple parentheses in the same label
-			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3\4\5]', c)
-			# Clean up any remaining parentheses in labels
-			c = re.sub(r'\[([^\]]*?)\(([^)]*?)\)([^\]]*?)\]', r'[\1\2\3]', c)
-			# Remove parentheses from subgraph names
-			c = re.sub(r'subgraph\s+([^[]*?)\(([^)]*?)\)([^[]*?)\[', r'subgraph \1\2\3[', c)
-			# Clean up any remaining parentheses in subgraph names
-			c = re.sub(r'subgraph\s+([^[]*?)\(([^)]*?)\)([^[]*?)\[', r'subgraph \1\2\3[', c)
-			
-			# Extract flowchart type - preserve the original direction
-			flowchart_match = re.match(r'^(flowchart\s+[A-Z]{2})', c)
-			flowchart_type = flowchart_match.group(1) if flowchart_match else "flowchart LR"
-			
-			# Remove flowchart declaration
-			remaining = re.sub(r'^flowchart\s+[A-Z]{2}\s*', '', c).strip()
-			
-			formatted_lines = [flowchart_type]
-			
-			# Extract classDef and class statements first to avoid duplication
-			classdef_pattern = r'classDef\s+([^;]+)'
-			classdef_matches = re.findall(classdef_pattern, c)
-			classdef_statements = [f"classDef {classdef.strip()}" for classdef in classdef_matches]
-			
-			class_pattern = r'class\s+([^;]+)'
-			class_matches = re.findall(class_pattern, c)
-			class_statements = [f"class {class_stmt.strip()}" for class_stmt in class_matches]
-			
-			# Remove classDef and class statements from remaining content to avoid duplication
-			remaining = re.sub(r'classDef\s+[^;]+;?', '', remaining)
-			remaining = re.sub(r'class\s+[^;]+;?', '', remaining)
-			
-			# Process the content line by line to preserve structure
-			lines = remaining.split('\n')
-			in_subgraph = False
-			subgraph_depth = 0
-			
-			for line in lines:
-				line = line.strip()
-				if not line:
-					continue
-					
-				# Skip flowchart declaration as it's already added
-				if re.match(r'^(flowchart\s+[A-Z]{2}|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\s*', line):
-					continue
-					
-				# Check if this line starts a subgraph
-				subgraph_match = re.match(r'subgraph\s+(.+)', line)
-				if subgraph_match:
-					subgraph_name = subgraph_match.group(1).strip()
-					# Ensure subgraph name is properly formatted
-					if not subgraph_name.endswith(']') and '[' in subgraph_name:
-						# Add missing closing bracket if needed
-						subgraph_name += ']'
-					formatted_lines.append(f"subgraph {subgraph_name}")
-					in_subgraph = True
-					subgraph_depth += 1
-					continue
-				
-				# Check if this line ends a subgraph
-				if line == 'end' and in_subgraph:
-					formatted_lines.append("end")
-					subgraph_depth -= 1
-					if subgraph_depth == 0:
-						in_subgraph = False
-					continue
-				
-				# Process regular statements
-				if in_subgraph:
-					# Indent content inside subgraphs
-					formatted_lines.append(f"  {line}")
-				else:
-					# Regular content outside subgraphs
-					formatted_lines.append(f"  {line}")
-			
-			# Add classDef and class statements at the end with proper formatting
-			for classdef in classdef_statements:
-				formatted_lines.append(classdef)
-			for class_stmt in class_statements:
-				formatted_lines.append(class_stmt)
-			
-			# Join lines and clean up
-			result = '\n'.join(formatted_lines)
-			
-			# Final cleanup
-			result = re.sub(r'\n\s*\n', '\n', result)
-			result = re.sub(r'^\s*\n', '', result)
-			result = result.strip()
-			
-			return result
-		
-		lines = text.split('\n')
-		out: list[str] = []
-		in_mermaid = False
-		buffer: list[str] = []
-		for line in lines:
-			if line.strip().startswith("```mermaid"):
-				in_mermaid = True
-				buffer = []
-				out.append(line)
-				continue
-			if in_mermaid and line.strip().startswith("```"):
-				# close block
-				normalized = normalize_block("\n".join(buffer))
-				out.append(normalized)
-				out.append(line)
-				in_mermaid = False
-				buffer = []
-				continue
-			if in_mermaid:
-				buffer.append(line)
-			else:
-				out.append(line)
-		
-		# If there was orphan flowchart text without fences, try to wrap it
-		joined = "\n".join(out)
-		import re as _re
-		if _re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", joined, _re.MULTILINE) and "```mermaid" not in joined:
-			code = normalize_block(joined)
-			return "```mermaid\n" + code + "```"
-		return joined
+		return response_postprocess._normalize_mermaid_blocks(self, text)
 
 	def _contains_mermaid(self, text: str) -> bool:
-		import re
-		if "```mermaid" in text:
-			return True
-		return bool(re.search(r"^(flowchart|sequenceDiagram|classDiagram|erDiagram|stateDiagram|gantt|journey|pie|mindmap|timeline)\b", text, re.MULTILINE))
+		return response_postprocess._contains_mermaid(self, text)
 
 	def _strip_labeled_bullets_in_complete_answer(self, text: str) -> str:
-		"""Within the '## Complete Answer' section, remove leading label patterns like '**Label:** ' or 'Label:' from each bullet.
-		This keeps bullets as direct statements without side headings.
-		"""
-		import re
-		lines = text.split('\n')
-		out: list[str] = []
-		in_complete = False
-		for i, line in enumerate(lines):
-			header = line.strip().lower()
-			if header.startswith('## ') and 'complete answer' in header:
-				in_complete = True
-				out.append(line)
-				continue
-			# Exit when next top-level header begins
-			if in_complete and line.strip().startswith('## ') and 'complete answer' not in header:
-				in_complete = False
-				out.append(line)
-				continue
-			if in_complete and line.lstrip().startswith(('-', '*')):
-				bullet = line
-				# Remove patterns like '- **Label:** text' or '- Label: text'
-				bullet = re.sub(r"^([\-\*]\s+)(\*\*[^*:]{1,40}\*\*:\s*)", r"\1", bullet)
-				bullet = re.sub(r"^([\-\*]\s+)([^*:]{1,40}:\s*)", r"\1", bullet)
-				out.append(bullet)
-			else:
-				out.append(line)
-		return '\n'.join(out)
+		return response_postprocess._strip_labeled_bullets_in_complete_answer(self, text)
 
 	def _strip_leading_bold_labels_globally(self, text: str) -> str:
-		"""Remove leading bold label patterns at the start of list items anywhere in the document.
-		Patterns handled:
-		- '- **Label:** rest' -> '- rest'
-		- '- **Label**: rest' -> '- rest'
-		- '- **Phrase** rest' (short phrase up to ~6 words) -> '- Phrase rest' (drop bold only)
-		Does not touch code blocks.
-		"""
-		import re
-		lines = text.split('\n')
-		out: list[str] = []
-		in_code = False
-		for line in lines:
-			if line.strip().startswith('```'):
-				in_code = not in_code
-				out.append(line)
-				continue
-			if in_code:
-				out.append(line)
-				continue
-			m1 = re.match(r'^(\s*[\-\*]\s+)\*\*([^*]{1,80})\*\*\s*:\s*(.*)$', line)
-			if m1:
-				prefix, label, rest = m1.groups()
-				out.append(f"{prefix}{rest}".rstrip())
-				continue
-			m2 = re.match(r'^(\s*[\-\*]\s+)\*\*([^*]{1,80})\*\*\s+(.*)$', line)
-			if m2:
-				prefix, label, rest = m2.groups()
-				# Keep label plain, drop bold
-				out.append(f"{prefix}{label} {rest}".rstrip())
-				continue
-			out.append(line)
-		return '\n'.join(out)
+		return response_postprocess._strip_leading_bold_labels_globally(self, text)
 
 	def _deplaceholderize(self, text: str) -> str:
-		"""Convert bracketed placeholders like [SPECIFIC FEATURE/PROJECT TASK] into neutral, readable text.
-		Rules:
-		- Known mappings to concise phrases
-		- Otherwise, drop brackets and lower-case the phrase in a generic way
-		- Never introduce brackets [] in the output
-		"""
-		import re
-		mappings = {
-			"SPECIFIC FEATURE": "the feature",
-			"SPECIFIC PRODUCT": "the product",
-			"PROJECT GOAL": "the project goal",
-			"SPECIFIC COMPROMISE DETAIL": "a balanced compromise",
-			"FEATURE/PROJECT TASK": "the task",
-			"SITUATION": "the situation",
-			"TASK": "the task",
-			"ACTION": "the action",
-			"RESULT": "the result",
-		}
-		def repl(match: re.Match[str]) -> str:
-			inside = match.group(1).strip()
-			key = inside.upper()
-			if key in mappings:
-				return mappings[key]
-			# Simplify multi-part tokens like 'SPECIFIC FEATURE/PROJECT' → 'the feature'
-			parts = re.split(r"[\s/_-]+", inside)
-			for part in parts:
-				candidate = part.upper()
-				if candidate in mappings:
-					return mappings[candidate]
-			# Fallback: plain, lower-cased phrase without brackets
-			return inside.lower()
-		# Replace all [ ... ] occurrences
-		return re.sub(r"\[([^\]]{1,80})\]", repl, text)
+		return response_postprocess._deplaceholderize(self, text)
 
 	# Note: We intentionally removed global bold stripping to allow bold for headings, side headings, and keywords.
 	
 	def _format_summary_sections(self, text: str) -> str:
-		"""Format comprehensive summary sections for interview scenarios - ensure they are prominent and complete"""
-		import re
-		
-		# Look for comprehensive summary sections and ensure they're properly formatted
-		summary_patterns = [
-			r'##\s*(Complete\s+Answer|Summary|Overview|Comprehensive\s+Answer)',
-			r'###\s*(Complete\s+Answer|Summary|Overview|Comprehensive\s+Answer)',
-			r'#\s*(Complete\s+Answer|Summary|Overview|Comprehensive\s+Answer)',
-			r'##\s*(Quick\s+Answer|Quick\s+Summary)',  # Keep backward compatibility
-			r'###\s*(Quick\s+Answer|Quick\s+Summary)',
-			r'#\s*(Quick\s+Answer|Quick\s+Summary)'
-		]
-		
-		lines = text.split('\n')
-		formatted_lines = []
-		i = 0
-		
-		while i < len(lines):
-			line = lines[i]
-			
-			# Check if this line is a summary header
-			is_summary_header = False
-			for pattern in summary_patterns:
-				if re.search(pattern, line, re.IGNORECASE):
-					is_summary_header = True
-					break
-			
-			if is_summary_header:
-				# Ensure it's a proper ## header for summary
-				if not line.startswith('##'):
-					line = re.sub(r'^#+\s*', '## ', line)
-				formatted_lines.append(line)
-				
-				# Look for the content after the header
-				j = i + 1
-				summary_content = []
-				while j < len(lines) and not lines[j].strip().startswith('#'):
-					if lines[j].strip():  # Only add non-empty lines
-						summary_content.append(lines[j].strip())
-					j += 1
-				
-				# Keep the model's own summary format; do not auto-convert
-				if summary_content:
-					for line_part in summary_content:
-						formatted_lines.append(line_part)
-					formatted_lines.append('')
-				
-				i = j
-			else:
-				formatted_lines.append(line)
-				i += 1
-		
-		return '\n'.join(formatted_lines)
+		return response_postprocess._format_summary_sections(self, text)
 	
 	def _clean_table_markdown_artifacts(self, text: str) -> str:
-		"""Clean up markdown artifacts specifically in table content"""
-		import re
-		
-		lines = text.split('\n')
-		cleaned_lines = []
-		
-		for line in lines:
-			# Check if this line is part of a table
-			if self._is_table_line(line):
-				# Clean up markdown artifacts in table lines
-				cleaned_line = self._clean_table_line(line)
-				cleaned_lines.append(cleaned_line)
-			else:
-				cleaned_lines.append(line)
-		
-		return '\n'.join(cleaned_lines)
+		return response_postprocess._clean_table_markdown_artifacts(self, text)
 	
 	def _is_table_line(self, line: str) -> bool:
-		"""Check if a line is part of a table"""
-		import re
-		
-		# Check for pipe-separated table lines
-		if '|' in line and line.count('|') >= 2:
-			return True
-		
-		# Check for table separator lines
-		if re.match(r'^\s*\|[\s\-:]+\|', line):
-			return True
-		
-		return False
+		return response_postprocess._is_table_line(self, line)
 	
 	def _clean_table_line(self, line: str) -> str:
-		"""Clean up markdown artifacts in a single table line"""
-		import re
-		
-		# Check if this is a heading line - preserve bold formatting for headings
-		if line.strip().startswith(('##', '###', '####')):
-			# For headings, preserve bold formatting
-			return line
-		
-		# Remove all markdown bold formatting (**text**) for non-heading lines
-		line = re.sub(r'\*\*([^*]+)\*\*', r'\1', line)
-		
-		# Remove all markdown italic formatting (*text*)
-		line = re.sub(r'\*([^*]+)\*', r'\1', line)
-		
-		# Remove any remaining single asterisks
-		line = re.sub(r'\*', '', line)
-		
-		# Clean up extra spaces around pipes
-		line = re.sub(r'\s*\|\s*', '|', line)
-		
-		# Ensure proper spacing around pipes for readability
-		line = re.sub(r'\|', ' | ', line)
-		
-		# Remove leading/trailing spaces
-		line = line.strip()
-		
-		return line
+		return response_postprocess._clean_table_line(self, line)
 	
 	def _format_tables(self, text: str) -> str:
-		"""Format tabular data into proper markdown tables"""
-		import re
-		
-		lines = text.split('\n')
-		formatted_lines = []
-		i = 0
-		
-		while i < len(lines):
-			line = lines[i].strip()
-			
-			# Check if this line looks like a table row
-			if self._is_table_row(line):
-				# Find the end of the table
-				table_lines = [line]
-				j = i + 1
-				
-				# Collect consecutive table rows
-				while j < len(lines) and self._is_table_row(lines[j].strip()):
-					table_lines.append(lines[j].strip())
-					j += 1
-				
-				# Format the table
-				formatted_table = self._create_markdown_table(table_lines)
-				formatted_lines.append(formatted_table)
-				i = j
-			else:
-				formatted_lines.append(lines[i])
-				i += 1
-		
-		return '\n'.join(formatted_lines)
+		return response_postprocess._format_tables(self, text)
 	
 	def _is_table_row(self, line: str) -> bool:
-		"""Check if a line looks like a table row"""
-		import re
-		
-		# Check for pipe-separated values
-		if '|' in line and line.count('|') >= 2:
-			return True
-		
-		return False
+		return response_postprocess._is_table_row(self, line)
 
 	def _looks_like_pipe_table(self, text: str) -> bool:
-		"""Detect if text contains a valid pipe table with header and at least one row."""
-		import re
-		lines = [l.strip() for l in text.split('\n')]
-		for i in range(len(lines) - 2):
-			if '|' in lines[i] and '|' in lines[i+1]:
-				# header and separator or another row
-				if re.match(r'^\|?\s*[^|]+\s*(\|[^|]+)+\|?$', lines[i]) and ('---' in lines[i+1] or '|' in lines[i+1]):
-					return True
-		return False
+		return response_postprocess._looks_like_pipe_table(self, text)
 	
 	def _create_markdown_table(self, table_lines: list[str]) -> str:
-		"""Convert table lines to markdown table format with clean text"""
-		import re
-		
-		if not table_lines:
-			return ""
-		
-		# Try to detect the separator type
-		first_line = table_lines[0]
-		
-		# Handle pipe-separated tables
-		if '|' in first_line:
-			# Clean up existing pipe formatting and remove markdown artifacts
-			cleaned_lines = []
-			for line in table_lines:
-				# Remove markdown formatting first
-				cleaned = self._clean_table_line(line)
-				# Remove extra spaces around pipes
-				cleaned = re.sub(r'\s*\|\s*', '|', cleaned.strip())
-				# Remove leading/trailing pipes if they exist
-				cleaned = cleaned.strip('|')
-				cleaned_lines.append(cleaned)
-			
-			# Create markdown table
-			if cleaned_lines:
-				# Header row
-				header = cleaned_lines[0]
-				# Determine number of columns
-				columns = header.count('|') + 1
-				separator = '|' + '|'.join(['---'] * columns) + '|'
-				
-				# Format header with proper spacing
-				formatted_header = '|' + header + '|'
-				
-				# Format data rows
-				data_rows = []
-				for line in cleaned_lines[1:]:
-					formatted_row = '|' + line + '|'
-					data_rows.append(formatted_row)
-				
-				# Combine into markdown table
-				table_parts = [formatted_header, separator] + data_rows
-				return '\n'.join(table_parts)
-		
-		# Handle space-separated tables
-		else:
-			# Parse space-separated data
-			rows = []
-			for line in table_lines:
-				# Clean up markdown artifacts first
-				cleaned_line = self._clean_table_line(line)
-				# Split by multiple spaces
-				columns = re.split(r'\s{2,}', cleaned_line.strip())
-				if len(columns) >= 2:
-					rows.append(columns)
-			
-			if rows:
-				# Determine max columns
-				max_cols = max(len(row) for row in rows)
-				
-				# Pad rows to same length
-				padded_rows = []
-				for row in rows:
-					padded_row = row + [''] * (max_cols - len(row))
-					padded_rows.append(padded_row)
-				
-				# Create markdown table
-				formatted_rows = []
-				for i, row in enumerate(padded_rows):
-					formatted_row = '|' + '|'.join(row) + '|'
-					formatted_rows.append(formatted_row)
-					
-					# Add separator after header
-					if i == 0:
-						separator = '|' + '|'.join(['---'] * max_cols) + '|'
-						formatted_rows.append(separator)
-				
-				return '\n'.join(formatted_rows)
-		
-		# If we can't format it, return original
-		return '\n'.join(table_lines)
+		return response_postprocess._create_markdown_table(self, table_lines)
 
 	def _is_code_content(self, text: str) -> bool:
-		"""Check if the text contains code that should not be formatted as tables"""
-		import re
-		
-		# Check for code block markers
-		if '```' in text:
-			return True
-		
-		# Check for Python-specific patterns
-		python_patterns = [
-			r'def\s+\w+\s*\(',  # Function definitions
-			r'class\s+\w+',  # Class definitions
-			r'import\s+\w+',  # Import statements
-			r'from\s+\w+\s+import',  # From imports
-			r'if\s+__name__\s*==\s*["\']__main__["\']',  # Main guard
-			r'return\s+',  # Return statements
-			r'while\s+',  # While loops
-			r'for\s+\w+\s+in\s+',  # For loops
-			r'#\s*[A-Z]',  # Comments starting with capital letters
-		]
-		
-		# Check if any Python patterns are found
-		for pattern in python_patterns:
-			if re.search(pattern, text, re.MULTILINE):
-				return True
-		
-		# Check for indented code blocks (4+ spaces at start of line)
-		lines = text.split('\n')
-		indented_lines = 0
-		for line in lines:
-			if line.strip() and line.startswith('    '):
-				indented_lines += 1
-		
-		# If more than 30% of non-empty lines are indented, it's likely code
-		non_empty_lines = [line for line in lines if line.strip()]
-		if non_empty_lines and indented_lines / len(non_empty_lines) > 0.3:
-			return True
-		
-		return False
+		return response_postprocess._is_code_content(self, text)
 
 	def _is_explanation_content(self, text: str) -> bool:
-		"""Check if the text is explanation content that should use text formatting, not tables"""
-		import re
-		
-		# Check for explanation patterns that should NOT be tables
-		explanation_patterns = [
-			r'Time\s*Complexity',  # Time complexity analysis
-			r'Space\s*Complexity',  # Space complexity analysis
-			r'How\s+it\s+works',  # How it works explanations
-			r'Key\s+Features',  # Feature descriptions
-			r'Time:\s*O\(',  # Time complexity notation
-			r'Space:\s*O\(',  # Space complexity notation
-			r'Input\s+type:',  # Input descriptions
-			r'Output:',  # Output descriptions
-			r'Error\s+handling:',  # Error handling descriptions
-		]
-		
-		# Check if any explanation patterns are found
-		for pattern in explanation_patterns:
-			if re.search(pattern, text, re.IGNORECASE | re.MULTILINE):
-				return True
-		
-		# Check if text contains table-like formatting but is actually explanation
-		lines = text.split('\n')
-		table_like_lines = 0
-		for line in lines:
-			# Check for lines that look like table rows but are explanations
-			if '|' in line and any(keyword in line.lower() for keyword in ['time', 'space', 'complexity', 'feature', 'input', 'output']):
-				table_like_lines += 1
-		
-		# If we have table-like formatting but it's explanation content, treat as text
-		if table_like_lines > 0:
-			return True
-		
-		return False
+		return response_postprocess._is_explanation_content(self, text)
 
 	def _clean_code_formatting(self, text: str) -> str:
-		"""Clean up code formatting issues without converting to tables"""
-		import re
-		
-		# Fix common indentation issues
-		lines = text.split('\n')
-		cleaned_lines = []
-		
-		for line in lines:
-			# Fix lines that look like they were formatted as table rows
-			# Pattern: |variable = value|# comment|
-			if '|' in line and '=' in line:
-				# Remove table formatting and fix indentation
-				line = re.sub(r'^\s*\|\s*', '', line)  # Remove leading | and spaces
-				line = re.sub(r'\s*\|\s*$', '', line)  # Remove trailing | and spaces
-				line = re.sub(r'\s*\|\s*', ' ', line)  # Replace middle | with spaces
-				
-				# Fix indentation for code lines
-				if line.strip() and not line.startswith(' ') and not line.startswith('\t'):
-					# This looks like a code line that needs indentation
-					if any(keyword in line for keyword in ['def ', 'class ', 'if ', 'while ', 'for ', 'else:', 'elif ']):
-						# This is a top-level statement, no indentation needed
-						pass
-					elif line.strip().startswith(('return', 'yield', 'break', 'continue', 'pass')):
-						# This should be indented
-						line = '    ' + line.strip()
-					elif '=' in line and not line.strip().startswith('#'):
-						# This looks like a variable assignment that should be indented
-						line = '    ' + line.strip()
-			
-			# Fix comment formatting
-			if '|' in line and '#' in line:
-				# Convert table-formatted comments to proper comments
-				line = re.sub(r'^\s*\|\s*', '', line)
-				line = re.sub(r'\s*\|\s*$', '', line)
-				line = re.sub(r'\s*\|\s*', ' ', line)
-			
-			cleaned_lines.append(line)
-		
-		return '\n'.join(cleaned_lines)
+		return response_postprocess._clean_code_formatting(self, text)
 
 	def _clean_explanation_formatting(self, text: str) -> str:
-		"""Clean up explanation formatting by converting table-like formatting to proper text"""
-		import re
-		
-		lines = text.split('\n')
-		cleaned_lines = []
-		
-		for line in lines:
-			# Check if this line looks like a table row but is actually explanation
-			if '|' in line and any(keyword in line.lower() for keyword in ['time', 'space', 'complexity', 'feature', 'input', 'output', 'error']):
-				# Convert table-formatted explanations to proper text
-				# Pattern: |METRIC|VALUE| -> **METRIC:** VALUE
-				# Pattern: |Time|O(n²)| -> **Time Complexity:** O(n²)
-				
-				# Remove leading/trailing pipes and split by middle pipes
-				line = line.strip('|')
-				parts = [part.strip() for part in line.split('|') if part.strip()]
-				
-				if len(parts) >= 2:
-					# Convert to proper text format
-					# Clean metric name: remove existing bold, trim whitespace and colons
-					metric = parts[0].strip()
-					metric = metric.replace('**', '').replace('*', '') # Strip existing bolds
-					metric = metric.rstrip(':').strip() # Strip trailing colon
-					
-					value = parts[1].strip() # Ensure value is clean
-					
-					# Handle specific cases
-					if 'time' in metric.lower():
-						formatted_line = f"**Time Complexity:** {value}"
-					elif 'space' in metric.lower():
-						formatted_line = f"**Space Complexity:** {value}"
-					elif 'feature' in metric.lower():
-						formatted_line = f"**Key Features:** {value}"
-					elif 'input' in metric.lower():
-						formatted_line = f"**Input:** {value}"
-					elif 'output' in metric.lower():
-						formatted_line = f"**Output:** {value}"
-					elif 'error' in metric.lower():
-						formatted_line = f"**Error Handling:** {value}"
-					else:
-						formatted_line = f"**{metric}:** {value}"
-					
-					cleaned_lines.append(formatted_line)
-				else:
-					cleaned_lines.append(line)
-			else:
-				# Check for table separator lines and skip them
-				if re.match(r'^\s*\|[\s\-:]+\|', line):
-					continue
-				cleaned_lines.append(line)
-		
-		return '\n'.join(cleaned_lines)
+		return response_postprocess._clean_explanation_formatting(self, text)
 
 	def _estimate_response_complexity(self, question: str) -> int:
 		"""Estimate response complexity and suggest token limit"""
@@ -2829,17 +807,854 @@ class LLMService:
 		# Default medium response (average of simple and code)
 		return (self._settings.groq_max_tokens_simple + self._settings.groq_max_tokens_code) // 2
 
-	def _get_optimal_token_limit(self, question: str, base_limit: int) -> int:
-		"""Get optimal token limit based on question complexity and base config"""
-		if base_limit:
-			return base_limit
-		
-		estimated = self._estimate_response_complexity(question)
-		# Cap at complex token limit to prevent excessive token usage
-		return min(estimated, self._settings.groq_max_tokens_complex * 2)
+	def _infer_depth_level(self, question: str) -> str:
+		"""Infer a simple depth knob from the user's request.
+
+		Returns one of: 'quick', 'standard', 'deep'.
+		"""
+		q = (question or "").lower()
+		# Explicit deep requests
+		if any(k in q for k in ["in depth", "in-depth", "deep dive", "deep-dive", "comprehensive", "thorough", "detailed", "teach me", "explain deeply", "explain in detail", "explain in detail:"]):
+			return "deep"
+		# Explicit brevity requests
+		if any(k in q for k in ["brief", "quick", "tl;dr", "tldr", "summary only", "in short", "one-liner", "one liner"]):
+			return "quick"
+		return "standard"
+
+	def _flags_from_plan(self, plan: ResponsePlan, question: str) -> PromptFlags:
+		"""Convert ResponsePlan to PromptFlags (single source of truth for intent)."""
+		return PromptFlags(
+			is_system_design=(plan.intent == "system_design"),
+			is_database_schema=(plan.intent == "database_schema"),
+			is_ui_design=(plan.intent == "ui_design"),
+			is_algorithm=(plan.intent == "coding"),
+			needs_first_person=self._needs_first_person(question),
+			is_technical_strategy=(plan.intent == "technical_strategy"),
+			is_mirror_mode=(plan.intent == "mirror"),
+			depth=plan.depth,
+		)
+
+	def _normalize_depth(self, depth: Optional[str], question: str) -> str:
+		"""Normalize an explicit depth override (UI/API) or fall back to inference."""
+		if depth is not None:
+			d = (depth or "").strip().lower()
+			if d:
+				aliases: dict[str, str] = {
+					"quick": "quick",
+					"brief": "quick",
+					"concise": "quick",
+					"short": "quick",
+					"standard": "standard",
+					"default": "standard",
+					"normal": "standard",
+					"deep": "deep",
+					"detailed": "deep",
+					"deep-dive": "deep",
+					"deepdive": "deep",
+					"thorough": "deep",
+					"comprehensive": "deep",
+				}
+				mapped = aliases.get(d)
+				if mapped is not None:
+					return mapped
+		# Fall back to inference from the question text.
+		return self._infer_depth_level(question)
+
+	def _infer_format_hint(self, question: str, style_mode: Optional[str], layout: Optional[str]) -> str:
+		q = (question or "").lower()
+		# UI/automation: explicitly requested JSON
+		if "json" in q and any(k in q for k in ["only json", "return json", "output json", "respond in json"]):
+			return "json"
+		if (layout or "").lower() in {"qa", "faq", "checklist"}:
+			return "text"
+		if self._is_algorithm_question(question) or any(k in q for k in ["code", "implement", "write a function", "leetcode"]):
+			return "code"
+		# If the user explicitly chooses a style preset that implies more prose, keep it textual.
+		if (style_mode or "").lower() in {"narrative", "executive", "mentor"}:
+			return "text"
+		return "text"
+
+	def _build_response_plan(
+		self,
+		question: str,
+		*,
+		depth: Optional[str] = None,
+		style_mode: Optional[str] = None,
+		layout: Optional[str] = None,
+		mode: Optional[str] = None,
+	) -> ResponsePlan:
+		"""Create a deterministic routing plan (intent/depth/format)."""
+		mode_norm = (mode or "").strip().lower()
+		if mode_norm == "mirror":
+			intent = "mirror"
+		elif self._is_greeting(question):
+			intent = "greeting"
+		elif self._is_off_topic(question):
+			intent = "off_topic"
+		elif self._is_system_design_question(question):
+			intent = "system_design"
+		elif self._is_database_schema_question(question):
+			intent = "database_schema"
+		elif self._is_ui_design_question(question):
+			intent = "ui_design"
+		elif self._is_algorithm_question(question) or any(k in (question or "").lower() for k in ["code", "implement", "write", "function", "class", "leetcode"]):
+			intent = "coding"
+		elif self._is_technical_strategy_question(question):
+			intent = "technical_strategy"
+		else:
+			intent = "general"
+
+		resolved_depth = self._normalize_depth(depth, question)
+		# Mirror mode always needs a JSON payload internally.
+		if intent == "mirror":
+			fmt = "json"
+		else:
+			fmt = self._infer_format_hint(question, style_mode, layout)
+		return ResponsePlan(intent=intent, depth=resolved_depth, format=fmt)
+
+	def _get_optimal_token_limit(
+		self,
+		question: str,
+		base_limit: int,
+		*,
+		depth: Optional[str] = None,
+		mode: Optional[str] = None,
+	) -> int:
+		"""Get optimal token limit based on question intent and depth budget."""
+		# Use the DynamicBudgetEngine to compute an intent/depth/length-aware budget.
+		# We infer intent/format via the existing planner to pass a meaningful intent.
+		plan = self._build_response_plan(question, depth=depth, mode=mode)
+		intent = plan.intent or "general"
+		resolved_depth = plan.depth or (depth or "standard")
+		# For now, map user tier to 'standard' (can be extended to per-user tiers).
+		user_tier = "standard"
+		# Ask the engine to compute tokens; pass base_limit as a hard ceiling candidate.
+		return dynamic_budget_engine.compute_budget_tokens(
+			question=question,
+			intent=intent,
+			depth=resolved_depth,
+			user_tier=user_tier,
+			base_limit=base_limit,
+		)
+
+	def _extract_json_object(self, text: str) -> Optional[dict[str, Any]]:
+		"""Best-effort extraction of a JSON object from model output.
+
+		This is intentionally defensive: some models wrap JSON in prose, code fences,
+		or include other text. We try direct parse first, then fall back to a
+		brace-matching scan that respects JSON strings/escapes.
+		"""
+		raw = (text or "").strip()
+		if not raw:
+			return None
+		# Strip common fences
+		raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+		raw = re.sub(r"\s*```$", "", raw).strip()
+
+		try:
+			obj = json.loads(raw)
+			if isinstance(obj, dict):
+				return obj
+		except Exception:
+			pass
+
+		# Fallback: brace-matching scan for the first valid JSON object.
+		# This avoids regex pitfalls with nested braces and braces inside strings.
+		start = raw.find("{")
+		while start != -1:
+			depth = 0
+			in_string = False
+			escaped = False
+			for i in range(start, len(raw)):
+				ch = raw[i]
+				if in_string:
+					if escaped:
+						escaped = False
+						continue
+					if ch == "\\":
+						escaped = True
+						continue
+					if ch == '"':
+						in_string = False
+					continue
+
+				# Not in a string
+				if ch == '"':
+					in_string = True
+					continue
+				if ch == "{":
+					depth += 1
+					continue
+				if ch == "}":
+					depth -= 1
+					if depth < 0:
+						break
+					if depth == 0:
+						candidate = raw[start : i + 1]
+						try:
+							obj = json.loads(candidate)
+							if isinstance(obj, dict):
+								return obj
+						except Exception:
+							# Keep scanning from the next '{'
+							break
+						# If it parsed but isn't a dict, keep scanning.
+						break
+
+			# Next candidate
+			start = raw.find("{", start + 1)
+		return None
+
+	def _calibrate_mirror_confidence(
+		self,
+		*,
+		llm_confidence: float,
+		ontology: Any,
+		question: str,
+		user_answer: str,
+		strengths: list[str],
+		gaps: list[str],
+		schema_drift: bool,
+	) -> tuple[float, dict[str, Any]]:
+		"""Calibrate Mirror confidence using deterministic signals.
+
+		We keep the LLM's confidence as an input, but down/up-weight it based on:
+		- schema drift
+		- answer specificity/length
+		- coverage of inferred primitives
+		- ratio of strengths vs gaps
+		"""
+		q = (question or "").strip().lower()
+		a = (user_answer or "").strip().lower()
+		c = self._normalize_confidence(llm_confidence)
+		meta: dict[str, Any] = {"llm_confidence": c}
+
+		# Schema drift: treat as unreliable even if the model claims high confidence.
+		if schema_drift:
+			c = min(c, 0.35)
+			meta["schema_drift_penalty"] = True
+
+		# Answer specificity heuristics
+		answer_len = len(a)
+		meta["answer_len"] = answer_len
+		is_definition_q = bool(re.search(r"\b(what\s+is|define|meaning\s+of)\b", q))
+		meta["is_definition_q"] = is_definition_q
+
+		# Token-based vagueness proxy (very cheap)
+		toks = re.findall(r"[a-z]{3,}", a)
+		uniq = len(set(toks))
+		meta["unique_tokens"] = uniq
+
+		if answer_len < 60:
+			# For definition questions, short can still be meaningful. Penalize more only if extremely vague.
+			if is_definition_q:
+				if uniq <= 4:
+					c = c * 0.75
+					meta["short_definition_penalty"] = True
+				else:
+					c = c * 0.9
+					meta["short_definition_light_penalty"] = True
+			else:
+				# Non-definition: short answers are more likely underspecified.
+				c = c * 0.7
+				meta["short_penalty"] = True
+
+			# Extremely short answers are rarely trustworthy outside of trivial definitions.
+			if answer_len < 35 and (not is_definition_q):
+				c = min(c, 0.35)
+				meta["too_short_cap"] = True
+		elif answer_len < 140:
+			c = c * 0.9
+			meta["medium_length_penalty"] = True
+		else:
+			meta["length_ok"] = True
+
+		# Primitive coverage (simple substring match; robust and cheap)
+		primitives = list(getattr(ontology, "primitives", ()) or ())
+		primitives = [str(p).strip().lower() for p in primitives if str(p).strip()]
+		matched = 0
+		for p in primitives[:8]:
+			if p and p in a:
+				matched += 1
+		coverage = (matched / max(1, min(5, len(primitives)))) if primitives else 0.0
+		meta["primitive_coverage"] = round(coverage, 3)
+
+		if primitives:
+			if coverage < 0.2:
+				c = max(0.0, c - 0.15)
+				meta["low_coverage_penalty"] = True
+			elif coverage > 0.6 and answer_len >= 140:
+				# If the user covered most primitives, allow a small bump when the model is pessimistic.
+				if c < 0.55:
+					c = min(1.0, c + 0.1)
+					meta["coverage_bump"] = True
+
+		# Strengths vs gaps ratio sanity
+		gap_n = len(gaps or [])
+		strength_n = len(strengths or [])
+		meta["gaps_count"] = gap_n
+		meta["strengths_count"] = strength_n
+		if gap_n >= 4 and strength_n == 0:
+			c = max(0.0, c - 0.1)
+			meta["gap_heavy_penalty"] = True
+
+		# If the question looks like a deep design question, be more conservative.
+		if any(k in q for k in ("design", "architecture", "trade-off", "scal", "throughput")) and answer_len < 180:
+			c = min(c, 0.39 if answer_len < 80 else 0.5)
+			meta["design_conservatism"] = True
+
+		c = self._normalize_confidence(c)
+		meta["calibrated_confidence"] = c
+		return c, meta
+
+	def _normalize_string_list(self, value: Any, *, limit: int) -> list[str]:
+		if value is None:
+			items: list[Any] = []
+		elif isinstance(value, list):
+			items = value
+		else:
+			items = [value]
+		out: list[str] = []
+		for item in items:
+			if item is None:
+				continue
+			s = str(item).strip()
+			if not s:
+				continue
+			out.append(s)
+			if len(out) >= limit:
+				break
+		return out
+
+	def _normalize_confidence(self, value: Any) -> float:
+		try:
+			c = float(value)
+		except Exception:
+			c = 0.5
+		if c < 0.0:
+			return 0.0
+		if c > 1.0:
+			return 1.0
+		return c
+
+	def _looks_like_meta_advice(self, line: str) -> bool:
+		l = (line or "").strip().lower()
+		if not l:
+			return False
+		# Heuristic: coaching/instruction phrasing rather than something the candidate can say.
+		bad_starts = (
+			"provide ",
+			"include ",
+			"mention ",
+			"emphasize ",
+			"make sure",
+			"ensure ",
+			"try to ",
+			"you should",
+			"focus on",
+			"talk about",
+		)
+		if any(l.startswith(s) for s in bad_starts):
+			return True
+		# Also catch common meta words.
+		meta_tokens = ("comprehensive definition", "more detail", "be more", "explicitly mention")
+		return any(t in l for t in meta_tokens)
+
+	def _looks_harsh(self, line: str) -> bool:
+		l = (line or "").strip().lower()
+		if not l:
+			return False
+		# Detect demotivating/absolute phrasing in red flags.
+		harsh_words = (
+			"confuses",
+			"wrong",
+			"overly simplistic",
+			"fundamentally flawed",
+			"completely missing",
+			"shows no understanding",
+			"fails to",
+		)
+		return any(h in l for h in harsh_words)
+
+	async def _rewrite_upgrade_lines_if_needed(
+		self,
+		*,
+		question: str,
+		user_answer: str,
+		topic: str,
+		upgrade_lines: list[str],
+		api_key: Optional[str],
+	) -> list[str]:
+		if not upgrade_lines:
+			return []
+		if not any(self._looks_like_meta_advice(x) for x in upgrade_lines):
+			return upgrade_lines
+
+		system_prompt = (
+			"Rewrite coaching-style upgrade advice into interview-ready sentences. "
+			"Return ONLY JSON: {\"upgrade_lines\": [string]}. "
+			"No extra keys. No prose."
+		)
+		user_prompt = (
+			"Interview question:\n"
+			+ (question or "").strip()
+			+ "\n\nUser draft answer:\n"
+			+ (user_answer or "").strip()
+			+ "\n\nTopic (inferred): "
+			+ (topic or "General")
+			+ "\n\nThese are NOT acceptable because they are meta-advice:\n- "
+			+ "\n- ".join([x.strip() for x in upgrade_lines if x.strip()])
+			+ "\n\nRules:\n"
+			"- Output 1–2 lines the candidate can say verbatim.\n"
+			"- Each line should be a complete sentence.\n"
+			"- For definition questions, one line should be a crisp one-sentence definition.\n"
+			"- Do NOT use instruction verbs like 'mention', 'provide', 'emphasize'.\n"
+		)
+
+		raw = await self.generate_text(
+			user_prompt,
+			system_prompt=system_prompt,
+			api_key=api_key,
+			json_mode=True,
+			temperature=0.2,
+			max_tokens=250,
+		)
+		obj = self._extract_json_object(raw)
+		if not obj:
+			return []
+		return self._normalize_string_list(obj.get("upgrade_lines"), limit=2)
+
+	async def _soften_red_flags_if_needed(
+		self,
+		*,
+		question: str,
+		user_answer: str,
+		topic: str,
+		red_flags: list[str],
+		api_key: Optional[str],
+	) -> list[str]:
+		if not red_flags:
+			return []
+		if not any(self._looks_harsh(x) for x in red_flags):
+			return red_flags
+
+		system_prompt = (
+			"Rewrite harsh red-flag phrasing into supportive risk framing. "
+			"Return ONLY JSON: {\"red_flags\": [string]}. "
+			"No extra keys. No prose." 
+			"Use allowed phrases such as 'May sound junior', 'Narrow framing', 'Missing senior signals' and avoid words like 'wrong', 'confuses', 'fundamentally flawed'."
+		)
+		user_prompt = (
+			"Interview question:\n"
+			+ (question or "").strip()
+			+ "\n\nUser draft answer:\n"
+			+ (user_answer or "").strip()
+			+ "\n\nTopic (inferred): "
+			+ (topic or "General")
+			+ "\n\nThese red flags sound too harsh:\n- "
+			+ "\n- ".join([x.strip() for x in red_flags if x.strip()])
+			+ "\n\nRules:\n"
+			"- Rewrite each as a supportive risk observation.\n"
+			"- Use the allowed phrasing examples from the system prompt (e.g., 'May sound junior', 'Narrow framing', 'Missing senior signals').\n"
+			"- Avoid absolutes like 'confuses', 'wrong', 'overly simplistic', 'fundamentally flawed'.\n"
+			"- Keep it factual but not demotivating.\n"
+		)
+
+		raw = await self.generate_text(
+			user_prompt,
+			system_prompt=system_prompt,
+			api_key=api_key,
+			json_mode=True,
+			temperature=0.2,
+			max_tokens=200,
+		)
+		obj = self._extract_json_object(raw)
+		if not obj:
+			return []
+		return self._normalize_string_list(obj.get("red_flags"), limit=3)
+
+	def _format_mirror_markdown(self, report: dict[str, Any]) -> str:
+		topic = (report.get("topic") or "General").strip()
+		message = (report.get("message") or "").strip()
+		strengths = report.get("strengths") or []
+		gaps = report.get("gaps") or []
+		red_flags = report.get("red_flags") or []
+		followups = report.get("likely_followups") or []
+		upgrade = report.get("upgrade_lines") or []
+		confidence = report.get("confidence")
+
+		lines: list[str] = []
+		lines.append(f"## Interview Mirror ({topic})")
+		if message:
+			lines.append(f"\n{message}")
+
+		if strengths:
+			lines.append("\n**Strengths**")
+			lines.extend([f"- {s}" for s in strengths])
+		if gaps:
+			lines.append("\n**Gaps to Close**")
+			lines.extend([f"- {s}" for s in gaps])
+		if red_flags:
+			lines.append("\n**Red Flags**")
+			lines.extend([f"- {s}" for s in red_flags])
+		if followups:
+			lines.append("\n**Likely Follow-ups**")
+			lines.extend([f"- {s}" for s in followups])
+		if upgrade:
+			lines.append("\n**Upgrade Lines (say this instead)**")
+			lines.extend([f"- {s}" for s in upgrade])
+
+		try:
+			c = float(confidence)
+			lines.append(f"\nConfidence: {int(round(c * 100))}%")
+		except Exception:
+			pass
+
+		return "\n".join(lines).strip() + "\n"
+
+	def _enforce_mirror_gap_and_followup_policy(self, report: dict[str, Any], ontology: Any, user_answer: str) -> dict[str, Any]:
+		"""Enforce must-have vs nice-to-have gap policy and sharpen follow-ups.
+
+		- If core primitives are missing, only list those as gaps (must-haves).
+		- If must-haves are all present, allow model-provided gaps (nice-to-have).
+		- Sharpen likely follow-ups to prefer concept-probing questions; inject topic-specific probes for Java.
+		"""
+		if not report or not ontology:
+			return report
+		ua = (user_answer or "").lower()
+		primitives = [str(p).strip().lower() for p in list(getattr(ontology, "primitives", ()) or []) if str(p).strip()]
+		must_gaps: list[str] = []
+		for p in primitives:
+			# Simple containment check: if primitive phrase not present in user answer, mark as missing
+			if p and p not in ua:
+				must_gaps.append(f"Missing core concept: {p}")
+
+		# If there are must-have gaps, prefer them exclusively
+		if must_gaps:
+			report["gaps"] = self._normalize_string_list(must_gaps, limit=5)
+			# Do not include nice-to-have gaps when must-haves are present
+		else:
+			# No must-haves missing: keep LLM-provided gaps but prefer concept-probing phrasing
+			report["gaps"] = self._normalize_string_list(report.get("gaps"), limit=5)
+
+		# Sharpen follow-ups: prefer questions starting with key probing verbs
+		followups = list(report.get("likely_followups") or [])
+		preferred: list[str] = []
+		for f in followups:
+			fs = (f or "").strip()
+			if not fs:
+				continue
+			if re.match(r'^(explain|how|what|compare|describe|why)\b', fs.strip().lower()):
+				preferred.append(fs)
+
+		# Topic-specific injections (Java examples)
+		topic = (report.get("topic") or "").lower()
+		if "java" in topic:
+			java_probes = [
+				"Explain JVM vs JRE vs JDK.",
+				"How does Garbage Collection work?",
+			]
+			# Prepend them to preferred if not duplicates
+			for jp in java_probes:
+				if jp not in preferred:
+					preferred.insert(0, jp)
+
+		if preferred:
+			report["likely_followups"] = self._normalize_string_list(preferred, limit=3)
+		else:
+			report["likely_followups"] = self._normalize_string_list(followups, limit=3)
+
+		return report
+
+	def _apply_low_confidence_guard(self, report: dict[str, Any]) -> dict[str, Any]:
+		"""Trust guardrails: prevent false authority when confidence is low."""
+		confidence = self._normalize_confidence(report.get("confidence"))
+		report["confidence"] = confidence
+		meta = report.get("_meta") if isinstance(report.get("_meta"), dict) else {}
+		# Brevity acknowledgment: very short answers should be flagged as partial signal
+		ua_words = 0
+		try:
+			ua_words = len(str(meta.get("user_answer") or "").split())
+		except Exception:
+			ua_words = 0
+
+		# If user_answer not in meta, attempt to estimate from message length
+		if ua_words == 0 and isinstance(meta.get("answer_len"), int):
+			# approximate words from characters
+			ua_words = max(0, meta.get("answer_len") // 5)
+
+		brevity_note = ""
+		if ua_words and ua_words < 15:
+			brevity_note = "Answer is very brief; treating as partial signal. "
+
+		# Full low-confidence guard
+		if confidence < 0.40:
+			meta["low_confidence_guard"] = True
+			report["upgrade_lines"] = []
+			# Clamp gaps to 2 and prefer must-have primitives (enforced elsewhere)
+			report["gaps"] = self._normalize_string_list(report.get("gaps"), limit=2)
+			# Strong, explicit message per request (include canonical phrase for tests)
+			report["message"] = f"{brevity_note}Low confidence: Answer is too brief to assess reliably; please expand."
+			report["_meta"] = meta
+			return report
+
+		# Partial guard: tentative assessment for 0.40–0.55
+		if 0.40 <= confidence < 0.55:
+			meta["partial_confidence_guard"] = True
+			# Keep upgrade_lines (allow), but clamp gaps to 2
+			report["gaps"] = self._normalize_string_list(report.get("gaps"), limit=2)
+			# Add brief disclaimer about tentative assessment
+			disclaimer = "Assessment tentative (limited confidence); gaps are provisional."
+			report["message"] = ((brevity_note or "") + ("Low confidence (tentative): " + str(report.get("message") or "").strip() + " " + disclaimer)).strip()
+			report["_meta"] = meta
+			return report
+
+		# Otherwise, confident enough — return unchanged (but ensure meta present)
+		report["_meta"] = meta
+		return report
+
+	def _mirror_expected_keys(self) -> set[str]:
+		return {
+			"topic",
+			"message",
+			"strengths",
+			"gaps",
+			"red_flags",
+			"likely_followups",
+			"upgrade_lines",
+			"confidence",
+		}
+
+	async def generate_mirror_report_structured(
+		self,
+		*,
+		question: str,
+		user_answer: str,
+		depth: Optional[str] = None,
+		api_key: Optional[str] = None,
+	) -> Tuple[str, bool, dict[str, Any]]:
+		"""Generate an Interview Mirror report.
+
+		Contract:
+		- Calls the LLM in strict JSON mode.
+		- Validates and clamps the output.
+		- Returns a UI-friendly markdown summary.
+		"""
+		q = (question or "").strip()
+		ua = (user_answer or "").strip()
+		if not q:
+			return ("", False)
+		if not ua:
+			return ("", False)
+
+		plan = self._build_response_plan(q, depth=depth, mode="mirror")
+		flags = self._flags_from_plan(plan, q)
+		app_name, developer, attribution = self._get_app_identity()
+		system_prompt = build_default_system_prompt(
+			app_name=app_name,
+			developer_name=developer,
+			attribution=attribution,
+			flags=flags,
+		)
+
+		ontology = await self._mirror_ontology.get(
+			question=q,
+			generate_text=self.generate_text,
+			api_key=api_key,
+		)
+		guidance = (
+			"Analysis guidance (do not output this text; use it to judge gaps):\n"
+			f"- Inferred topic: {ontology.topic}\n"
+			"- Expected primitives: " + "; ".join(ontology.primitives) + "\n"
+			"- Senior signals: " + "; ".join(ontology.senior_signals) + "\n"
+			"- Common red flags: " + "; ".join(ontology.red_flags) + "\n"
+			"- Likely follow-ups: " + "; ".join(ontology.likely_followups) + "\n"
+			"- IMPORTANT: If a concept is clearly IMPLIED by what the user said, do NOT mark it as missing.\n"
+		)
+
+		user_prompt = (
+			"Interview question:\n"
+			+ q
+			+ "\n\nUser draft answer:\n"
+			+ ua
+			+ "\n\n"
+			+ guidance
+			+ "\n\nReturn the JSON object only."
+		)
+
+		max_tokens = self._get_optimal_token_limit(q, self._settings.groq_max_tokens, depth=depth, mode="mirror")
+		raw = await self.generate_text(
+			user_prompt,
+			system_prompt=system_prompt,
+			api_key=api_key,
+			json_mode=True,
+			temperature=0.2,
+			max_tokens=max_tokens,
+		)
+
+		obj = self._extract_json_object(raw)
+		if obj is None:
+			# Safe fallback: never crash the request due to model formatting drift.
+			fallback = {
+				"topic": ontology.topic or "General",
+				"message": "Low confidence: the Mirror report couldn't be parsed. Ask a clarifying follow-up and retry.",
+				"strengths": [],
+				"gaps": ["Could not parse a structured Mirror report. Please retry."],
+				"red_flags": [],
+				"likely_followups": [],
+				"upgrade_lines": [],
+				"confidence": 0.2,
+				"_meta": {
+					"parse_ok": False,
+					"validation_ok": False,
+					"schema_drift": True,
+				},
+			}
+			return (self._format_mirror_markdown(fallback), False, fallback)
+
+		expected = self._mirror_expected_keys()
+		actual = set(obj.keys())
+		extra_keys = sorted(list(actual - expected))
+		missing_keys = sorted(list(expected - actual))
+		meta: dict[str, Any] = {
+			"parse_ok": True,
+			"schema_drift": bool(extra_keys or missing_keys),
+			"extra_keys": extra_keys,
+			"missing_keys": missing_keys,
+			"validation_ok": False,
+		}
+
+		normalized: dict[str, Any] = {
+			"topic": str(obj.get("topic") or ontology.topic or "General").strip() or (ontology.topic or "General"),
+			"message": str(obj.get("message") or "").strip(),
+			"strengths": self._normalize_string_list(obj.get("strengths"), limit=3),
+			"gaps": self._normalize_string_list(obj.get("gaps"), limit=5),
+			"red_flags": self._normalize_string_list(obj.get("red_flags"), limit=3),
+			"likely_followups": self._normalize_string_list(obj.get("likely_followups"), limit=3),
+			"upgrade_lines": self._normalize_string_list(obj.get("upgrade_lines"), limit=2),
+			"confidence": self._normalize_confidence(obj.get("confidence")),
+		}
+
+		# Strict schema validation (after our normalization). This prevents runtime crashes and enforces bounds.
+		try:
+			report_model = MirrorReport.model_validate(normalized)
+			normalized = report_model.model_dump()
+			meta["validation_ok"] = True
+		except Exception as e:
+			meta["validation_error"] = (str(e) or "validation failed")[:400]
+			fallback = {
+				"topic": ontology.topic or "General",
+				"message": "Low confidence: the Mirror report was invalid. Ask a clarifying follow-up and retry.",
+				"strengths": [],
+				"gaps": ["Could not validate a structured Mirror report. Please retry."],
+				"red_flags": [],
+				"likely_followups": [],
+				"upgrade_lines": [],
+				"confidence": 0.2,
+				"_meta": meta,
+			}
+			return (self._format_mirror_markdown(fallback), False, fallback)
+
+		# Capture the model-reported confidence for gating rewrites (before calibration).
+		try:
+			meta["llm_confidence"] = float(normalized.get("confidence", 0.5))
+		except Exception:
+			meta["llm_confidence"] = float(self._normalize_confidence(normalized.get("confidence")))
+
+		# If the model drifted from the schema, downgrade confidence and force safe behavior.
+		if meta.get("schema_drift"):
+			normalized["confidence"] = min(float(normalized.get("confidence", 0.5)), 0.35)
+			if not (normalized.get("message") or "").strip():
+				normalized["message"] = (
+					"Low confidence: the Mirror output was incomplete. "
+					"Please add 1–2 concrete details (constraints, scale, trade-offs) and retry."
+				)
+
+		normalized["_meta"] = meta
+
+		# Quality rewrites: key off the model-reported confidence (pre-calibration),
+		# but skip if the schema drifted (incomplete/unsafe to rewrite).
+		llm_conf_for_rewrites = float(meta.get("llm_confidence") or 0.0)
+		if (not meta.get("schema_drift")) and llm_conf_for_rewrites >= 0.4:
+			try:
+				meta["upgrade_rewrite_attempted"] = True
+				normalized["upgrade_lines"] = await self._rewrite_upgrade_lines_if_needed(
+					question=q,
+					user_answer=ua,
+					topic=str(normalized.get("topic") or "General"),
+					upgrade_lines=list(normalized.get("upgrade_lines") or []),
+					api_key=api_key,
+				)
+				meta["upgrade_rewrite_ok"] = True
+			except Exception:
+				# Never fail the Mirror report due to the rewrite pass.
+				meta["upgrade_rewrite_ok"] = False
+				pass
+
+			# Soften red flags if harsh phrasing was used.
+			try:
+				meta["red_flags_soften_attempted"] = True
+				normalized["red_flags"] = await self._soften_red_flags_if_needed(
+					question=q,
+					user_answer=ua,
+					topic=str(normalized.get("topic") or "General"),
+					red_flags=list(normalized.get("red_flags") or []),
+					api_key=api_key,
+				)
+				meta["red_flags_soften_ok"] = True
+			except Exception:
+				meta["red_flags_soften_ok"] = False
+				pass
+
+		# Deterministic confidence calibration (do not rely solely on model self-report)
+		try:
+			cal_c, cal_meta = self._calibrate_mirror_confidence(
+				llm_confidence=float(meta.get("llm_confidence") or normalized.get("confidence", 0.5)),
+				ontology=ontology,
+				question=q,
+				user_answer=ua,
+				strengths=list(normalized.get("strengths") or []),
+				gaps=list(normalized.get("gaps") or []),
+				schema_drift=bool(meta.get("schema_drift")),
+			)
+			normalized["confidence"] = cal_c
+			meta.update({"confidence_calibrated": True, "confidence_details": cal_meta})
+		except Exception:
+			# Never fail Mirror due to calibration.
+			meta["confidence_calibrated"] = False
+
+		normalized["_meta"] = meta
+
+		# Enforce gap/follow-up policies before applying low-confidence guard
+		normalized = self._enforce_mirror_gap_and_followup_policy(normalized, ontology, ua)
+
+		normalized = self._apply_low_confidence_guard(normalized)
+		return (self._format_mirror_markdown(normalized), False, normalized)
+
+	async def generate_mirror_report(
+		self,
+		*,
+		question: str,
+		user_answer: str,
+		depth: Optional[str] = None,
+		api_key: Optional[str] = None,
+	) -> tuple[str, bool]:
+		"""Backward-compatible wrapper for callers that only need markdown."""
+		md, truncated, _ = await self.generate_mirror_report_structured(
+			question=question,
+			user_answer=user_answer,
+			depth=depth,
+			api_key=api_key,
+		)
+		return (md, truncated)
 
 	def _style_overrides(self, style_mode: Optional[str], tone: Optional[str], layout: Optional[str], variability: Optional[float], seed: Optional[int]) -> str:
 		"""Construct style and tone overrides for varied, professional outputs."""
+		# Default behavior: do NOT inject extra style instructions.
+		# Product wants predictable output; style customization is opt-in via parameters.
+		if style_mode is None and tone is None and layout is None and variability is None and seed is None:
+			return ""
+
 		import random
 		rng = random.Random(seed)
 		v = 0.0 if variability is None else max(0.0, min(1.0, variability))
@@ -2987,14 +1802,27 @@ class LLMService:
 		self,
 		question: str,
 		system_prompt: Optional[str],
-		profile_text: Optional[str]
+		profile_text: Optional[str],
+		*,
+		depth: Optional[str] = None,
 	) -> str:
 		"""
 		Shared helper to build prompt with profile context using world-class analyzer
 		
 		This eliminates code duplication between generate_answer() and stream_answer()
 		"""
-		prompt = system_prompt or CODE_FORWARD_PROMPT
+		if system_prompt is not None:
+			prompt = system_prompt
+		else:
+			app_name, developer, attribution = self._get_app_identity()
+			plan = self._build_response_plan(question, depth=depth)
+			flags = self._flags_from_plan(plan, question)
+			prompt = build_default_system_prompt(
+				app_name=app_name,
+				developer_name=developer,
+				attribution=attribution,
+				flags=flags,
+			)
 		
 		if not profile_text:
 			return prompt
@@ -3016,24 +1844,30 @@ class LLMService:
 		
 		if is_document_question:
 			# Determine analysis depth from question
-			depth = AnalysisDepth.STANDARD
-			if any(word in question.lower() for word in ['detailed', 'comprehensive', 'thorough', 'deep', 'complete', 'full']):
-				depth = AnalysisDepth.DEEP
-			elif any(word in question.lower() for word in ['expert', 'professional', 'advanced', 'best']):
-				depth = AnalysisDepth.EXPERT
-			elif any(word in question.lower() for word in ['quick', 'brief', 'summary', 'overview']):
-				depth = AnalysisDepth.QUICK
+			analysis_depth = AnalysisDepth.STANDARD
+			depth_level = self._normalize_depth(depth, question)
+			if depth_level == "quick":
+				analysis_depth = AnalysisDepth.QUICK
+			elif depth_level == "deep":
+				analysis_depth = AnalysisDepth.DEEP
+			else:
+				if any(word in question.lower() for word in ['detailed', 'comprehensive', 'thorough', 'deep', 'complete', 'full']):
+					analysis_depth = AnalysisDepth.DEEP
+				elif any(word in question.lower() for word in ['expert', 'professional', 'advanced', 'best']):
+					analysis_depth = AnalysisDepth.EXPERT
+				elif any(word in question.lower() for word in ['quick', 'brief', 'summary', 'overview']):
+					analysis_depth = AnalysisDepth.QUICK
 			
 			# Build world-class analysis prompt
 			prompt = analyzer.build_world_class_prompt(
 				text=profile_text,
 				doc_type=doc_type,
 				metadata=metadata,
-				analysis_depth=depth,
+				analysis_depth=analysis_depth,
 				specific_question=question
 			)
 			
-			logger.info(f"🌟 Using WORLD-CLASS analyzer: doc_type={doc_type.value}, depth={depth.value}, metadata={metadata}")
+			logger.info(f"🌟 Using WORLD-CLASS analyzer: doc_type={doc_type.value}, depth={analysis_depth.value}, metadata={metadata}")
 		else:
 			# For other questions with profile context (interview prep, etc.)
 			prompt = (
@@ -3048,6 +1882,89 @@ class LLMService:
 		
 		return prompt
 
+	def _build_full_prompt(
+		self,
+		question: str,
+		system_prompt: Optional[str],
+		profile_text: Optional[str],
+		previous_qna: Optional[List[Dict[str, str]]],
+		apply_auto_overrides: bool,
+		*,
+		depth: Optional[str] = None,
+		style_mode: Optional[str] = None,
+		tone: Optional[str] = None,
+		layout: Optional[str] = None,
+		variability: Optional[float] = None,
+		seed: Optional[int] = None,
+	) -> str:
+		"""Build complete prompt with base + history + overrides + style.
+		
+		Consolidates duplicate logic from generate_answer() and stream_answer().
+		"""
+		# 1. Build base prompt with profile context
+		base_prompt = self._build_prompt_with_profile(question, system_prompt, profile_text, depth=depth)
+		
+		# 2. Add conversation history if needed (SMART CONTEXT)
+		history_context = ""
+		if previous_qna and self._needs_conversation_context(question, previous_qna):
+			history_context = self._build_conversation_context(previous_qna)
+			logger.info(f"💬 Including conversation context ({len(previous_qna)} turns available, using last 3)")
+		else:
+			logger.info(f"⚡ Standalone question - skipping conversation history (saving tokens!)")
+		
+		prompt = history_context + base_prompt
+		
+		# 3. Apply auto-overrides if enabled
+		if apply_auto_overrides:
+			if self._is_identity_question(question):
+				prompt = prompt + self._identity_overrides()
+			else:
+				if self._needs_comparison(question):
+					prompt = prompt + self._comparison_overrides(question)
+				if self._is_greeting(question):
+					prompt = prompt + self._greeting_overrides()
+				if self._is_off_topic(question):
+					prompt = prompt + self._off_topic_overrides()
+				if self._is_ambiguous(question):
+					prompt = prompt + self._ambiguous_query_overrides()
+				if not self._has_sufficient_context(question, previous_qna):
+					prompt = prompt + self._context_fallback_overrides()
+		else:
+			logger.debug("🧪 Auto overrides disabled for internal call")
+		
+		# 4. Apply style & tone overrides
+		prompt = prompt + self._style_overrides(style_mode, tone, layout, variability, seed)
+		
+		return prompt
+
+	def _build_messages(
+		self,
+		question: str,
+		prompt: str,
+		previous_qna: Optional[List[Dict[str, str]]] = None,
+	) -> List[Dict[str, str]]:
+		"""Build message list for LLM with optional conversation history.
+		
+		Consolidates duplicate logic from generate_answer() and stream_answer().
+		"""
+		messages: List[Dict[str, str]] = [
+			{"role": "system", "content": prompt}
+		]
+		
+		# Add conversation history if relevant
+		if previous_qna and self._needs_conversation_context(question, previous_qna):
+			for item in previous_qna[-3:]:
+				q = (item.get("question") or "").strip()
+				a = (item.get("answer") or "").strip()
+				if q:
+					messages.append({"role": "user", "content": q})
+				if a:
+					messages.append({"role": "assistant", "content": a})
+		
+		# Current question last
+		messages.append({"role": "user", "content": question})
+		return messages
+
 	async def generate_answer(
 		self,
 		question: str,
@@ -3055,6 +1972,7 @@ class LLMService:
 		profile_text: Optional[str] = None,
 		previous_qna: Optional[List[Dict[str, str]]] = None,
 		*,
+		depth: Optional[str] = None,
 		style_mode: Optional[str] = None,
 		tone: Optional[str] = None,
 		layout: Optional[str] = None,
@@ -3071,98 +1989,37 @@ class LLMService:
 			logger.info("🪪 [IDENTITY] generate_answer short-circuit: %s", (question or "")[:200])
 			return (self._identity_response_text(question), False)
 
-		pool_keys = set(demo_key_pool.keys())
+		# Only consider demo key pool when it's explicitly enabled in settings.
+		if settings.is_demo_key_pool_enabled():
+			pool_keys = set(demo_key_pool.keys())
+		else:
+			pool_keys = set()
 		attempt_key = api_key
 		last_err: Exception | None = None
 
-		# Use shared helper to build prompt with profile context
-		base_prompt = self._build_prompt_with_profile(question, system_prompt, profile_text)
-		
-		# SMART CONTEXT: Only add conversation history if question needs it
-		history_context = ""
-		if previous_qna and self._needs_conversation_context(question, previous_qna):
-			history_context = self._build_conversation_context(previous_qna)
-			logger.info(f"💬 Including conversation context ({len(previous_qna)} turns available, using last 3)")
-		else:
-			logger.info(f"⚡ Standalone question - skipping conversation history (saving tokens!)")
-		
-		prompt = history_context + base_prompt
-
-		if apply_auto_overrides:
-			# Identity/developer questions: answer directly, bypassing ambiguity/off-topic routing
-			if self._is_identity_question(question):
-				prompt = prompt + self._identity_overrides()
-			else:
-				# If the user is asking to compare, add comparison formatting rules
-				if self._needs_comparison(question):
-					prompt = prompt + self._comparison_overrides(question)
-
-				# If this is a brief greeting/thanks/parting, suppress summary/bullets
-				if self._is_greeting(question):
-					prompt = prompt + self._greeting_overrides()
-				
-				# If this is an off-topic query, redirect to interview preparation
-				if self._is_off_topic(question):
-					prompt = prompt + self._off_topic_overrides()
-				
-				# If this is an ambiguous query, ask for clarification
-				if self._is_ambiguous(question):
-					prompt = prompt + self._ambiguous_query_overrides()
-				
-				# If context is insufficient, provide fallback handling
-				if not self._has_sufficient_context(question, previous_qna):
-					prompt = prompt + self._context_fallback_overrides()
-				
-				# If this is a system design question, enforce the SD structure
-				if self._is_system_design_question(question):
-					logger.info(f"✅ System design question detected - adding comprehensive Mermaid overrides")
-					prompt = prompt + self._system_design_overrides()
-				else:
-					logger.info(f"❌ NOT detected as system design - question: {question[:100]}")
-				
-				# If this is a database schema question, add ER diagram overrides
-				if self._is_database_schema_question(question):
-					prompt = prompt + self._database_schema_overrides()
-				
-				# If this is a UI design question, add UI design overrides
-				if self._is_ui_design_question(question):
-					prompt = prompt + self._ui_design_overrides()
-				
-				# If this is an algorithm question, add algorithm overrides
-				if self._is_algorithm_question(question):
-					prompt = prompt + self._algorithm_overrides()
-				
-				# If this is a technical strategy question, add strategy overrides
-				if self._is_technical_strategy_question(question):
-					prompt = prompt + self._technical_strategy_overrides()
-		else:
-			logger.debug("🧪 Auto overrides disabled for internal call")
-
-		# Style & tone overrides for variety
-		prompt = prompt + self._style_overrides(style_mode, tone, layout, variability, seed)
+		# Build complete prompt using unified helper
+		prompt = self._build_full_prompt(
+			question,
+			system_prompt,
+			profile_text,
+			previous_qna,
+			apply_auto_overrides,
+			depth=depth,
+			style_mode=style_mode,
+			tone=tone,
+			layout=layout,
+			variability=variability,
+			seed=seed,
+		)
 
 		temperature = self._settings.answer_temperature
 		top_p = self._settings.groq_top_p
-		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens)
+		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens, depth=depth)
 		stream = self._settings.groq_stream
 
 		def build_kwargs(stream_flag: bool, model_name: str):
-			# Build message list with optional recent history for contextual follow-ups
-			messages: List[Dict[str, str]] = [
-				{"role": "system", "content": prompt}
-			]
-			# SMART CONTEXT: Only include message history if question needs it
-			if previous_qna and self._needs_conversation_context(question, previous_qna):
-				# REDUCED: Cap to last 3 turns (was 5) to save tokens
-				for item in previous_qna[-3:]:
-					q = (item.get("question") or "").strip()
-					a = (item.get("answer") or "").strip()
-					if q:
-						messages.append({"role": "user", "content": q})
-					if a:
-						messages.append({"role": "assistant", "content": a})
-			# Current question last
-			messages.append({"role": "user", "content": question})
+			# Build messages using unified helper
+			messages = self._build_messages(question, prompt, previous_qna)
 			kwargs = {
 				"model": model_name,
 				"messages": messages,
@@ -3182,25 +2039,12 @@ class LLMService:
 			# Provider-specific logic:
 			# - Groq: try primary + fallback models
 			# - Gemini: single call (no Groq model list)
-			DECOMMISSIONED = ["llama-3.1-70b-versatile", "llama3-70b-8192"]
-
-			def _groq_models_to_try() -> list[str]:
-				# Allow per-call override (used for demo mode cost control).
-				if groq_model_override:
-					if restrict_groq_to_override:
-						raw_list = [groq_model_override]
-					else:
-						raw_list = [groq_model_override] + [self._settings.groq_model] + self._settings.groq_fallback_models
-				else:
-					raw_list = [self._settings.groq_model] + self._settings.groq_fallback_models
-				models: list[str] = []
-				for m in raw_list:
-					if m and m not in models and m not in DECOMMISSIONED:
-						models.append(m)
-				return models
 
 			async def _call_groq(groq_client) -> tuple[str, bool]:
-				for current_model in _groq_models_to_try():
+				for current_model in self._groq_models_to_try(
+					groq_model_override=groq_model_override,
+					restrict_to_override=restrict_groq_to_override,
+				):
 					try:
 						if stream:
 							stream_resp = groq_client.chat.completions.create(**build_kwargs(True, current_model))
@@ -3280,7 +2124,28 @@ class LLMService:
 			if client is None:
 				return (question, False)  # mock: echo when no key, not truncated
 			try:
-				return await _call(client, provider)
+				formatted, truncated = await _call(client, provider)
+				# Post-process formatting: ensure definition questions get a 3-bullet
+				# summary if model failed to emit bullets, and strip side headings
+				# for very short answers.
+				# Determine if the question appears to be a definition request.
+				if self._is_definition_question(question):
+					formatted = self._ensure_three_bullet_summary(formatted, question)
+				# For short answers, remove sub-headings introduced by the model.
+				formatted = self._strip_side_headings_for_short(formatted)
+
+				# Auto-append short recommendations for concept/definition answers if missing
+				# (guarded: helper methods may be absent in this branch)
+				if (
+					hasattr(self, "_should_auto_append_recommendations")
+					and hasattr(self, "_auto_recommendations_for_question")
+					and hasattr(self, "_append_recommendations_block")
+					and self._should_auto_append_recommendations(question, formatted)
+				):
+					recs = self._auto_recommendations_for_question(question, formatted)
+					if recs:
+						formatted = self._append_recommendations_block(formatted, recs)
+				return (formatted, truncated)
 			except Exception as e:
 				last_err = e
 				if (
@@ -3298,6 +2163,66 @@ class LLMService:
 
 		# Should never reach here, but keeps mypy/linters happy.
 		raise last_err if last_err else Exception("LLM call failed")
+
+	def _is_definition_question(self, q: str) -> bool:
+		# Stricter detection: only treat as definition when the user explicitly
+		# asks for a definition or the question is short and looks definitional.
+		import re
+		q_raw = (q or "").strip()
+		q = q_raw.lower()
+		# Explicit prefixes like 'What is X' or 'Define X' or 'Definition of X'
+		if re.match(r"^(what\s+is|define|definition\s+of|meaning\s+of)\b", q):
+			return True
+		# Short form: "X: definition" or "X meaning" (very short queries)
+		if len(q_raw.split()) <= 5 and any(k in q for k in [" meaning", " definition", "defined as"]):
+			return True
+		return False
+
+	def _ensure_three_bullet_summary(self, text: str, question: str) -> str:
+		"""If the question is a definition-type and the model didn't emit bullets,
+		build a concise 3-item bulleted summary.
+		Try to reuse sentences from the model output when possible.
+		"""
+		if not text or not self._is_definition_question(question):
+			return text
+		# If already contains bullets, assume model complied
+		if "\n- " in text or "\n* " in text:
+			return text
+		# Extract up to three short sentences from the model output to populate bullets
+		import re
+		sents = [s.strip() for s in re.split(r'[\n\.\?!]+', text) if s.strip()]
+		first = sents[0] if len(sents) > 0 else ""
+		second = sents[1] if len(sents) > 1 else ""
+		third = sents[2] if len(sents) > 2 else ""
+		# Build bullets with fallbacks (no labeled headings; keep it natural)
+		definition = first or "A concise definition of the concept."
+		why = second or "Why it matters in practice."
+		example = third or "A short concrete example or use case."
+		return f"- {definition}\n- {why}\n- {example}"
+
+	def _strip_side_headings_for_short(self, text: str) -> str:
+		"""For short answers, remove sub/headings to keep output compact.
+		If the whole text is under ~40 words and contains bolded or 'Details:' style
+		headings, strip those heading markers and join the content.
+		"""
+		if not text:
+			return text
+		word_count = len(text.split())
+		# Only transform very short answers (keep conservatively small)
+		if word_count > 25:
+			return text
+		# Don't strip if bullets or lists are present (model intended structure)
+		if "\n- " in text or "\n* " in text or "\n1." in text:
+			return text
+		import re
+		# Remove 'Details:', 'Concrete example:' style labels at line starts
+		text = re.sub(r'(?m)^(?:\*\*?\s*[^\n:\*]{1,60}\*\*?\s*:\s*|Details:\s*|Concrete example:\s*)', '', text)
+		# Remove markdown headings like '## Heading' or '**Heading**' when short
+		text = re.sub(r'(?m)^#{1,3}\s*', '', text)
+		text = re.sub(r'\*\*(.*?)\*\*', r"\1", text)
+		# Collapse multiple blank lines
+		text = re.sub(r"\n{2,}", "\n\n", text).strip()
+		return text
 
 	async def evaluate_code_with_critique(self, problem: str, code: str, language: str, conversation_context: str = "", api_key: Optional[str] = None) -> str:
 		"""Ask the model to produce a structured evaluation and approach explanation."""
@@ -3320,27 +2245,21 @@ class LLMService:
 		user_prompt = f"Problem Context: {problem}\n\nCode to Evaluate ({language}):\n```\n{code}\n```\n\nPrevious Conversation Context:\n{conversation_context}"
 
 		async def _call():
-			DECOMMISSIONED = ["llama-3.1-70b-versatile", "llama3-70b-8192"]
-			raw_list = [self._settings.groq_model] + self._settings.groq_fallback_models
-			models_to_try = []
-			for m in raw_list:
-				if m not in models_to_try and m not in DECOMMISSIONED:
-					models_to_try.append(m)
-			
-			for current_model in models_to_try:
+			# Non-Groq providers don't need model fallback lists.
+			if provider != "groq":
+				gmodel = client.GenerativeModel(self._settings.gemini_model.replace("models/", ""))
+				resp = gmodel.generate_content(f"{system}\n\n{user_prompt}")
+				return getattr(resp, "text", "")
+
+			for current_model in self._groq_models_to_try():
 				try:
-					if provider == "groq":
-						resp = client.chat.completions.create(
-							model=current_model,
-							messages=[{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
-							temperature=0.2,
-							max_tokens=self._settings.groq_max_tokens_complex
-						)
-						return resp.choices[0].message.content
-					else:
-						gmodel = client.GenerativeModel(self._settings.gemini_model.replace("models/", ""))
-						resp = gmodel.generate_content(f"{system}\n\n{user_prompt}")
-						return getattr(resp, "text", "")
+					resp = client.chat.completions.create(
+						model=current_model,
+						messages=[{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
+						temperature=0.2,
+						max_tokens=self._settings.groq_max_tokens_complex,
+					)
+					return resp.choices[0].message.content
 				except Exception as e:
 					error_msg = str(e).lower()
 					should_retry = any(x in error_msg for x in ["429", "rate_limit", "400", "decommissioned", "not found", "invalid_request_error"])
@@ -3358,11 +2277,11 @@ class LLMService:
 						gmodel = gemini_client.GenerativeModel(self._settings.gemini_model.replace("models/", ""))
 						resp = gmodel.generate_content(f"{system}\n\n{user_prompt}")
 						return getattr(resp, "text", "")
-				except: pass
+				except Exception:
+					pass
 			
 			raise Exception("Evaluation failed: Rate limit reached for all models.")
 
-		import anyio
 		return await _call()
 
 	async def classify_is_technical(self, question: str, answer: str, api_key: Optional[str] = None) -> tuple[bool, float, str]:
@@ -3386,10 +2305,8 @@ class LLMService:
 		)
 		user_content = f"Question: {question[:300]}\nAnswer Context: {answer[:300]}"
 
-		# Try multiple models/providers
-		DECOMMISSIONED = ["llama-3.1-70b-versatile", "llama3-70b-8192"]
-		raw_list = ["llama-3.1-8b-instant", "groq/compound", "llama-3.3-70b-versatile"]
-		models_to_try = [m for m in raw_list if m not in DECOMMISSIONED]
+		# Try multiple Groq models (keep short to reduce latency/cost)
+		models_to_try = self._groq_models_to_try(limit=3)
 		
 		for current_model in models_to_try:
 			try:
@@ -3432,7 +2349,7 @@ class LLMService:
 				if gemini_client:
 					gmodel = gemini_client.GenerativeModel(self._settings.gemini_model.replace("models/", ""))
 					full_prompt = f"{system_prompt}\n\nContent to classify:\n{user_content}"
-					resp = gemini_client.GenerativeModel("gemini-1.5-flash").generate_content(full_prompt)
+					resp = gmodel.generate_content(full_prompt)
 					text = resp.text.strip()
 					return "true" in text.lower(), 0.8, "gemini-fallback"
 			except Exception as e:
@@ -3448,6 +2365,7 @@ class LLMService:
 		profile_text: Optional[str] = None,
 		previous_qna: Optional[List[Dict[str, str]]] = None,
 		*,
+		depth: Optional[str] = None,
 		style_mode: Optional[str] = None,
 		tone: Optional[str] = None,
 		layout: Optional[str] = None,
@@ -3471,66 +2389,27 @@ class LLMService:
 			yield ""
 			return
 
-		# Use shared helper to build prompt with profile context
-		base_prompt = self._build_prompt_with_profile(question, system_prompt, profile_text)
-		
-		# SMART CONTEXT: Only add conversation history if question needs it
-		history_context = ""
-		if previous_qna and self._needs_conversation_context(question, previous_qna):
-			history_context = self._build_conversation_context(previous_qna)
-			logger.info(f"💬 [STREAM] Including conversation context ({len(previous_qna)} turns available, using last 3)")
-		else:
-			logger.info(f"⚡ [STREAM] Standalone question - skipping conversation history (saving tokens!)")
-		
-		prompt = history_context + base_prompt
-		if apply_auto_overrides:
-			# Identity/developer questions: answer directly (avoid extra templates/redirects)
-			if self._is_identity_question(question):
-				prompt = prompt + self._identity_overrides()
-			else:
-				# Comparison overrides for streaming as well
-				if self._needs_comparison(question):
-					prompt = prompt + self._comparison_overrides(question)
-				
-				# System design detection for streaming (CRITICAL!)
-				if self._is_system_design_question(question):
-					logger.info(f"✅ [STREAM] System design detected - adding comprehensive Mermaid overrides")
-					prompt = prompt + self._system_design_overrides()
-				else:
-					logger.info(f"❌ [STREAM] NOT system design - question: {question[:100]}")
-				
-				# Technical strategy overrides for streaming as well
-				if self._is_technical_strategy_question(question):
-					prompt = prompt + self._technical_strategy_overrides()
-		else:
-			logger.debug("🧪 [STREAM] Auto overrides disabled for internal call")
+		# Build complete prompt using unified helper
+		prompt = self._build_full_prompt(
+			question,
+			system_prompt,
+			profile_text,
+			previous_qna,
+			apply_auto_overrides,
+			depth=depth,
+			style_mode=style_mode,
+			tone=tone,
+			layout=layout,
+			variability=variability,
+			seed=seed,
+		)
 
-		# Style & tone overrides
-		prompt = prompt + self._style_overrides(style_mode, tone, layout, variability, seed)
-
-		if client is None:
-			yield ""
-			return
-		
-
-		# Use dynamic token limit for streaming as well
-		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens)
+		# Use dynamic token limit for streaming
+		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens, depth=depth)
 
 		def _call_stream(current_model: str):
-			messages: List[Dict[str, str]] = [
-				{"role": "system", "content": prompt}
-			]
-			# SMART CONTEXT: Only include message history if question needs it
-			if previous_qna and self._needs_conversation_context(question, previous_qna):
-				# REDUCED: Cap to last 3 turns (was 5) to save tokens
-				for item in previous_qna[-3:]:
-					q = (item.get("question") or "").strip()
-					a = (item.get("answer") or "").strip()
-					if q:
-						messages.append({"role": "user", "content": q})
-					if a:
-						messages.append({"role": "assistant", "content": a})
-			messages.append({"role": "user", "content": question})
+			# Build messages using unified helper
+			messages = self._build_messages(question, prompt, previous_qna)
 			if provider == "groq":
 				return client.chat.completions.create(
 					model=current_model,
@@ -3545,13 +2424,10 @@ class LLMService:
 				return None
 
 		import anyio
-		if groq_model_override:
-			if restrict_groq_to_override:
-				models_to_try = [groq_model_override]
-			else:
-				models_to_try = [groq_model_override] + [self._settings.groq_model] + [m for m in self._settings.groq_fallback_models if m != self._settings.groq_model]
-		else:
-			models_to_try = [self._settings.groq_model] + [m for m in self._settings.groq_fallback_models if m != self._settings.groq_model]
+		models_to_try = self._groq_models_to_try(
+			groq_model_override=groq_model_override,
+			restrict_to_override=restrict_groq_to_override,
+		)
 		stream = None
 		active_provider = provider
 		

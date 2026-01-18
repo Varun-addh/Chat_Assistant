@@ -9,9 +9,11 @@ Goal: identity guard should be:
 We intentionally call the internal identity helper to avoid external LLM calls.
 """
 
+import pytest
 from app.services.llm_service import LLMService
 
 
+@pytest.mark.fast
 def test_identity_who_are_you_mentions_application_and_models() -> None:
     svc = LLMService()
     text = svc._identity_response_text("who are you?").lower()
@@ -19,6 +21,7 @@ def test_identity_who_are_you_mentions_application_and_models() -> None:
     assert "ai language model" in text or "language model" in text
 
 
+@pytest.mark.fast
 def test_identity_chatgpt_does_not_claim_independence_or_codebase() -> None:
     svc = LLMService()
     text = svc._identity_response_text("are you chatgpt?").lower()
@@ -37,6 +40,7 @@ def test_identity_chatgpt_does_not_claim_independence_or_codebase() -> None:
     assert "openai" in text
 
 
+@pytest.mark.fast
 def test_identity_google_gemini_no_google_product_claim() -> None:
     svc = LLMService()
     text = svc._identity_response_text("are you google gemini?").lower()

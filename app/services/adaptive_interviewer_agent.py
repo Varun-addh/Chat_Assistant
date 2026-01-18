@@ -147,11 +147,11 @@ RETURN ONLY VALID JSON. DO NOT INCLUDE MARKDOWN BLOCKS.
                         text = self._repair_evaluation_json(text)
                         try:
                             evaluation = json.loads(text)
-                        except:
+                        except Exception:
                             text = self._aggressive_json_repair(text)
                             try:
                                 evaluation = json.loads(text)
-                            except:
+                            except Exception:
                                 return self._fallback_evaluation(transcript, key_points, metrics)
                     else:
                         return self._fallback_evaluation(transcript, key_points, metrics)

@@ -217,7 +217,7 @@ class TranscriptionCache:
                 file_hash = hashlib.md5(f.read()).hexdigest()
             
             return self.cache.get(file_hash)
-        except:
+        except Exception:
             return None
     
     def set(self, audio_path: str, transcript: str, metadata: dict):
@@ -234,5 +234,5 @@ class TranscriptionCache:
                 del self.cache[oldest]
             
             self.cache[file_hash] = (transcript, metadata)
-        except:
+        except Exception:
             pass
