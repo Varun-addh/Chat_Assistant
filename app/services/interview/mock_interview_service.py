@@ -3,7 +3,7 @@ import json
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
 import logging
 from pathlib import Path
@@ -79,6 +79,8 @@ class AnswerComparison(BaseModel):
 
 class EvaluationResult(BaseModel):
     """AI evaluation of user's answer with detailed learning feedback"""
+    model_config = ConfigDict(protected_namespaces=())
+
     overall_score: float = Field(ge=0, le=10, description="Overall score out of 10")
     criteria_scores: EvaluationCriteria
     

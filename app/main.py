@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
@@ -183,6 +183,16 @@ app = FastAPI(
 	version="0.1.0",
 	lifespan=lifespan,
 )
+
+
+@app.get("/")
+async def root(logs: str | None = Query(default=None)) -> JSONResponse:
+    """Root endpoint.
+
+    Some platforms probe `/?logs=container` (or just `/`) during startup.
+    Returning 200 here avoids noisy 404s in container logs.
+    """
+    return JSONResponse({"status": "ok", "logs": logs})
 
 # CORS Middleware
 app.add_middleware(
