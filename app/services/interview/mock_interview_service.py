@@ -804,7 +804,7 @@ CRITICAL RULES:
             # Parse enhanced feedback fields
             detailed_strengths = []
             if "detailed_strengths" in data and isinstance(data["detailed_strengths"], list):
-                from app.services.mock_interview_service import DetailedFeedbackItem
+                from app.services.interview.mock_interview_service import DetailedFeedbackItem
                 for item in data["detailed_strengths"]:
                     if isinstance(item, dict):
                         try:
@@ -814,7 +814,7 @@ CRITICAL RULES:
             
             detailed_weaknesses = []
             if "detailed_weaknesses" in data and isinstance(data["detailed_weaknesses"], list):
-                from app.services.mock_interview_service import DetailedFeedbackItem
+                from app.services.interview.mock_interview_service import DetailedFeedbackItem
                 for item in data["detailed_weaknesses"]:
                     if isinstance(item, dict):
                         try:
@@ -824,7 +824,7 @@ CRITICAL RULES:
             
             answer_comparisons = []
             if "answer_comparisons" in data and isinstance(data["answer_comparisons"], list):
-                from app.services.mock_interview_service import AnswerComparison
+                from app.services.interview.mock_interview_service import AnswerComparison
                 for item in data["answer_comparisons"]:
                     if isinstance(item, dict):
                         try:
@@ -1238,7 +1238,7 @@ mock_interview_service: Optional[MockInterviewService] = None
 
 def initialize_mock_interview_service(llm_service, interview_intelligence_service):
     """Initialize the global mock interview service (uses intelligent provider selection)"""
-    from app.services.llm_service import get_llm_service
+    from app.services.chat.llm_service import get_llm_service
     global mock_interview_service
     mock_interview_service = MockInterviewService(
         llm_service=get_llm_service(feature="default"),

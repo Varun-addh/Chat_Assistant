@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from app.database import get_db_context, init_db
 from app.models import EventRecord
-from app.services.learning_loops import compute_practice_insights
+from app.services.practice.learning_loops import compute_practice_insights
 
 
 def test_practice_insights_recommends_weak_category():

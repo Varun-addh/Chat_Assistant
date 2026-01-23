@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from app.services.interview_intelligence_service import (
+from app.services.interview.interview_intelligence_service import (
     ModernInterviewIntelligenceService,
     QuestionGenerationRequest,
     SearchIntent,

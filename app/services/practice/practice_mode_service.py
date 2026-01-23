@@ -24,13 +24,13 @@ from app.schemas import (
     UserProfile,
     InterviewRound
 )
-from app.services.interviewer_agent import InterviewerAgent
-from app.services.adaptive_interviewer_agent import AdaptiveInterviewerAgent
-from app.services.speech_analytics_agent import SpeechAnalyticsAgent
-from app.services.evaluation_agent import EvaluationAgent
-from app.services.local_stt_service import LocalSTTService
-from app.services.local_tts_service import LocalTTSService
-from app.services.conversational_agent import ConversationalAgent
+from app.services.practice.interviewer_agent import InterviewerAgent
+from app.services.practice.adaptive_interviewer_agent import AdaptiveInterviewerAgent
+from app.services.practice.speech_analytics_agent import SpeechAnalyticsAgent
+from app.services.practice.evaluation_agent import EvaluationAgent
+from app.services.practice.local_stt_service import LocalSTTService
+from app.services.practice.local_tts_service import LocalTTSService
+from app.services.practice.conversational_agent import ConversationalAgent
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ class PracticeModeService:
             
             # Special handling for FULL_INTERVIEW - mixed rounds simulation
             if round_type == InterviewRound.FULL_INTERVIEW:
-                from app.services.round_config_service import RoundConfigService
+                from app.services.practice.round_config_service import RoundConfigService
                 
                 experience_years = user_profile.experience_years if user_profile else 3
                 # Get the base breakdown (sums to 18)
@@ -304,7 +304,7 @@ class PracticeModeService:
             ConversationalResponse with first question or clarification request
         """
         from app.schemas import ConversationalResponse
-        from app.services.llm_service import llm_service
+        from app.services.chat.llm_service import llm_service
         
         try:
             logger.info("🚀 Quick Start: Analyzing user input...")

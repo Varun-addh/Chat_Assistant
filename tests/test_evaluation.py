@@ -24,7 +24,7 @@ import sys
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from app.services.evaluation_agent import EvaluationAgent
+from app.services.practice.evaluation_agent import EvaluationAgent
 from app.schemas import (
     AnswerSubmission,
     SpeechMetrics,

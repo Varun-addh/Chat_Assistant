@@ -117,7 +117,7 @@ RETURN ONLY VALID JSON. DO NOT INCLUDE MARKDOWN BLOCKS.
 }}"""
 
             # Use universal LLM service for provider-agnostic generation
-            from app.services.llm_service import llm_service
+            from app.services.chat.llm_service import llm_service
             
             try:
                 text = await llm_service.generate_text(
@@ -307,7 +307,7 @@ SPEECH_QUALITY: <assessment>
 CONTENT_RELEVANCE: <assessment>"""
 
             # Provider-agnostic: use the shared llm_service (Groq/Gemini/etc)
-            from app.services.llm_service import llm_service
+            from app.services.chat.llm_service import llm_service
 
             text = await llm_service.generate_text(
                 prompt=prompt,
@@ -570,7 +570,7 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
     
     async def _call_llm(self, prompt: str, api_key: Optional[str] = None) -> str:
         """Call LLM with JSON mode for structured output."""
-        from app.services.llm_service import llm_service
+        from app.services.chat.llm_service import llm_service
         
         try:
             text = await llm_service.generate_text(

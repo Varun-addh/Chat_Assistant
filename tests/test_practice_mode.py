@@ -14,8 +14,8 @@ if os.getenv("RUN_INTEGRATION_TESTS") != "1":
 
 import asyncio
 from app.config_practice_mode import get_practice_config
-from app.services.local_stt_service import LocalSTTService
-from app.services.local_tts_service import LocalTTSService
+from app.services.practice.local_stt_service import LocalSTTService
+from app.services.practice.local_tts_service import LocalTTSService
 
 async def test_practice_mode():
     """Test Practice Mode basic functionality."""

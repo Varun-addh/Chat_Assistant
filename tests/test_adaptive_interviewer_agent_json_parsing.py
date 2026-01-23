@@ -1,7 +1,7 @@
 import pytest
 
 from app.schemas import QuestionDifficulty, UserProfile
-from app.services.adaptive_interviewer_agent import AdaptiveInterviewerAgent
+from app.services.practice.adaptive_interviewer_agent import AdaptiveInterviewerAgent
 
 
 def test_parse_questions_handles_trailing_garbage_after_json_array():

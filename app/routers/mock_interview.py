@@ -3,7 +3,7 @@ from typing import Optional
 from pydantic import BaseModel
 import logging
 
-from app.services.mock_interview_service import (
+from app.services.interview.mock_interview_service import (
     InterviewType,
     DifficultyLevel,
     UserAnswer,
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Dependency to get the mock interview service
 def get_mock_service():
     """Dependency to ensure mock service is available"""
-    from app.services.mock_interview_service import mock_interview_service
+    from app.services.interview.mock_interview_service import mock_interview_service
     
     if not mock_interview_service:
         logger.error("Mock interview service not available - check main.py lifespan initialization")
@@ -520,7 +520,7 @@ async def clear_user_history(
 async def health_check():
     """Check if mock interview service is available"""
     try:
-        from app.services.mock_interview_service import mock_interview_service
+        from app.services.interview.mock_interview_service import mock_interview_service
         
         return {
             "status": "healthy" if mock_interview_service else "unavailable",

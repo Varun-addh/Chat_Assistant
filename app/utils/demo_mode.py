@@ -23,7 +23,7 @@ from fastapi import HTTPException, Request
 
 from app.config import settings
 from app.models import User
-from app.services.demo_key_pool import demo_key_pool
+from app.services.chat.demo_key_pool import demo_key_pool
 
 
 UserType = Literal["demo", "registered"]

@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.schemas import PracticeInterviewQuestion, PracticeSession, QuestionDifficulty
-from app.services.practice_mode_service import PracticeModeService
+from app.services.practice.practice_mode_service import PracticeModeService
 
 
 class _DummyTTS:

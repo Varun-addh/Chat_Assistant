@@ -24,7 +24,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from app.services.session_manager import SessionManager
+from app.services.core.session_manager import SessionManager
 
 
 async def test_rapid_session_creation():

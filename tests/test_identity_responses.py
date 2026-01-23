@@ -10,7 +10,7 @@ We intentionally call the internal identity helper to avoid external LLM calls.
 """
 
 import pytest
-from app.services.llm_service import LLMService
+from app.services.chat.llm_service import LLMService
 
 
 @pytest.mark.fast

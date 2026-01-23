@@ -18,11 +18,11 @@ from app.schemas import (
     DiagramStyle,
     RenderViewRequest
 )
-from app.services.architecture_generator import get_architecture_generator
-from app.services.llm_service import get_llm_service
+from app.services.architecture.architecture_generator import get_architecture_generator
+from app.services.chat.llm_service import get_llm_service
 from app.utils.mermaid_sanitizer import MermaidSanitizer
 from app.config import settings
-from app.services.redis_client import get_redis, redis_enabled
+from app.services.core.redis_client import get_redis, redis_enabled
 
 
 router = APIRouter()

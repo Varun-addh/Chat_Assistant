@@ -4,7 +4,7 @@ from typing import Tuple, List
 import ast
 import json
 
-from app.services.llm_service import llm_service
+from app.services.chat.llm_service import llm_service
 
 
 def _analyze_python_ast(code: str) -> dict:

@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.routers.history import router as history_router
-from app.services.history_manager import HistoryManager
+from app.services.core.history_manager import HistoryManager
 
 
 def test_history_manager_refuses_empty_questions():

@@ -4,7 +4,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import logging
 
-from app.services.history_manager import HistoryManager, default_history_manager
+from app.services.core.history_manager import HistoryManager, default_history_manager
 
 logger = logging.getLogger(__name__)
 

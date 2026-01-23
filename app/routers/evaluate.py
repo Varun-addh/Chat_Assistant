@@ -10,10 +10,10 @@ from typing import Dict, Optional
 from app.utils.time import utcnow
 
 from app.schemas import EvaluationIn, EvaluationOut, EvaluationScores, StaticSignals
-from app.services.session_manager import get_session_manager
-from app.services.code_evaluation_service import evaluate_code
+from app.services.core.session_manager import get_session_manager
+from app.services.core.code_evaluation_service import evaluate_code
 from app.utils.audit import auditor
-from app.services.llm_service import get_llm_service
+from app.services.chat.llm_service import get_llm_service
 from app.middleware.auth import get_user_id_from_request
 
 from app.database import get_db_context

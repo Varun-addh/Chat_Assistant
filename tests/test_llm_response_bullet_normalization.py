@@ -10,7 +10,7 @@ These tests ensure the backend normalizes that output before returning it.
 from __future__ import annotations
 
 import pytest
-from app.services.llm_service import LLMService
+from app.services.chat.llm_service import LLMService
 
 
 @pytest.mark.fast

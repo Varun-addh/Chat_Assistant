@@ -13,13 +13,13 @@ from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, Fi
 from sentence_transformers import SentenceTransformer
 
 from app.config import settings
-from app.services.llm_service import llm_service
+from app.services.chat.llm_service import llm_service
 
 from app.utils.time import utcnow
 
 import logging
 
-from app.services.dynamic_interview_sources import (
+from app.services.chat.dynamic_interview_sources import (
     dynamic_source_manager,
     VerifiedQuestion,
     SourceType,
@@ -27,7 +27,7 @@ from app.services.dynamic_interview_sources import (
     QuestionDomain,
 )
 
-from app.services.ai_native_enhancements import (
+from app.services.chat.ai_native_enhancements import (
     HybridSearchEngine,
     CohereReranker,
     CodeExecutionSandbox,
@@ -2150,7 +2150,7 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
     def __init__(self):
         super().__init__()
         # Use the new dynamic source manager
-        from app.services.dynamic_interview_sources import dynamic_source_manager
+        from app.services.chat.dynamic_interview_sources import dynamic_source_manager
         self.source_manager = dynamic_source_manager
         self.hybrid_search: Optional[HybridSearchService] = None
     
@@ -2223,7 +2223,7 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
         api_key: Optional[str] = None
     ) -> List[Dict]:
         """Generate questions with LLM and label them clearly"""
-        from app.services.interview_intelligence_service import QuestionGenerationRequest
+        from app.services.interview.interview_intelligence_service import QuestionGenerationRequest
         
         request = QuestionGenerationRequest(
             query=query,
@@ -2654,7 +2654,7 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
         
         # Initialize query expander
         if self.enable_query_expansion:
-            from app.services.llm_service import llm_service
+            from app.services.chat.llm_service import llm_service
             self.query_expander = QueryExpansion(llm_service=llm_service)
         else:
             self.query_expander = None
@@ -3071,7 +3071,7 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
 
 # Global service instances
 # Create enhanced service first (it has all functionality)
-from app.services.llm_service import get_llm_service
+from app.services.chat.llm_service import get_llm_service
 
 # Use Groq for Interview Intelligence tab only, not for the global default
 class GroqUltraProductionInterviewService(UltraProductionInterviewService):

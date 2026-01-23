@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.mirror_compare import (
+from app.services.chat.mirror_compare import (
 	compute_mirror_progress,
 	find_previous_mirror_attempt,
 	format_mirror_progress_markdown,

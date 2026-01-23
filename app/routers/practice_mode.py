@@ -32,21 +32,21 @@ from app.schemas import (
     RoundSelectionRequest,
     RoundSelectionResponse
 )
-from app.services.practice_mode_service import PracticeModeService
+from app.services.practice.practice_mode_service import PracticeModeService
 
 from app.config import settings
 from app.database import get_db_context
 from app.middleware.auth import get_user_id_from_request
 from app.utils.event_logging import track_event, stable_question_id, stable_hash
-from app.services.learning_loops import compute_practice_insights, merge_focus_areas
+from app.services.practice.learning_loops import compute_practice_insights, merge_focus_areas
 from app.models import PracticeAttemptRecord
-from app.services.practice_progress import (
+from app.services.practice.practice_progress import (
     get_dimension_heatmap,
     get_latest_next_session_plan,
     get_progress_summary,
     save_completed_attempt,
 )
-from app.services.practice_scoring import evaluation_report_to_json, score_session
+from app.services.practice.practice_scoring import evaluation_report_to_json, score_session
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +219,7 @@ async def get_available_rounds(
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
         
-        from app.services.round_config_service import RoundConfigService
+        from app.services.practice.round_config_service import RoundConfigService
         
         all_rounds = RoundConfigService.get_all_rounds()
         
@@ -357,7 +357,7 @@ async def start_round_based_interview(
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
         
-        from app.services.round_config_service import RoundConfigService
+        from app.services.practice.round_config_service import RoundConfigService
         
         # Get configuration for the selected round
         round_config = RoundConfigService.get_round_config(payload.round_type)
@@ -487,7 +487,7 @@ async def get_difficulty_preview(experience_years: int):
         {"difficulty": "easy|medium|hard", "label": "EASY|MEDIUM|HARD"}
     """
     try:
-        from app.services.round_config_service import RoundConfigService
+        from app.services.practice.round_config_service import RoundConfigService
         
         difficulty = RoundConfigService.get_difficulty_for_experience(experience_years)
         

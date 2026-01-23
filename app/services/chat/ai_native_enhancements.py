@@ -42,11 +42,31 @@ class HybridSearchEngine:
         self.qdrant_client = qdrant_client
         self.collection_name = collection_name
         import os
-        MODEL_PATH = str((__file__ and __file__) and (os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/models/all-MiniLM-L6-v2'))))
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["SENTENCE_TRANSFORMERS_HOME"] = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/models'))
-        self.embeddings = HuggingFaceEmbeddings(model_name=MODEL_PATH)
+        from pathlib import Path
+
+        # Resolve the embedding model path relative to the repository root.
+        # File layout: <repo>/app/services/chat/ai_native_enhancements.py
+        # Repo root is three parents up from this file.
+        repo_root = Path(__file__).resolve().parents[3]
+        candidates = [
+            repo_root / "data" / "models" / "all-MiniLM-L6-v2",
+            repo_root / "app" / "data" / "models" / "all-MiniLM-L6-v2",
+        ]
+        model_path = next((p for p in candidates if p.exists()), candidates[0])
+
+        # Prefer offline/local models when present.
+        if model_path.exists():
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(model_path.parent)
+            self.embeddings = HuggingFaceEmbeddings(model_name=str(model_path))
+        else:
+            logger.warning(
+                "Embedding model path not found at %s (checked %s); falling back to remote model id.",
+                str(model_path),
+                ", ".join(str(p) for p in candidates),
+            )
+            self.embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         
         # BM25 for keyword search
         self.bm25_retriever: Optional[BM25Retriever] = None

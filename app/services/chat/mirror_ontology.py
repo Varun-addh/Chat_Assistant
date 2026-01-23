@@ -9,7 +9,7 @@ import json
 import time
 
 from app.config import settings
-from app.services.redis_client import get_redis, redis_enabled
+from app.services.core.redis_client import get_redis, redis_enabled
 
 
 @dataclass(frozen=True)

@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.routers.questions import router as questions_router
-from app.services.session_manager import SessionManager
+from app.services.core.session_manager import SessionManager
 
 
 def _cleanup_user_sessions(user_id: str) -> None:

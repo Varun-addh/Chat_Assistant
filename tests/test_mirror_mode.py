@@ -111,7 +111,7 @@ def test_mirror_low_confidence_guard_vague_answer(monkeypatch):
     """Regression: vague answers should not get 'upgrade lines' with false authority."""
     import asyncio
 
-    from app.services.llm_service import LLMService
+    from app.services.chat.llm_service import LLMService
 
     svc = LLMService()
 
@@ -132,7 +132,7 @@ def test_mirror_low_confidence_guard_vague_answer(monkeypatch):
 
     # Avoid real LLM calls for ontology generation and report generation.
     async def _fake_ontology_get(**kwargs):
-        from app.services.mirror_ontology import MirrorOntology
+        from app.services.chat.mirror_ontology import MirrorOntology
 
         return MirrorOntology(
             topic="General",
@@ -168,7 +168,7 @@ def test_mirror_rewrites_meta_advice_upgrade_lines(monkeypatch):
     """If the model returns coaching meta-advice, we rewrite into speakable lines."""
     import asyncio
 
-    from app.services.llm_service import LLMService
+    from app.services.chat.llm_service import LLMService
 
     svc = LLMService()
 
@@ -193,7 +193,7 @@ def test_mirror_rewrites_meta_advice_upgrade_lines(monkeypatch):
         return '{"upgrade_lines":["Data science combines statistics, machine learning, and domain expertise to turn data into decisions."]}'
 
     async def _fake_ontology_get(**kwargs):
-        from app.services.mirror_ontology import MirrorOntology
+        from app.services.chat.mirror_ontology import MirrorOntology
 
         return MirrorOntology(
             topic="Data Science",
@@ -223,62 +223,65 @@ def test_mirror_rewrites_meta_advice_upgrade_lines(monkeypatch):
 
 @pytest.mark.fast
 def test_mirror_softens_harsh_red_flags(monkeypatch):
-	"""Regression: harsh red-flag phrasing like 'confuses' should be auto-softened."""
-	import asyncio
+    """Regression: harsh red-flag phrasing like 'confuses' should be auto-softened."""
+    # NOTE: This test file previously mixed tabs/spaces in this function.
+    # Keep indentation consistent to avoid IndentationError.
+    import asyncio
 
-	from app.services.llm_service import LLMService
+    from app.services.chat.llm_service import LLMService
+    from app.services.chat.mirror_ontology import MirrorOntology
 
-	svc = LLMService()
+    svc = LLMService()
 
-	call_count = {"n": 0}
+    call_count = {"n": 0}
 
-	async def _fake_generate_text(prompt: str, **kwargs):
-		call_count["n"] += 1
-		if call_count["n"] == 1:
-			return (
-				'{'
-				'"topic":"API",' 
-				'"message":"",' 
-				'"strengths":["Understands bridge concept"],' 
-				'"gaps":["No mention of types (REST/SOAP)"],' 
-				'"red_flags":["Confuses API role with implementation details"], '
-				'"likely_followups":[], '
-				'"upgrade_lines":[], '
-				'"confidence":0.8'
-				'}'
-			)
-		# Second call: soften red flags
-		return '{"red_flags":["May sound junior; narrow framing (backend-frontend only)"]}'
+    async def _fake_generate_text(prompt: str, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return (
+                "{"
+                '"topic":"API",'
+                '"message":"",'
+                '"strengths":["Understands bridge concept"],'
+                '"gaps":["No mention of types (REST/SOAP)"],'
+                '"red_flags":["Confuses API role with implementation details"], '
+                '"likely_followups":[], '
+                '"upgrade_lines":[], '
+                '"confidence":0.8'
+                "}"
+            )
+        # Second call: soften red flags
+        return '{"red_flags":["May sound junior; narrow framing (backend-frontend only)"]}'
 
-	async def _fake_ontology_get(**kwargs):
-		from app.services.mirror_ontology import MirrorOntology
+    async def _fake_ontology_get(**kwargs):
+        return MirrorOntology(
+            topic="API",
+            primitives=(),
+            senior_signals=(),
+            red_flags=(),
+            likely_followups=(),
+        )
 
-		return MirrorOntology(
-			topic="API",
-			primitives=(),
-			senior_signals=(),
-			red_flags=(),
-			likely_followups=(),
-		)
+    monkeypatch.setattr(svc, "generate_text", _fake_generate_text)
+    monkeypatch.setattr(svc._mirror_ontology, "get", _fake_ontology_get)
 
-	monkeypatch.setattr(svc, "generate_text", _fake_generate_text)
-	monkeypatch.setattr(svc._mirror_ontology, "get", _fake_ontology_get)
+    async def _run():
+        _md, _truncated, report = await svc.generate_mirror_report_structured(
+            question="What is API?",
+            user_answer="API is interaction between backend and frontend.",
+            depth="standard",
+            api_key="test_key",
+        )
+        return report
 
-	async def _run():
-		_md, _truncated, report = await svc.generate_mirror_report_structured(
-			question="What is API?",
-			user_answer="API is interaction between backend and frontend.",
-			depth="standard",
-			api_key="test_key",
-		)
-		return report
-
-	report = asyncio.run(_run())
-	assert call_count["n"] >= 2
-	assert report["confidence"] >= 0.4
-	assert report["red_flags"]
-	assert "confuses" not in report["red_flags"][0].lower()
-	assert any(x in report["red_flags"][0].lower() for x in ["may sound", "narrow framing", "junior"])
+    report = asyncio.run(_run())
+    assert call_count["n"] >= 2
+    assert report["confidence"] >= 0.4
+    assert report["red_flags"]
+    assert "confuses" not in report["red_flags"][0].lower()
+    assert any(
+        x in report["red_flags"][0].lower() for x in ["may sound", "narrow framing", "junior"]
+    )
 
 
 @pytest.mark.fast
@@ -286,7 +289,7 @@ def test_mirror_parses_prose_wrapped_json(monkeypatch):
     """Models sometimes wrap JSON in prose/fences; extraction should still work."""
     import asyncio
 
-    from app.services.llm_service import LLMService
+    from app.services.chat.llm_service import LLMService
 
     svc = LLMService()
 
@@ -308,7 +311,7 @@ def test_mirror_parses_prose_wrapped_json(monkeypatch):
         )
 
     async def _fake_ontology_get(**kwargs):
-        from app.services.mirror_ontology import MirrorOntology
+        from app.services.chat.mirror_ontology import MirrorOntology
         return MirrorOntology(topic="Caching", primitives=(), senior_signals=(), red_flags=(), likely_followups=())
 
     monkeypatch.setattr(svc, "generate_text", _fake_generate_text)
@@ -334,7 +337,7 @@ def test_mirror_schema_drift_forces_low_confidence(monkeypatch):
     """If the model output is incomplete, force low-confidence behavior safely."""
     import asyncio
 
-    from app.services.llm_service import LLMService
+    from app.services.chat.llm_service import LLMService
 
     svc = LLMService()
 
@@ -343,7 +346,7 @@ def test_mirror_schema_drift_forces_low_confidence(monkeypatch):
         return '{"topic":"Caching","confidence":0.95}'
 
     async def _fake_ontology_get(**kwargs):
-        from app.services.mirror_ontology import MirrorOntology
+        from app.services.chat.mirror_ontology import MirrorOntology
         return MirrorOntology(topic="Caching", primitives=(), senior_signals=(), red_flags=(), likely_followups=())
 
     monkeypatch.setattr(svc, "generate_text", _fake_generate_text)
@@ -377,7 +380,7 @@ def test_mirror_policy_has_injection_shield():
 def test_mirror_confidence_calibration_downgrades_overconfident_vague_answer(monkeypatch):
     import asyncio
 
-    from app.services.llm_service import LLMService
+    from app.services.chat.llm_service import LLMService
 
     svc = LLMService()
 
@@ -397,7 +400,7 @@ def test_mirror_confidence_calibration_downgrades_overconfident_vague_answer(mon
         )
 
     async def _fake_ontology_get(**kwargs):
-        from app.services.mirror_ontology import MirrorOntology
+        from app.services.chat.mirror_ontology import MirrorOntology
         return MirrorOntology(
             topic="System Design",
             primitives=("latency", "throughput", "data model", "cache", "queue"),
@@ -429,7 +432,7 @@ def test_mirror_confidence_calibration_downgrades_overconfident_vague_answer(mon
 def test_mirror_confidence_calibration_can_bump_pessimistic_model(monkeypatch):
     import asyncio
 
-    from app.services.llm_service import LLMService
+    from app.services.chat.llm_service import LLMService
 
     svc = LLMService()
 
@@ -449,7 +452,7 @@ def test_mirror_confidence_calibration_can_bump_pessimistic_model(monkeypatch):
         )
 
     async def _fake_ontology_get(**kwargs):
-        from app.services.mirror_ontology import MirrorOntology
+        from app.services.chat.mirror_ontology import MirrorOntology
         return MirrorOntology(
             topic="Caching",
             primitives=("ttl", "invalidation", "eviction", "cache stampede"),

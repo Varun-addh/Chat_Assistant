@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import AsyncIterator, Optional, List, Dict, Any, Tuple
 from groq import Groq
 try:
-	from app.services.gemini_adapter import genai
+	from app.services.chat.gemini_adapter import genai
 except Exception:
     genai = None
 
@@ -12,13 +12,13 @@ import logging
 import json
 import re
 
-from app.services.demo_key_pool import demo_key_pool
+from app.services.chat.demo_key_pool import demo_key_pool
 
 from app.prompts.builder import PromptFlags, build_default_system_prompt
 from app.prompts.response_plan import ResponsePlan
-from app.services.mirror_ontology import MirrorOntologyGenerator
+from app.services.chat.mirror_ontology import MirrorOntologyGenerator
 from app.schemas import MirrorReport
-from app.services.dynamic_budget import dynamic_budget_engine
+from app.services.chat.dynamic_budget import dynamic_budget_engine
 from app.services.llm import (
 	ambiguous_query_overrides,
 	algorithm_overrides,

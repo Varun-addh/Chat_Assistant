@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from typing import AsyncIterator
 
-from app.services.session_manager import get_session_manager
-from app.services.stt_service import stt_service
+from app.services.core.session_manager import get_session_manager
+from app.services.practice.stt_service import stt_service
 from app.utils.security import websocket_verify_api_key
 
 

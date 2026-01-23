@@ -7,8 +7,9 @@ import logging
 import re
 import asyncio
 from typing import Optional, Dict, Any, Tuple
-from app.schemas import UserProfile, QuestionDifficulty
+
 from app.config import settings
+from app.schemas import QuestionDifficulty, UserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -18,71 +19,67 @@ class ConversationalAgent:
     AI agent that understands conversational input and infers user profile.
     Replaces form-based configuration with natural language interaction.
     """
-    
+
     def __init__(self, gemini_api_key: str):
         """Initialize conversational agent."""
         logger.info("🚀 Conversational Agent initialized (Universal Provider Support)")
-    
+
     async def infer_profile_from_conversation(
         self,
         user_input: str,
-
         context: Optional[str] = None,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
     ) -> Tuple[UserProfile, str, QuestionDifficulty, int]:
         """
         Use AI to extract user profile from conversational input.
-        
+
         Args:
             user_input: Natural language from user (voice or text)
             context: Additional context (resume, past sessions, etc.)
-            
+
         Returns:
             Tuple of (UserProfile, ai_response_message, difficulty, question_count)
         """
         try:
-            # Build prompt for Gemini
             prompt = self._build_inference_prompt(user_input, context)
-            
-            # Use universal LLM service for provider-agnostic generation
-            from app.services.llm_service import llm_service
-            
+
+            from app.services.chat.llm_service import llm_service
+
             text = await llm_service.generate_text(
                 prompt=prompt,
                 api_key=api_key,
                 temperature=0.3,
-                max_tokens=500
+                max_tokens=500,
             )
-            
+
             if not text:
                 logger.warning("⚠️ LLM response empty in profile inference, using fallback")
                 raise ValueError("Empty LLM response")
-            
-            profile, difficulty, count, message = self._parse_ai_response(
-                text,
-                user_input
-            )
-            
+
+            profile, difficulty, count, message = self._parse_ai_response(text, user_input)
             return profile, message, difficulty, count
-            
+
         except Exception as e:
             logger.error(f"Error inferring profile: {e}")
-            # Fallback to default
-            return self._get_default_profile(), \
-                   "I'll set up a general interview for you. Let's start!", \
-                   QuestionDifficulty.MEDIUM, \
-                   settings.default_question_count
-    
+            return (
+                self._get_default_profile(),
+                "I'll set up a general interview for you. Let's start!",
+                QuestionDifficulty.MEDIUM,
+                settings.default_question_count,
+            )
+
     def _build_inference_prompt(self, user_input: str, context: Optional[str]) -> str:
         """Build prompt for profile inference."""
-        prompt = f"""You are an AI interview coach. Extract interview requirements from user input.
+        prompt = (
+            """You are an AI interview coach. Extract interview requirements from user input.
 
 User Input: "{user_input}"
-"""
-        
+""".format(user_input=user_input)
+        )
+
         if context:
             prompt += f"\nAdditional Context: {context}\n"
-        
+
         prompt += f"""
 Extract and respond in this EXACT format:
 
@@ -129,24 +126,24 @@ AI_MESSAGE: Perfect! I'll create challenging Google-style technical questions fo
 Now extract from the user's input above:
 """
         return prompt
-    
+
     def _parse_ai_response(
-        self,
-        ai_text: str,
-        original_input: str
+        self, ai_text: str, original_input: str
     ) -> Tuple[UserProfile, QuestionDifficulty, int, str]:
-        """Parse Gemini's structured response."""
+        """Parse the LLM's structured response."""
         try:
-            # Extract fields using regex
             domain = self._extract_field(ai_text, "DOMAIN")
-            experience_years = int(self._extract_field(ai_text, "EXPERIENCE_YEARS", str(settings.default_experience_years)))
+            experience_years = int(
+                self._extract_field(
+                    ai_text, "EXPERIENCE_YEARS", str(settings.default_experience_years)
+                )
+            )
             skills_str = self._extract_field(ai_text, "SKILLS", "general programming")
             skills = [s.strip() for s in skills_str.split(",")]
             job_role = self._extract_field(ai_text, "JOB_ROLE", domain)
             company_pref = self._extract_field(ai_text, "COMPANY_PREFERENCE", "any")
             focus = self._extract_field(ai_text, "INTERVIEW_FOCUS", "both")
-            
-            # Convert focus to list
+
             if focus.lower() == "both":
                 focus_list = ["technical", "behavioral"]
             elif focus.lower() == "technical":
@@ -155,71 +152,70 @@ Now extract from the user's input above:
                 focus_list = ["behavioral"]
             else:
                 focus_list = ["technical", "behavioral"]
-            
+
             difficulty_str = self._extract_field(ai_text, "DIFFICULTY", "medium")
-            count_str = self._extract_field(ai_text, "QUESTION_COUNT", str(settings.default_question_count))
+            count_str = self._extract_field(
+                ai_text, "QUESTION_COUNT", str(settings.default_question_count)
+            )
             count = int(count_str)
-            # Clamp to valid range from config
             count = max(settings.min_question_count, min(settings.max_question_count, count))
             ai_message = self._extract_field(
-                ai_text, 
-                "AI_MESSAGE", 
-                f"Got it! Preparing your {domain} interview now..."
+                ai_text,
+                "AI_MESSAGE",
+                f"Got it! Preparing your {domain} interview now...",
             )
-            
-            # Log what was extracted for debugging
-            logger.info(f"📊 Extracted from AI: domain={domain}, exp={experience_years}, difficulty={difficulty_str}, count={count}")
-            
-            # Map difficulty
+
+            logger.info(
+                f"📊 Extracted from AI: domain={domain}, exp={experience_years}, difficulty={difficulty_str}, count={count}"
+            )
+
             difficulty_map = {
                 "easy": QuestionDifficulty.EASY,
                 "medium": QuestionDifficulty.MEDIUM,
-                "hard": QuestionDifficulty.HARD
+                "hard": QuestionDifficulty.HARD,
             }
-            difficulty = difficulty_map.get(difficulty_str.lower(), QuestionDifficulty.MEDIUM)
-            
-            # Build profile
+            difficulty = difficulty_map.get(
+                difficulty_str.lower(), QuestionDifficulty.MEDIUM
+            )
+
             profile = UserProfile(
                 domain=domain,
                 experience_years=experience_years,
                 skills=skills,
                 job_role=job_role,
                 company_preference=company_pref,
-                interview_focus=focus_list
+                interview_focus=focus_list,
             )
-            
-            logger.info(f"✅ Inferred profile: {domain}, {experience_years}yrs, {difficulty_str}, {count} questions")
+
+            logger.info(
+                f"✅ Inferred profile: {domain}, {experience_years}yrs, {difficulty_str}, {count} questions"
+            )
             return profile, difficulty, count, ai_message
-            
+
         except Exception as e:
             logger.warning(f"Error parsing AI response: {e}")
             return self._get_fallback_from_input(original_input)
-    
+
     def _extract_field(self, text: str, field: str, default: str = "") -> str:
-        """Extract field from AI response."""
         pattern = rf"{field}:\s*(.+?)(?:\n|$)"
         match = re.search(pattern, text, re.IGNORECASE)
         return match.group(1).strip() if match else default
-    
+
     def _get_default_profile(self) -> UserProfile:
-        """Get default profile for fallback."""
         return UserProfile(
             domain=settings.default_domain,
             experience_years=settings.default_experience_years,
             skills=["programming", "problem solving"],
             job_role=settings.default_domain,
             company_preference="any",
-            interview_focus=["technical", "behavioral"]
+            interview_focus=["technical", "behavioral"],
         )
-    
+
     def _get_fallback_from_input(
-        self,
-        user_input: str
+        self, user_input: str
     ) -> Tuple[UserProfile, QuestionDifficulty, int, str]:
-        """Simple keyword-based fallback if AI parsing fails."""
         input_lower = user_input.lower()
-        
-        # Detect domain
+
         if any(word in input_lower for word in ["data scien", "ml", "machine learning"]):
             domain = "Data Scientist"
             skills = ["Python", "pandas", "machine learning"]
@@ -232,8 +228,7 @@ Now extract from the user's input above:
         else:
             domain = "Software Engineer"
             skills = ["programming", "problem solving"]
-        
-        # Detect level
+
         if any(word in input_lower for word in ["senior", "staff", "principal", "lead"]):
             experience = 6
             difficulty = QuestionDifficulty.HARD
@@ -243,16 +238,15 @@ Now extract from the user's input above:
         else:
             experience = 3
             difficulty = QuestionDifficulty.MEDIUM
-        
+
         profile = UserProfile(
             domain=domain,
             experience_years=experience,
             skills=skills,
             job_role=domain,
             company_preference="any",
-            interview_focus=["technical", "behavioral"]
+            interview_focus=["technical", "behavioral"],
         )
-        
+
         message = f"Setting up a {difficulty.value} level {domain} interview for you!"
-        
         return profile, difficulty, settings.default_question_count, message

@@ -13,8 +13,8 @@ def test_mirror_golden_cases_confidence_calibration_ranges():
     This test is intentionally LLM-free: it validates only the calibration logic.
     """
 
-    from app.services.llm_service import LLMService
-    from app.services.mirror_ontology import MirrorOntology
+    from app.services.chat.llm_service import LLMService
+    from app.services.chat.mirror_ontology import MirrorOntology
 
     svc = LLMService()
 

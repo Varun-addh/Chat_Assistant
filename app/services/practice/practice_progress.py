@@ -20,7 +20,11 @@ from sqlalchemy.orm import Session
 
 from app.models import PracticeAttemptDimensionRecord, PracticeAttemptRecord
 from app.schemas import PracticeSession
-from app.services.practice_scoring import PracticeScoreResult, evaluation_report_to_json, score_session
+from app.services.practice.practice_scoring import (
+    PracticeScoreResult,
+    evaluation_report_to_json,
+    score_session,
+)
 
 
 @dataclass(frozen=True)

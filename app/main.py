@@ -12,7 +12,7 @@ from app.routers.evaluate import router as evaluate_router
 from app.routers.history import router as history_router
 from app.routers.auth_routes import router as auth_router
 from app.utils.audit import auditor
-from app.services.llm_service import llm_service
+from app.services.chat.llm_service import llm_service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 INTERVIEW_INTELLIGENCE_AVAILABLE = True
 try:
     from app.routers.interview_intelligence import router as interview_intelligence
-    from app.services.interview_intelligence_service import (
+    from app.services.interview.interview_intelligence_service import (
         interview_intelligence_service,
         base_interview_service,
         enhanced_interview_service,
@@ -55,8 +55,8 @@ if settings.fast_startup or settings.disable_interview_intelligence:
     ultra_production_service = None  # type: ignore[assignment]
 
 from app.routers.mock_interview import router as mock_interview_router
-from app.services.mock_interview_service import initialize_mock_interview_service
-from app.services.history_manager import default_history_manager
+from app.services.interview.mock_interview_service import initialize_mock_interview_service
+from app.services.core.history_manager import default_history_manager
 
 # Practice Mode imports
 from app.routers.practice_mode import router as practice_router, init_practice_mode
@@ -79,6 +79,7 @@ logger.info("="*60)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan: startup and shutdown."""
+    global INTERVIEW_INTELLIGENCE_AVAILABLE
     # Initialize database
     from app.database import init_db
     init_db()
@@ -89,35 +90,44 @@ async def lifespan(app: FastAPI):
     rate_limiter.start()
     
     if INTERVIEW_INTELLIGENCE_AVAILABLE:
-        # Startup - initialize enhanced service first, then share its resources with base
-        await enhanced_interview_service.initialize()
+        try:
+            # Startup - initialize enhanced service first, then share its resources with base
+            await enhanced_interview_service.initialize()
 
-        # Share vector client and embed model to avoid Qdrant lock conflicts
-        base_interview_service.vector_client = enhanced_interview_service.vector_client
-        base_interview_service.embed_model = enhanced_interview_service.embed_model
-        base_interview_service.collection_name = enhanced_interview_service.collection_name
+            # Share vector client and embed model to avoid Qdrant lock conflicts
+            base_interview_service.vector_client = enhanced_interview_service.vector_client
+            base_interview_service.embed_model = enhanced_interview_service.embed_model
+            base_interview_service.collection_name = enhanced_interview_service.collection_name
 
-        # Share resources with ultra service BEFORE initializing (to avoid Qdrant lock conflict)
-        ultra_production_service.vector_client = enhanced_interview_service.vector_client
-        ultra_production_service.embed_model = enhanced_interview_service.embed_model
-        ultra_production_service.collection_name = enhanced_interview_service.collection_name
+            # Share resources with ultra service BEFORE initializing (to avoid Qdrant lock conflict)
+            ultra_production_service.vector_client = enhanced_interview_service.vector_client
+            ultra_production_service.embed_model = enhanced_interview_service.embed_model
+            ultra_production_service.collection_name = enhanced_interview_service.collection_name
 
-        # Initialize ultra production service (will skip creating new vector client since we shared it)
-        await ultra_production_service.initialize()
+            # Initialize ultra production service (will skip creating new vector client since we shared it)
+            await ultra_production_service.initialize()
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "qdrant" in msg and ("locked" in msg or "already accessed" in msg or "storage folder" in msg):
+                logger.warning(
+                    "Interview Intelligence disabled due to local Qdrant lock. "
+                    "Stop other uvicorn/python processes or run without --reload. Error: %s",
+                    e,
+                )
+                # Degrade gracefully: keep the API up, but skip intelligence-backed features.
+                # (This is common during dev when --reload spawns extra processes.)
+                INTERVIEW_INTELLIGENCE_AVAILABLE = False
+            else:
+                raise
 
-        # Initialize mock interview service HERE (inside lifespan, after other services are ready)
-        from app.services.llm_service import get_llm_service
-        initialize_mock_interview_service(
-            llm_service=get_llm_service(feature="default"),
-            interview_intelligence_service=interview_intelligence_service,
-        )
-    else:
-        # Still initialize mock interview service in degraded mode (no intelligence backing).
-        from app.services.llm_service import get_llm_service
-        initialize_mock_interview_service(
-            llm_service=get_llm_service(feature="default"),
-            interview_intelligence_service=None,
-        )
+    # Initialize mock interview service (uses intelligence if available, else degraded mode).
+    from app.services.chat.llm_service import get_llm_service
+    initialize_mock_interview_service(
+        llm_service=get_llm_service(feature="default"),
+        interview_intelligence_service=(
+            interview_intelligence_service if INTERVIEW_INTELLIGENCE_AVAILABLE else None
+        ),
+    )
     
     # Initialize history manager
     await default_history_manager.initialize()
@@ -152,7 +162,7 @@ async def lifespan(app: FastAPI):
 
     # Close shared Redis client (used by shared caches)
     try:
-        from app.services.redis_client import close_redis
+        from app.services.core.redis_client import close_redis
 
         await close_redis()
     except Exception:

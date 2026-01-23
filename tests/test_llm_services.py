@@ -13,7 +13,7 @@ if __name__ != "__main__" and os.getenv("RUN_INTEGRATION_TESTS") != "1":
     )
 
 import asyncio
-from app.services.llm_service import get_llm_service
+from app.services.chat.llm_service import get_llm_service
 from app.config import settings
 
 async def test_llm_services():

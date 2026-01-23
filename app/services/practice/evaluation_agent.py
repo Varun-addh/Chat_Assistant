@@ -214,7 +214,7 @@ IMPORTANT: Return ONLY the JSON object. No markdown, no code blocks, no explanat
     
     async def _call_llm(self, prompt: str, api_key: Optional[str] = None) -> str:
         """Call LLM for comprehensive evaluation."""
-        from app.services.llm_service import llm_service
+        from app.services.chat.llm_service import llm_service
         
         try:
             text = await llm_service.generate_text(

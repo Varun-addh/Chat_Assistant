@@ -17,11 +17,11 @@ from app.schemas import (
 	MirrorFeedbackIn,
 	MirrorFeedbackOut,
 )
-from app.services.session_manager import get_session_manager, SessionManager, SessionState
-from app.services.llm_service import get_llm_service
-from app.services.architecture_generator import get_architecture_generator, ArchitectureViewType
-from app.services.code_evaluation_service import evaluate_code
-from app.services.mirror_compare import (
+from app.services.core.session_manager import get_session_manager, SessionManager, SessionState
+from app.services.chat.llm_service import get_llm_service
+from app.services.architecture.architecture_generator import get_architecture_generator, ArchitectureViewType
+from app.services.core.code_evaluation_service import evaluate_code
+from app.services.chat.mirror_compare import (
 	compute_mirror_progress,
 	find_previous_mirror_attempt,
 	format_mirror_progress_markdown,
@@ -305,7 +305,7 @@ async def submit_question(
 			# 3) Demo key pool (rotating) if enabled
 			elif settings.is_demo_key_pool_enabled():
 				try:
-					from app.services.demo_key_pool import demo_key_pool
+					from app.services.chat.demo_key_pool import demo_key_pool
 					demo_key = demo_key_pool.get_key()
 					if demo_key and demo_key.startswith("gsk_"):
 						api_key = demo_key
@@ -826,6 +826,15 @@ async def submit_question(
 	
 	# Pattern 2: "Design/Build X" pattern (catches "design twitter", "build a cache", etc.)
 	has_design_verb = any(kw in q_lower for kw in settings.architecture_detection_design_verbs)
+	# Pattern 2b: Only treat "design/build" as system-design when it targets a system-ish artifact.
+	# This avoids false positives like: "design a roadmap", "design a study plan", etc.
+	# (We intentionally keep this list small + generic, and use regex instead of endless keywords.)
+	import re
+	looks_like_system_design_phrase = bool(
+		re.search(r"\bdesign\s+(a|an|the)?\s*system\b", q_lower)
+		or re.search(r"\bdesign\s+(a|an|the)?\s*(platform|service|api|backend|architecture)\b", q_lower)
+		or re.search(r"\bbuild\s+(a|an|the)?\s*(platform|service|api|backend)\b", q_lower)
+	)
 	
 	# Pattern 3: System components/concepts (indicates architecture discussion)
 	has_system_concepts = (
@@ -843,7 +852,15 @@ async def submit_question(
 	is_code_problem = any(kw in q_lower for kw in settings.architecture_detection_code_problem_keywords)
 	
 	# Trigger if: explicit keywords OR design verb OR multiple system concepts, AND not a code problem
-	is_architecture = (has_explicit or has_design_verb or has_system_concepts) and not is_code_problem
+	# Important refinement:
+	# - A generic "design a ..." should NOT trigger architecture by itself.
+	# - We only trigger on: explicit keywords, multiple system-concept signals,
+	#   or a clear "design/build a system/platform/service/api/backend" phrase.
+	is_architecture = (
+		has_explicit
+		or has_system_concepts
+		or (has_design_verb and looks_like_system_design_phrase)
+	) and not is_code_problem
 
 	# If system design detected AND user hasn't chosen a mode yet, ask for preference.
 	arch_mode = payload.architecture_mode

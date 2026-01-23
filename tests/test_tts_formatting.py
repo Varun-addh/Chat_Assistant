@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from app.services.interviewer_agent import InterviewerAgent
+from app.services.practice.interviewer_agent import InterviewerAgent
 from app.schemas import PracticeInterviewQuestion, QuestionDifficulty, SpeechAnalyticsConfig
 
 

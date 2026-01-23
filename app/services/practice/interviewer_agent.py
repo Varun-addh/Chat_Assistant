@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Try to import Gemini for AI analysis (optional)
 try:
-    from app.services.gemini_adapter import genai
+    from app.services.chat.gemini_adapter import genai
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False

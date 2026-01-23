@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.llm_service import get_llm_service
+from app.services.chat.llm_service import get_llm_service
 
 
 @pytest.mark.asyncio

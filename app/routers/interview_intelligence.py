@@ -13,7 +13,7 @@ from app.schemas import (
 )
 from app.utils.audit import auditor
 
-from app.services.history_manager import default_history_manager
+from app.services.core.history_manager import default_history_manager
 from fastapi import WebSocket, WebSocketDisconnect
 import time
 from app.config import settings
@@ -33,7 +33,7 @@ def _ensure_intelligence_services_loaded() -> None:
         or enhanced_interview_service is None
         or ultra_production_service is None
     ):
-        from app.services.interview_intelligence_service import (
+        from app.services.interview.interview_intelligence_service import (
             interview_intelligence_service as _interview_intelligence_service,
             enhanced_interview_service as _enhanced_interview_service,
             ultra_production_service as _ultra_production_service,
@@ -1070,7 +1070,7 @@ async def search_questions(
             # DEMO PATH: always prefer Groq (cost-capped) and never fall back to Gemini.
             if settings.is_demo_key_pool_enabled():
                 try:
-                    from app.services.demo_key_pool import demo_key_pool
+                    from app.services.chat.demo_key_pool import demo_key_pool
                     demo_key = demo_key_pool.get_key()
                     if demo_key and demo_key.startswith("gsk_"):
                         api_key = demo_key
@@ -1169,7 +1169,7 @@ async def search_questions_post(
             # DEMO PATH: always prefer Groq (cost-capped) and never fall back to Gemini.
             if settings.is_demo_key_pool_enabled():
                 try:
-                    from app.services.demo_key_pool import demo_key_pool
+                    from app.services.chat.demo_key_pool import demo_key_pool
                     demo_key = demo_key_pool.get_key()
                     if demo_key and demo_key.startswith("gsk_"):
                         api_key = demo_key
@@ -1233,7 +1233,7 @@ async def add_curated_question(question: dict):
     """
     try:
         _ensure_intelligence_services_loaded()
-        from app.services.interview_intelligence_service import InterviewQuestion
+        from app.services.interview.interview_intelligence_service import InterviewQuestion
         
         # Validate and create question object
         q = InterviewQuestion(**question)
@@ -1495,7 +1495,7 @@ async def submit_community_question(
     """Submit a real interview question from the community"""
     try:
         _ensure_intelligence_services_loaded()
-        from app.services.dynamic_interview_sources import (
+        from app.services.chat.dynamic_interview_sources import (
             VerifiedQuestion as VQ,
             SourceType as ST,
             VerificationStatus as VS,
@@ -1930,7 +1930,7 @@ async def websocket_search(websocket: WebSocket):
         logger.info(f"Streaming search: query='{query}', limit={limit}")
         
         # Stream results
-        from app.services.ai_native_enhancements import RealTimeSearchStream
+        from app.services.chat.ai_native_enhancements import RealTimeSearchStream
         
         # Create search sources (these will run in parallel)
         sources = []

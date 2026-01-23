@@ -15,7 +15,7 @@ if __name__ != "__main__" and os.getenv("RUN_INTEGRATION_TESTS") != "1":
     )
 
 import asyncio
-from app.services.dynamic_interview_sources import WebSearchAdapter, QuestionDomain
+from app.services.chat.dynamic_interview_sources import WebSearchAdapter, QuestionDomain
 
 async def test_web_search():
     """Test web search for real interview questions"""
