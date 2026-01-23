@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Header, Response
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Header, Response
 from typing import Optional, List
 from fastapi.responses import StreamingResponse
 from datetime import datetime
@@ -26,7 +26,6 @@ from app.services.mirror_compare import (
 	find_previous_mirror_attempt,
 	format_mirror_progress_markdown,
 )
-from app.utils.security import verify_api_key
 from app.utils.audit import auditor
 from app.config import settings
 from app.middleware.auth import get_user_id_from_request

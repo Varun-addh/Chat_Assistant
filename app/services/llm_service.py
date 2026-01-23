@@ -233,13 +233,7 @@ class LLMService:
 
 	def _needs_comparison(self, question: str) -> bool:
 		q = (question or "").lower()
-		keywords = [
-			"compare",
-			"versus",
-			"vs ",
-			"difference between",
-			"differences between",
-		]
+		keywords = getattr(self._settings, "llm_comparison_keywords", None) or []
 		return any(k in q for k in keywords)
 
 	def _is_greeting(self, question: str) -> bool:
@@ -252,39 +246,18 @@ class LLMService:
 		# Collapse repeated whitespace
 		q = re.sub(r"\s+", " ", q).strip()
 		# Single/two-word salutations and courtesies
-		greetings = {
-			"hi", "hello", "hey", "yo", "hiya", "heya",
-			"good morning", "good afternoon", "good evening", "gm", "gn",
-			"thank you", "thanks", "thx", "ty",
-			"bye", "goodbye", "see you", "see ya", "cya", "take care",
-		}
+		greetings = set(getattr(self._settings, "llm_greeting_exact", None) or [])
 		# Quick exact match
 		if q in greetings:
 			return True
 		# Startswith match for polite variants
-		prefixes = [
-			"hi ", "hello ", "hey ",
-			"thank you", "thanks", "thx", "ty ",
-			"good morning", "good afternoon", "good evening",
-			"bye", "goodbye", "see you", "see ya",
-		]
+		prefixes = list(getattr(self._settings, "llm_greeting_prefixes", None) or [])
 		if any(q.startswith(p) for p in prefixes):
 			return True
 
 		# Name introductions / role-confusion style openers (keep conservative)
-		name_intro_phrases = [
-			"my name is ",
-			"call me ",
-			"i am ",
-			"im ",
-			"i'm ",
-		]
-		assist_phrases = [
-			"how can i help you",
-			"how can i assist you",
-			"how may i help you",
-			"how may i assist you",
-		]
+		name_intro_phrases = list(getattr(self._settings, "llm_greeting_name_intro_prefixes", None) or [])
+		assist_phrases = list(getattr(self._settings, "llm_greeting_assist_phrases", None) or [])
 		# Treat short name-intros and helper-offers as greetings
 		if any(p in q for p in assist_phrases):
 			return True
@@ -299,24 +272,14 @@ class LLMService:
 			return False
 		
 		# Off-topic indicators
-		off_topic_keywords = [
-			"weather", "news", "politics", "sports", "entertainment",
-			"personal advice", "relationship", "health", "medical",
-			"cooking", "travel", "shopping", "finance", "investment",
-			"current events", "celebrity", "movie", "music", "book",
-			"game", "gaming", "social media", "dating", "family",
-		]
+		off_topic_keywords = list(getattr(self._settings, "llm_off_topic_keywords", None) or [])
 		
 		# Check for off-topic keywords
 		if any(keyword in q for keyword in off_topic_keywords):
 			return True
 		
 		# Check for non-interview question patterns
-		off_topic_patterns = [
-			"what's happening", "what's new", "how's your day",
-			"tell me about yourself personally", "what do you think about",
-			"do you know about", "have you heard about", "what's your opinion",
-		]
+		off_topic_patterns = list(getattr(self._settings, "llm_off_topic_patterns", None) or [])
 		
 		return any(pattern in q for pattern in off_topic_patterns)
 
@@ -327,10 +290,7 @@ class LLMService:
 			return True
 		
 		# Ambiguous patterns
-		ambiguous_patterns = [
-			"how do you", "what about", "tell me about", "explain",
-			"what is", "how does", "why", "when", "where",
-		]
+		ambiguous_patterns = list(getattr(self._settings, "llm_ambiguous_patterns", None) or [])
 		
 		# Check if question is too vague
 		if any(pattern in q.lower() for pattern in ambiguous_patterns):
@@ -338,11 +298,7 @@ class LLMService:
 			if len(q.split()) < 5:  # Very short
 				return True
 			# If it lacks specific technical terms
-			technical_terms = [
-				"algorithm", "data structure", "database", "api", "framework",
-				"language", "coding", "programming", "system", "design",
-				"interview", "technical", "behavioral", "experience"
-			]
+			technical_terms = list(getattr(self._settings, "llm_ambiguous_technical_terms", None) or [])
 			if not any(term in q.lower() for term in technical_terms):
 				return True
 		
@@ -395,21 +351,10 @@ class LLMService:
 			return False
 		
 		# Look for personal/behavioral question indicators
-		personal_indicators = [
-			"yourself", "myself", "about you", "about me",
-			"your background", "my background", "your experience", "my experience",
-			"your skills", "my skills", "your strengths", "my strengths",
-			"your weaknesses", "my weaknesses", "your projects", "my projects",
-			"your career", "my career", "your goals", "my goals",
-			"hire you", "interested in", "motivates you", "motivates me",
-			"introduce", "tell me about", "describe yourself", "describe yourself"
-		]
+		personal_indicators = list(getattr(self._settings, "llm_personal_indicators", None) or [])
 		
 		# Look for direct personal references
-		personal_references = [
-			"you are", "you have", "you did", "you worked", "you developed",
-			"you created", "you built", "you designed", "you implemented"
-		]
+		personal_references = list(getattr(self._settings, "llm_personal_references", None) or [])
 		
 		# Check for personal indicators or references
 		has_personal_indicator = any(indicator in q for indicator in personal_indicators)
@@ -422,27 +367,17 @@ class LLMService:
 		q = (question or "").lower()
 		
 		# Look for strategy/approach indicators
-		strategy_indicators = [
-			"optimize", "improve", "reduce", "increase", "solve", "handle", 
-			"implement", "approach", "strategy", "method", "technique",
-			"performance", "efficiency", "scalability", "reliability"
-		]
+		strategy_indicators = list(getattr(self._settings, "llm_strategy_indicators", None) or [])
 		
 		# Look for question patterns that suggest strategy/approach
-		question_patterns = [
-			"how", "what", "which", "describe", "explain"
-		]
+		question_patterns = list(getattr(self._settings, "llm_strategy_question_patterns", None) or [])
 		
 		# Check if it's asking for a method/approach rather than personal experience
 		has_strategy_indicator = any(indicator in q for indicator in strategy_indicators)
 		has_question_pattern = any(pattern in q for pattern in question_patterns)
 		
 		# Look for specific personal experience indicators that would override strategy mode
-		personal_indicators = [
-			"tell me about yourself", "your experience", "your background",
-			"your skills", "your strengths", "your weaknesses", "your projects",
-			"why should we hire you", "what motivates you", "introduce yourself"
-		]
+		personal_indicators = list(getattr(self._settings, "llm_strategy_personal_indicators", None) or [])
 		
 		has_personal_indicator = any(indicator in q for indicator in personal_indicators)
 		
@@ -456,34 +391,19 @@ class LLMService:
 	def _is_database_schema_question(self, question: str) -> bool:
 		"""Detect database schema / ER diagram questions"""
 		q = (question or "").lower()
-		keywords = [
-			"database schema", "er diagram", "entity relationship", "database design",
-			"show the database", "database structure", "table design", "schema design",
-			"relational model", "database model", "data model"
-		]
+		keywords = list(getattr(self._settings, "llm_database_schema_keywords", None) or [])
 		return any(k in q for k in keywords)
 
 	def _is_ui_design_question(self, question: str) -> bool:
 		"""Detect UI/UX design questions"""
 		q = (question or "").lower()
-		keywords = [
-			"front page", "user interface", "ui design", "mobile app interface",
-			"frontend design", "ui/ux", "user experience", "wireframe",
-			"mockup", "prototype", "visual design", "layout design",
-			"design the front", "design the interface", "design the page"
-		]
+		keywords = list(getattr(self._settings, "llm_ui_design_keywords", None) or [])
 		return any(k in q for k in keywords)
 
 	def _is_algorithm_question(self, question: str) -> bool:
 		"""Detect algorithm and data structure questions"""
 		q = (question or "").lower()
-		keywords = [
-			"algorithm", "data structure", "sorting", "searching", "recommendation algorithm",
-			"build a recommendation", "implement authentication", "authentication algorithm",
-			"search algorithm", "matching algorithm", "optimization algorithm",
-			"prime", "binary", "tree", "graph", "stack", "queue", "linked list", "recursion",
-			"logic", "solve", "math", "complexity", "big o"
-		]
+		keywords = list(getattr(self._settings, "llm_algorithm_keywords", None) or [])
 		return any(k in q for k in keywords)
 
 	def _database_schema_overrides(self) -> str:
@@ -920,7 +840,12 @@ class LLMService:
 		depth: Optional[str] = None,
 		mode: Optional[str] = None,
 	) -> int:
-		"""Get optimal token limit based on question intent and depth budget."""
+		"""Get optimal token limit based on question intent and depth budget.
+
+		Important: some intents (system design/coding/etc.) need a higher minimum
+		budget to avoid mid-answer truncation. We keep the DynamicBudgetEngine as
+		the primary allocator, but apply an intent-aware minimum floor.
+		"""
 		# Use the DynamicBudgetEngine to compute an intent/depth/length-aware budget.
 		# We infer intent/format via the existing planner to pass a meaningful intent.
 		plan = self._build_response_plan(question, depth=depth, mode=mode)
@@ -929,13 +854,42 @@ class LLMService:
 		# For now, map user tier to 'standard' (can be extended to per-user tiers).
 		user_tier = "standard"
 		# Ask the engine to compute tokens; pass base_limit as a hard ceiling candidate.
-		return dynamic_budget_engine.compute_budget_tokens(
+		target = dynamic_budget_engine.compute_budget_tokens(
 			question=question,
 			intent=intent,
 			depth=resolved_depth,
 			user_tier=user_tier,
 			base_limit=base_limit,
 		)
+
+		# Apply a higher minimum for long-form intents to prevent cutoffs.
+		long_form_intents = {
+			"system_design",
+			"coding",
+			"database_schema",
+			"ui_design",
+			"technical_strategy",
+			"mirror",
+		}
+		if intent in long_form_intents:
+			# Base minimum from existing heuristic buckets.
+			min_budget = int(self._estimate_response_complexity(question) or 0)
+			depth_mult = {"quick": 0.75, "standard": 1.0, "deep": 1.25}.get(resolved_depth, 1.0)
+			min_budget = int(min_budget * depth_mult)
+			# Keep a sane lower bound even if heuristic fails.
+			min_budget = max(900, min_budget)
+			target = max(target, min_budget)
+
+		# Respect ceilings (explicit base_limit, else configured complex cap).
+		ceiling = None
+		if base_limit:
+			ceiling = int(base_limit)
+		elif getattr(self._settings, "groq_max_tokens_complex", None):
+			ceiling = int(getattr(self._settings, "groq_max_tokens_complex"))
+		if ceiling is not None:
+			target = min(int(target), int(ceiling))
+
+		return int(target)
 
 	def _extract_json_object(self, text: str) -> Optional[dict[str, Any]]:
 		"""Best-effort extraction of a JSON object from model output.
@@ -1826,59 +1780,17 @@ class LLMService:
 		
 		if not profile_text:
 			return prompt
-		
-		# Use WORLD-CLASS DOCUMENT ANALYZER for uploaded documents
-		from app.services.document_analyzer import get_document_analyzer, AnalysisDepth
-		
-		analyzer = get_document_analyzer(self)
-		doc_type = analyzer.detect_document_type(profile_text)
-		metadata = analyzer.extract_metadata(profile_text, doc_type)
-		
-		# Check if this is a direct question about the uploaded document/resume
-		is_document_question = any(keyword in question.lower() for keyword in [
-			'resume', 'document', 'profile', 'cv', 'uploaded', 'this file',
-			'what is this', 'tell me about this', 'analyze this', 'summarize this',
-			'review this', 'evaluate this', 'assess this', 'critique this',
-			'feedback on', 'thoughts on', 'opinion on', 'score', 'rate this'
-		])
-		
-		if is_document_question:
-			# Determine analysis depth from question
-			analysis_depth = AnalysisDepth.STANDARD
-			depth_level = self._normalize_depth(depth, question)
-			if depth_level == "quick":
-				analysis_depth = AnalysisDepth.QUICK
-			elif depth_level == "deep":
-				analysis_depth = AnalysisDepth.DEEP
-			else:
-				if any(word in question.lower() for word in ['detailed', 'comprehensive', 'thorough', 'deep', 'complete', 'full']):
-					analysis_depth = AnalysisDepth.DEEP
-				elif any(word in question.lower() for word in ['expert', 'professional', 'advanced', 'best']):
-					analysis_depth = AnalysisDepth.EXPERT
-				elif any(word in question.lower() for word in ['quick', 'brief', 'summary', 'overview']):
-					analysis_depth = AnalysisDepth.QUICK
-			
-			# Build world-class analysis prompt
-			prompt = analyzer.build_world_class_prompt(
-				text=profile_text,
-				doc_type=doc_type,
-				metadata=metadata,
-				analysis_depth=analysis_depth,
-				specific_question=question
-			)
-			
-			logger.info(f"🌟 Using WORLD-CLASS analyzer: doc_type={doc_type.value}, depth={analysis_depth.value}, metadata={metadata}")
-		else:
-			# For other questions with profile context (interview prep, etc.)
-			prompt = (
-				prompt
-				+ "\n\n" 
-				+ "=== Candidate Profile Context (Use for resume/personal questions) ===\n" 
-				+ profile_text.strip()
-				+ "\n=== End of Profile ===\n"
-			)
-			if self._needs_first_person(question):
-				prompt = prompt + self._persona_overrides()
+
+		# Simple profile context injection (no special document analysis behavior).
+		prompt = (
+			prompt
+			+ "\n\n"
+			+ "=== Candidate Profile Context (Use for resume/personal questions) ===\n"
+			+ profile_text.strip()
+			+ "\n=== End of Profile ===\n"
+		)
+		if self._needs_first_person(question):
+			prompt = prompt + self._persona_overrides()
 		
 		return prompt
 
@@ -2016,21 +1928,49 @@ class LLMService:
 		top_p = self._settings.groq_top_p
 		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens, depth=depth)
 		stream = self._settings.groq_stream
+		# When we detect provider truncation, we may need a higher output cap for continuation.
+		max_tokens_ceiling = (
+			self._settings.groq_max_tokens
+			or getattr(self._settings, "groq_max_tokens_complex", None)
+			or max_tokens
+		)
+		max_tokens_ceiling = int(max(max_tokens_ceiling, max_tokens))
 
-		def build_kwargs(stream_flag: bool, model_name: str):
+		def build_kwargs(stream_flag: bool, model_name: str, *, messages_override: Optional[list[dict[str, str]]] = None, max_tokens_override: Optional[int] = None):
 			# Build messages using unified helper
-			messages = self._build_messages(question, prompt, previous_qna)
+			messages = messages_override if messages_override is not None else self._build_messages(question, prompt, previous_qna)
 			kwargs = {
 				"model": model_name,
 				"messages": messages,
 				"temperature": temperature,
-				"max_tokens": max_tokens,
+				"max_tokens": int(max_tokens_override if max_tokens_override is not None else max_tokens),
 			}
 			if top_p is not None:
 				kwargs["top_p"] = top_p
 			if stream_flag:
 				kwargs["stream"] = True
 			return kwargs
+
+		def _build_continuation_messages(
+			*,
+			assistant_tail: str,
+		) -> list[dict[str, str]]:
+			base_messages = self._build_messages(question, prompt, previous_qna)
+			# Include only the tail to keep context bounded.
+			tail = (assistant_tail or "").strip()
+			if tail:
+				base_messages.append({"role": "assistant", "content": tail})
+			base_messages.append(
+				{
+					"role": "user",
+					"content": (
+						"Continue from EXACTLY where you stopped. "
+						"Do NOT repeat earlier content. "
+						"If you were mid-bullet or inside a code block, resume correctly."
+					),
+				}
+			)
+			return base_messages
 
 		async def _call(client_local, provider_local) -> tuple[str, bool]:
 			"""Returns (answer, truncated) with automated fallback for rate limits"""
@@ -2046,6 +1986,7 @@ class LLMService:
 					restrict_to_override=restrict_groq_to_override,
 				):
 					try:
+						# First pass (may stream based on settings)
 						if stream:
 							stream_resp = groq_client.chat.completions.create(**build_kwargs(True, current_model))
 							parts: list[str] = []
@@ -2054,15 +1995,35 @@ class LLMService:
 								parts.append(getattr(chunk.choices[0].delta, "content", None) or "")
 								if hasattr(chunk.choices[0], "finish_reason") and chunk.choices[0].finish_reason:
 									finish_reason = chunk.choices[0].finish_reason
-							raw_text = "".join(parts).strip()
-							formatted = self._format_response(raw_text)
-							truncated = (finish_reason == "length")
-							return (formatted, truncated)
-						resp = groq_client.chat.completions.create(**build_kwargs(False, current_model))
-						raw_text = resp.choices[0].message.content.strip()
-						formatted = self._format_response(raw_text)
-						finish_reason = resp.choices[0].finish_reason
+							raw_chunks: list[str] = [("".join(parts) or "").strip()]
+						else:
+							resp = groq_client.chat.completions.create(**build_kwargs(False, current_model))
+							raw_chunks = [((resp.choices[0].message.content or "").strip())]
+							finish_reason = resp.choices[0].finish_reason
+
 						truncated = (finish_reason == "length")
+						# Auto-continue on truncation (bounded to avoid runaway costs)
+						continuations = 0
+						while truncated and continuations < 2:
+							assistant_tail = ("\n".join(raw_chunks))[-4000:]
+							cont_messages = _build_continuation_messages(assistant_tail=assistant_tail)
+							cont_resp = groq_client.chat.completions.create(
+								**build_kwargs(
+									False,
+									current_model,
+									messages_override=cont_messages,
+									max_tokens_override=max_tokens_ceiling,
+								)
+							)
+							cont_text = ((cont_resp.choices[0].message.content or "").strip())
+							if cont_text:
+								raw_chunks.append(cont_text)
+							finish_reason = cont_resp.choices[0].finish_reason
+							truncated = (finish_reason == "length")
+							continuations += 1
+
+						raw_text = "\n".join([c for c in raw_chunks if c]).strip()
+						formatted = self._format_response(raw_text)
 						return (formatted, truncated)
 					except Exception as e:
 						error_msg = str(e).lower()
@@ -2137,10 +2098,7 @@ class LLMService:
 				# Auto-append short recommendations for concept/definition answers if missing
 				# (guarded: helper methods may be absent in this branch)
 				if (
-					hasattr(self, "_should_auto_append_recommendations")
-					and hasattr(self, "_auto_recommendations_for_question")
-					and hasattr(self, "_append_recommendations_block")
-					and self._should_auto_append_recommendations(question, formatted)
+					self._should_auto_append_recommendations(question, formatted)
 				):
 					recs = self._auto_recommendations_for_question(question, formatted)
 					if recs:
@@ -2223,6 +2181,80 @@ class LLMService:
 		# Collapse multiple blank lines
 		text = re.sub(r"\n{2,}", "\n\n", text).strip()
 		return text
+
+	def _has_recommendations_already(self, text: str) -> bool:
+		"""Detect whether the answer already includes a recommendations/next-steps style block.
+
+		We keep this lightweight and deterministic because it's used in hot paths
+		(including streaming).
+		"""
+		t = (text or "").lower()
+		if not t:
+			return False
+		markers = (
+			"recommendations",
+			"recommended",
+			"next steps",
+			"what to do next",
+			"resources",
+			"further reading",
+			"practice",
+			"try this",
+		)
+		return any(m in t for m in markers)
+
+	def _should_auto_append_recommendations(self, question: str, answer_text: str) -> bool:
+		"""Decide when to add a tiny 'next steps' block.
+
+		Root cause of inconsistency: we previously relied on optional methods that
+		didn't always exist and also on the model sometimes adding a section by itself.
+		"""
+		q = (question or "").strip().lower()
+		a = (answer_text or "").strip()
+		if not q or not a:
+			return False
+		# Only for definition/concept questions (to avoid bloating all answers).
+		if not self._is_definition_question(question):
+			return False
+		# Don't add if the model already included something similar.
+		if self._has_recommendations_already(a):
+			return False
+		# Avoid spamming very short answers or extremely long outputs.
+		wc = len(a.split())
+		if wc < 20:
+			return False
+		if wc > 900:
+			return False
+		# If user asked for "only" a definition, respect that.
+		if any(k in q for k in ["only definition", "just definition", "only the definition", "one line definition", "one-line definition"]):
+			return False
+		return True
+
+	def _auto_recommendations_for_question(self, question: str, answer_text: str) -> list[str]:
+		"""Generate deterministic, topic-agnostic next steps.
+
+		No LLM calls here on purpose (cost + consistency).
+		"""
+		q = (question or "").strip()
+		a = (answer_text or "").strip()
+		if not q or not a:
+			return []
+		# Keep this short and interview-useful.
+		return [
+			"Know 1 real-world use case and 1 common pitfall.",
+			"Be ready to compare it with the closest alternative (trade-offs).",
+			"Practice a 30-second explanation, then a 2-minute deep version.",
+		]
+
+	def _append_recommendations_block(self, text: str, recommendations: list[str]) -> str:
+		if not text:
+			return text
+		recs = [r.strip() for r in (recommendations or []) if str(r).strip()]
+		if not recs:
+			return text
+		# Keep formatting consistent with the rest of the app.
+		block = "\n\n**Next steps**\n" + "\n".join([f"- {r}" for r in recs[:3]])
+		return (text.rstrip() + block + "\n")
 
 	async def evaluate_code_with_critique(self, problem: str, code: str, language: str, conversation_context: str = "", api_key: Optional[str] = None) -> str:
 		"""Ask the model to produce a structured evaluation and approach explanation."""
@@ -2406,16 +2438,22 @@ class LLMService:
 
 		# Use dynamic token limit for streaming
 		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens, depth=depth)
+		max_tokens_ceiling = (
+			self._settings.groq_max_tokens
+			or getattr(self._settings, "groq_max_tokens_complex", None)
+			or max_tokens
+		)
+		max_tokens_ceiling = int(max(max_tokens_ceiling, max_tokens))
 
-		def _call_stream(current_model: str):
+		def _call_stream(current_model: str, *, messages_override: Optional[list[dict[str, str]]] = None, max_tokens_override: Optional[int] = None):
 			# Build messages using unified helper
-			messages = self._build_messages(question, prompt, previous_qna)
+			messages = messages_override if messages_override is not None else self._build_messages(question, prompt, previous_qna)
 			if provider == "groq":
 				return client.chat.completions.create(
 					model=current_model,
 					messages=messages,
 					temperature=self._settings.answer_temperature,
-					max_tokens=max_tokens,
+					max_tokens=int(max_tokens_override if max_tokens_override is not None else max_tokens),
 					stream=True,
 				)
 			elif provider == "gemini":
@@ -2456,53 +2494,86 @@ class LLMService:
 			stream = await anyio.to_thread.run_sync(_call_stream, self._settings.groq_model) # Should not be called if not groq
 
 		if active_provider == "groq" and stream is not None:
-			finish_reason = None
-			# Simple thinking tag replacement for stream
-			# Note: This handles the common case where tags arrive in chunks. 
-			# Complex splitting (e.g. <th...ink>) is rare and acceptable transiently.
-			inside_think = False
-			# Stream-time leakage filter: buffer partial lines to reliably strip
-			# internal prompt headings before sending to the client.
-			carry = ""
-			
-			for chunk in stream:
-				piece = getattr(chunk.choices[0].delta, "content", None) or ""
-				
-				# Handle thinking tags in stream
-				if "<think>" in piece:
-					piece = piece.replace("<think>", "<details class='thinking-process'><summary>Thinking Process</summary>")
-					inside_think = True
-				
-				if "</think>" in piece:
-					piece = piece.replace("</think>", "</details>")
-					inside_think = False
-				
-				if piece:
-					combined = carry + piece
-					parts = combined.splitlines(True)
-					carry = ""
-					if parts and not parts[-1].endswith(("\n", "\r")):
-						carry = parts.pop()
-					out_parts: list[str] = []
-					for seg in parts:
-						line = seg.rstrip("\r\n")
-						if self._is_internal_prompt_leak_line(line):
-							continue
-						out_parts.append(seg)
-					emit = "".join(out_parts)
-					if emit:
-						yield emit
-				# Track finish reason to detect truncation
-				if hasattr(chunk.choices[0], 'finish_reason') and chunk.choices[0].finish_reason:
-					finish_reason = chunk.choices[0].finish_reason
+			# Stream (with bounded auto-continue) to avoid mid-answer cutoffs.
+			continuations = 0
+			assistant_tail = ""
+			saw_recommendations = False
+			while True:
+				finish_reason = None
+				inside_think = False
+				carry = ""
+				for chunk in stream:
+					piece = getattr(chunk.choices[0].delta, "content", None) or ""
+					# Handle thinking tags in stream
+					if "<think>" in piece:
+						piece = piece.replace("<think>", "<details class='thinking-process'><summary>Thinking Process</summary>")
+						inside_think = True
+					if "</think>" in piece:
+						piece = piece.replace("</think>", "</details>")
+						inside_think = False
+					if piece:
+						combined = carry + piece
+						parts = combined.splitlines(True)
+						carry = ""
+						if parts and not parts[-1].endswith(("\n", "\r")):
+							carry = parts.pop()
+						out_parts: list[str] = []
+						for seg in parts:
+							line = seg.rstrip("\r\n")
+							if self._is_internal_prompt_leak_line(line):
+								continue
+							out_parts.append(seg)
+						emit = "".join(out_parts)
+						if emit:
+							if (not saw_recommendations) and self._has_recommendations_already(emit):
+								saw_recommendations = True
+							assistant_tail = (assistant_tail + emit)[-4000:]
+							yield emit
+					# Track finish reason to detect truncation
+					if hasattr(chunk.choices[0], "finish_reason") and chunk.choices[0].finish_reason:
+						finish_reason = chunk.choices[0].finish_reason
 
-			# Flush any remaining partial line (only if it isn't leakage)
-			if carry and not self._is_internal_prompt_leak_line(carry):
-				yield carry
-			
-			# If response was truncated, append a clear user-friendly notice
+				# Flush any remaining partial line (only if it isn't leakage)
+				if carry and not self._is_internal_prompt_leak_line(carry):
+					if (not saw_recommendations) and self._has_recommendations_already(carry):
+						saw_recommendations = True
+					assistant_tail = (assistant_tail + carry)[-4000:]
+					yield carry
+
+				if finish_reason != "length":
+					break
+
+				# Auto-continue once or twice when the provider hits output limit.
+				if continuations >= 2:
+					break
+				continuations += 1
+				cont_messages = self._build_messages(question, prompt, previous_qna)
+				if assistant_tail:
+					cont_messages.append({"role": "assistant", "content": assistant_tail.strip()})
+				cont_messages.append(
+					{
+						"role": "user",
+						"content": (
+							"Continue from EXACTLY where you stopped. "
+							"Do NOT repeat earlier content. "
+							"If you were mid-bullet or inside a code block, resume correctly."
+						),
+					}
+				)
+				# Restart stream with higher cap to reduce repeated truncations.
+				stream = await anyio.to_thread.run_sync(_call_stream, self._settings.groq_model, messages_override=cont_messages, max_tokens_override=max_tokens_ceiling)
+				continue
+
+			# If still truncated after continuations, append a small notice.
 			if finish_reason == "length":
-				yield "\n\n---\n\n**⚠️ Response Truncated:** This answer exceeded the token limit and was cut short. Please ask a more specific question or request a summary of a particular section."
+				yield "\n\n---\n\n**⚠️ Response Truncated:** The answer exceeded the output limit and was cut short. Ask to continue or narrow to a specific section."
+			else:
+				# Append deterministic next-steps for definition questions if missing.
+				if (not saw_recommendations) and self._should_auto_append_recommendations(question, assistant_tail):
+					recs = self._auto_recommendations_for_question(question, assistant_tail)
+					if recs:
+						block = "\n\n**Next steps**\n" + "\n".join([f"- {r}" for r in recs[:3]])
+						yield block + "\n"
 		elif active_provider == "gemini":
 			# Non-streaming fallback: yield once
 			async def _one_shot():

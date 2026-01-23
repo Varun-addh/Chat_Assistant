@@ -176,12 +176,8 @@ async def evaluate(
 	# If the user provided actual code structure, we should allow evaluation.
 	if not allowed and payload.code:
 		code_lower = payload.code.lower()
-		code_indicators = [
-			'def ', 'class ', 'import ', 'from ', 'include ', 'using ', 'public ', 
-			'private ', 'static ', 'void ', 'int ', 'float ', 'func ', 'let ', 
-			'const ', 'var ', 'function ', 'async ', 'await', 'print(', 'console.log',
-			'return ', 'yield ', 'if (', 'for (', 'while (', '{', '}', ':', '(', ')'
-		]
+		from app.config import settings
+		code_indicators = list(getattr(settings, "evaluation_code_indicators", None) or [])
 		# Check for at least 2 structural indicators to avoid false positives with plain text
 		indicators_found = [ki for ki in code_indicators if ki in code_lower]
 		if len(indicators_found) >= 2:

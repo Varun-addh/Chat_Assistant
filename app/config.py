@@ -107,6 +107,95 @@ class Settings(BaseSettings):
 	# reflect model/token pricing and desired verbosity per unit.
 	token_per_budget_unit: int = 400
 
+	# LLM intent-detection keywords (deterministic heuristics)
+	# Centralizing these avoids duplicated hardcoded lists across services.
+	llm_comparison_keywords: List[str] = ["compare", "versus", "vs ", "difference between", "differences between"]
+	llm_greeting_exact: List[str] = [
+		"hi", "hello", "hey", "yo", "hiya", "heya", "good morning", "good afternoon", "good evening", "gm", "gn",
+		"thank you", "thanks", "thx", "ty", "bye", "goodbye", "see you", "see ya", "cya", "take care",
+	]
+	llm_greeting_prefixes: List[str] = [
+		"hi ", "hello ", "hey ", "thank you", "thanks", "thx", "ty ", "good morning", "good afternoon", "good evening",
+		"bye", "goodbye", "see you", "see ya",
+	]
+	llm_greeting_name_intro_prefixes: List[str] = ["my name is ", "call me ", "i am ", "im ", "i'm "]
+	llm_greeting_assist_phrases: List[str] = ["how can i help you", "how can i assist you", "how may i help you", "how may i assist you"]
+	llm_off_topic_keywords: List[str] = [
+		"weather", "news", "politics", "sports", "entertainment", "personal advice", "relationship", "health", "medical",
+		"cooking", "travel", "shopping", "finance", "investment", "current events", "celebrity", "movie", "music", "book",
+		"game", "gaming", "social media", "dating", "family",
+	]
+	llm_off_topic_patterns: List[str] = [
+		"what's happening", "what's new", "how's your day", "tell me about yourself personally", "what do you think about",
+		"do you know about", "have you heard about", "what's your opinion",
+	]
+	llm_ambiguous_patterns: List[str] = ["how do you", "what about", "tell me about", "explain", "what is", "how does", "why", "when", "where"]
+	llm_ambiguous_technical_terms: List[str] = [
+		"algorithm", "data structure", "database", "api", "framework", "language", "coding", "programming", "system", "design",
+		"interview", "technical", "behavioral", "experience",
+	]
+	llm_personal_indicators: List[str] = [
+		"yourself", "myself", "about you", "about me", "your background", "my background", "your experience", "my experience",
+		"your skills", "my skills", "your strengths", "my strengths", "your weaknesses", "my weaknesses", "your projects", "my projects",
+		"your career", "my career", "your goals", "my goals", "hire you", "interested in", "motivates you", "motivates me",
+		"introduce", "tell me about", "describe yourself",
+	]
+	llm_personal_references: List[str] = [
+		"you are", "you have", "you did", "you worked", "you developed", "you created", "you built", "you designed", "you implemented",
+	]
+	llm_strategy_indicators: List[str] = [
+		"optimize", "improve", "reduce", "increase", "solve", "handle", "implement", "approach", "strategy", "method", "technique",
+		"performance", "efficiency", "scalability", "reliability",
+	]
+	llm_strategy_question_patterns: List[str] = ["how", "what", "which", "describe", "explain"]
+	llm_strategy_personal_indicators: List[str] = [
+		"tell me about yourself", "your experience", "your background", "your skills", "your strengths", "your weaknesses", "your projects",
+		"why should we hire you", "what motivates you", "introduce yourself",
+	]
+	llm_database_schema_keywords: List[str] = [
+		"database schema", "er diagram", "entity relationship", "database design", "show the database", "database structure", "table design",
+		"schema design", "relational model", "database model", "data model",
+	]
+	llm_ui_design_keywords: List[str] = [
+		"front page", "user interface", "ui design", "mobile app interface", "frontend design", "ui/ux", "user experience", "wireframe",
+		"mockup", "prototype", "visual design", "layout design", "design the front", "design the interface", "design the page",
+	]
+	llm_algorithm_keywords: List[str] = [
+		"algorithm", "data structure", "sorting", "searching", "recommendation algorithm", "build a recommendation", "implement authentication",
+		"authentication algorithm", "search algorithm", "matching algorithm", "optimization algorithm", "prime", "binary", "tree", "graph",
+		"stack", "queue", "linked list", "recursion", "logic", "solve", "math", "complexity", "big o",
+	]
+
+	# Interview Intelligence heuristics
+	interview_intelligence_company_keywords: List[str] = ["google", "amazon", "facebook", "meta", "microsoft", "apple", "netflix"]
+	interview_intelligence_requires_code_keywords: List[str] = [
+		"coding", "algorithm", "implement", "code", "write a function", "program", "solution",
+	]
+
+	# Document analyzer heuristics
+	document_jd_keywords: List[str] = [
+		"responsibilities", "requirements", "qualifications", "we are looking for", "job description", "position", "reports to",
+		"salary range", "benefits",
+	]
+	document_resume_keywords: List[str] = ["experience", "education", "skills", "projects", "certifications", "achievements", "resume", "cv"]
+	document_cover_letter_keywords: List[str] = ["dear", "sincerely", "i am writing", "i am interested", "cover letter", "application for"]
+
+	# Local TTS voice selection heuristics
+	tts_male_voice_keywords: List[str] = ["david", "mark", "alex", "james", "george", "male", "man"]
+	tts_female_voice_keywords: List[str] = ["zira", "hazel", "female", "woman", "samantha", "victoria"]
+
+	# Architecture view selection heuristics
+	architecture_async_keywords: List[str] = ["event", "queue", "async", "worker", "background", "kafka", "rabbitmq", "sqs"]
+	architecture_data_keywords: List[str] = ["database", "cache", "redis", "postgres", "mongodb", "elasticsearch", "search"]
+	architecture_security_keywords: List[str] = ["auth", "security", "oauth", "jwt", "rbac", "permission"]
+
+	# Evaluation fallback: detect code structure from raw text
+	evaluation_code_indicators: List[str] = [
+		"def ", "class ", "import ", "from ", "include ", "using ", "public ", "private ", "static ", "void ", "int ", "float ",
+		"func ", "let ", "const ", "var ", "function ", "async ", "await", "print(", "console.log", "return ", "yield ",
+		"if (", "for (", "while (", "{", "}", ":", "(", ")",
+	]
+
 	# Google Gemini
 	gemini_api_key: str | None = None
 	# Update default to Gemini 3 preview model. Can be overridden via env var (GEMINI_MODEL).

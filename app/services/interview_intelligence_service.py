@@ -552,15 +552,16 @@ class ModernInterviewIntelligenceService:
         
         # Detect company mentions
         companies = []
-        company_keywords = ['google', 'amazon', 'facebook', 'meta', 'microsoft', 'apple', 'netflix']
-        for company in company_keywords:
+        from app.config import settings
+        for company in (getattr(settings, "interview_intelligence_company_keywords", None) or []):
             if company in query_lower:
                 companies.append(company.title())
         
         # Determine if code is required
-        requires_code = question_type == "coding" or any(word in query_lower for word in [
-            'coding', 'algorithm', 'implement', 'code', 'write a function', 'program', 'solution'
-        ])
+        requires_code = question_type == "coding" or any(
+            word in query_lower
+            for word in (getattr(settings, "interview_intelligence_requires_code_keywords", None) or [])
+        )
         
         return SearchIntent(
             primary_topic=primary_topic,

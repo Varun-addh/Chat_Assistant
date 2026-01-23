@@ -21,6 +21,7 @@ except ImportError:
     logging.warning("gtts not installed. Install with: pip install gtts")
 
 from app.schemas import TTSConfig
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +65,8 @@ class LocalTTSService:
             if voices:
                 # 👔 WORLD-CLASS MALE VOICE SELECTION 👔
                 # Priority: Male voices (Microsoft David, Alex, Mark)
-                male_keywords = ['david', 'mark', 'alex', 'james', 'george', 'male', 'man']
-                female_keywords = ['zira', 'hazel', 'female', 'woman', 'samantha', 'victoria']
+                male_keywords = list(getattr(settings, "tts_male_voice_keywords", None) or [])
+                female_keywords = list(getattr(settings, "tts_female_voice_keywords", None) or [])
                 
                 selected_voice = None
                 

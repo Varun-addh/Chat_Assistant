@@ -4,6 +4,8 @@ from enum import Enum
 import re
 import logging
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -90,19 +92,15 @@ class WorldClassDocumentAnalyzer:
         text_lower = text.lower()
         
         # Job description indicators
-        jd_keywords = ['responsibilities', 'requirements', 'qualifications', 
-                       'we are looking for', 'job description', 'position', 
-                       'reports to', 'salary range', 'benefits']
+        jd_keywords = list(getattr(settings, "document_jd_keywords", None) or [])
         jd_score = sum(1 for kw in jd_keywords if kw in text_lower)
         
         # Resume indicators
-        resume_keywords = ['experience', 'education', 'skills', 'projects',
-                          'certifications', 'achievements', 'resume', 'cv']
+        resume_keywords = list(getattr(settings, "document_resume_keywords", None) or [])
         resume_score = sum(1 for kw in resume_keywords if kw in text_lower)
         
         # Cover letter indicators
-        cover_keywords = ['dear', 'sincerely', 'i am writing', 'i am interested',
-                         'cover letter', 'application for']
+        cover_keywords = list(getattr(settings, "document_cover_letter_keywords", None) or [])
         cover_score = sum(1 for kw in cover_keywords if kw in text_lower)
         
         if jd_score > resume_score and jd_score > cover_score:

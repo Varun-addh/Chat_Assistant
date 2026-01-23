@@ -2,47 +2,46 @@ from __future__ import annotations
 
 import re
 
+from app.config import settings
 
-_SYSTEM_DESIGN_KEYWORDS: tuple[str, ...] = (
-	"system design",
-	"high level design",
-	"high-level design",
-	"hld",
-	"low level design",
-	"low-level design",
-	"lld",
-	"architecture",
-	"architect",
-	"distributed system",
-	"distributed systems",
-	"scalable",
-	"scalability",
-	"microservice",
-	"microservices",
-	"event-driven",
-	"event driven",
-	"kafka",
-	"queue",
-	"message queue",
-	"pubsub",
-	"pub/sub",
-	"shard",
-	"sharding",
-	"partition",
-	"partitioning",
-	"load balancer",
-	"api gateway",
-	"rate limiter",
+
+_SYSTEM_DESIGN_EXTRAS: tuple[str, ...] = (
+	# Product-like prompts / canonical system design interview topics
 	"url shortener",
 	"tinyurl",
-	"cdn",
-	"cache",
-	"redis",
 	"websocket",
 	"sse",
 	"fanout",
 	"feed",
+	# Common infra building blocks
+	"api gateway",
+	"rate limiter",
+	"cdn",
 )
+
+
+def _system_design_keywords() -> tuple[str, ...]:
+	"""Single source of truth for system design detection keywords.
+
+	Uses settings-based architecture detection signals as the base, then adds a
+	few extra canonical prompts. This avoids duplicated hardcoded lists spread
+	across modules.
+	"""
+	base: list[str] = []
+	base.extend(getattr(settings, "architecture_detection_explicit_keywords", []) or [])
+	base.extend(getattr(settings, "architecture_detection_system_concepts_scale", []) or [])
+	base.extend(getattr(settings, "architecture_detection_system_concepts_data", []) or [])
+	base.extend(getattr(settings, "architecture_detection_system_concepts_infra", []) or [])
+	# Normalize and de-dup while preserving order
+	seen: set[str] = set()
+	out: list[str] = []
+	for k in [*(base or []), *_SYSTEM_DESIGN_EXTRAS]:
+		k = (k or "").strip().lower()
+		if not k or k in seen:
+			continue
+		seen.add(k)
+		out.append(k)
+	return tuple(out)
 
 _DATABASE_SCHEMA_HINTS: tuple[str, ...] = (
 	"database schema",
@@ -90,7 +89,7 @@ def is_system_design_question(question: str) -> bool:
 		return False
 
 	# Direct system-design signals.
-	if any(k in q for k in _SYSTEM_DESIGN_KEYWORDS):
+	if any(k in q for k in _system_design_keywords()):
 		return True
 
 	# If it looks purely algorithmic and has no architecture terms, do not route to system design.

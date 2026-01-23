@@ -528,11 +528,12 @@ Output ONLY the Mermaid code, starting with 'flowchart TD'.""",
         ]
         
         # Detect if system has async processing
-        async_keywords = ["event", "queue", "async", "worker", "background", "kafka", "rabbitmq", "sqs"]
+        from app.config import settings
+        async_keywords = list(getattr(settings, "architecture_async_keywords", None) or [])
         has_async = any(keyword in system_description.lower() for keyword in async_keywords)
         
         # Detect if system has complex data needs
-        data_keywords = ["database", "cache", "redis", "postgres", "mongodb", "elasticsearch", "search"]
+        data_keywords = list(getattr(settings, "architecture_data_keywords", None) or [])
         has_data = any(keyword in system_description.lower() for keyword in data_keywords)
         
         # Build view list based on complexity
@@ -551,7 +552,7 @@ Output ONLY the Mermaid code, starting with 'flowchart TD'.""",
             ])
         
         # Security is optional but recommended for production systems
-        security_keywords = ["auth", "security", "oauth", "jwt", "rbac", "permission"]
+        security_keywords = list(getattr(settings, "architecture_security_keywords", None) or [])
         if any(keyword in system_description.lower() for keyword in security_keywords):
             views.append(ArchitectureViewType.SECURITY)
         
