@@ -47,6 +47,14 @@ class QuestionIn(BaseModel):
 
 class AnswerOut(BaseModel):
 	answer: str
+	session_id: Optional[str] = Field(
+		default=None,
+		description="Session identifier (echoed for UI/session routing).",
+	)
+	mode: Optional[str] = Field(
+		default=None,
+		description="Effective chat mode for this response (e.g., 'answer' or 'mirror').",
+	)
 	created_at: datetime
 	truncated: bool = False  # True if response was truncated by token limits
 	# Optional UI hints (backward compatible)

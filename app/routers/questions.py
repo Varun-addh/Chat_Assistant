@@ -514,6 +514,7 @@ async def submit_question(
 		# Proof-of-handling: inspect this in DevTools -> Network -> Response Headers
 		response.headers["X-Stratax-Guard"] = "identity"
 		response.headers["X-Stratax-App"] = getattr(settings, "app_name", "Stratax AI")
+		response.headers["X-Stratax-Chat-Mode"] = "answer"
 		if payload.stream:
 			async def _identity_event_gen():
 				# SSE: prefix each line with 'data: '
@@ -537,6 +538,7 @@ async def submit_question(
 				headers={
 					"X-Stratax-Guard": "identity",
 					"X-Stratax-App": getattr(settings, "app_name", "Stratax AI"),
+					"X-Stratax-Chat-Mode": "answer",
 					"X-Stratax-Session-Id": payload.session_id,
 					**(
 						{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
@@ -555,13 +557,15 @@ async def submit_question(
 			"answer": identity_answer,
 			"saved_to_history": payload.save_to_history,
 		})
-		return AnswerOut(answer=identity_answer, created_at=utcnow(), truncated=False)
+		return AnswerOut(answer=identity_answer, session_id=payload.session_id, mode="answer", created_at=utcnow(), truncated=False)
 
 	# Read any stored profile for this session
 	profile_text = state.profile_text
 
 	# --- MIRROR MODE ---
 	mode = (getattr(payload, "mode", None) or "answer").strip().lower()
+	# Emit a consistent header so the UI can tag messages without guessing.
+	response.headers["X-Stratax-Chat-Mode"] = mode
 	if mode == "mirror":
 		user_answer = (getattr(payload, "user_answer", None) or "").strip()
 		if not user_answer:
@@ -580,6 +584,8 @@ async def submit_question(
 					pass
 			return AnswerOut(
 				answer="",
+				session_id=payload.session_id,
+				mode="mirror",
 				created_at=utcnow(),
 				truncated=False,
 				ui_action="collect_mirror_answer",
@@ -702,6 +708,7 @@ async def submit_question(
 				_mirror_event_gen(),
 				media_type="text/event-stream",
 				headers={
+					"X-Stratax-Chat-Mode": "mirror",
 					"X-Stratax-Session-Id": payload.session_id,
 					**(
 						{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
@@ -808,7 +815,7 @@ async def submit_question(
 					)
 			except Exception:
 				pass
-		return AnswerOut(answer=md, created_at=utcnow(), truncated=truncated)
+		return AnswerOut(answer=md, session_id=payload.session_id, mode="mirror", created_at=utcnow(), truncated=truncated)
 
 	# --- ARCHITECTURE DETECTION ---
 	# Smart pattern-based detection (no LLM call needed - saves time and cost)
@@ -860,6 +867,8 @@ async def submit_question(
 				pass
 		return AnswerOut(
 			answer="",
+			session_id=payload.session_id,
+			mode="answer",
 			created_at=utcnow(),
 			truncated=False,
 			ui_action="choose_architecture_mode",
@@ -1106,7 +1115,19 @@ async def submit_question(
 				yield "event: end\n\n"
 
 		if payload.stream:
-			return StreamingResponse(architecture_stream_gen(), media_type="text/event-stream")
+			return StreamingResponse(
+				architecture_stream_gen(),
+				media_type="text/event-stream",
+				headers={
+					"X-Stratax-Chat-Mode": "answer",
+					"X-Stratax-Session-Id": payload.session_id,
+					**(
+						{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
+						if recovered_from_session_id and recovered_from_session_id != payload.session_id
+						else {}
+					),
+				},
+			)
 		else:
 			# Non-streaming fallback
 			chunks = []
@@ -1116,7 +1137,7 @@ async def submit_question(
 			final_ans = "".join(chunks)
 			if payload.save_to_history:
 				await manager.append_qna(state.session_id, payload.question, final_ans)
-			return AnswerOut(answer=final_ans, created_at=utcnow(), truncated=False)
+			return AnswerOut(answer=final_ans, session_id=payload.session_id, mode="answer", created_at=utcnow(), truncated=False)
 	
 	# Handle single comprehensive architecture (legacy single-diagram behavior)
 	elif is_architecture and arch_mode == "single":
@@ -1165,7 +1186,19 @@ async def submit_question(
 					)
 				yield "event: end\n\n"
 
-			return StreamingResponse(single_architecture_stream_gen(), media_type="text/event-stream")
+			return StreamingResponse(
+				single_architecture_stream_gen(),
+				media_type="text/event-stream",
+				headers={
+					"X-Stratax-Chat-Mode": "answer",
+					"X-Stratax-Session-Id": payload.session_id,
+					**(
+						{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
+						if recovered_from_session_id and recovered_from_session_id != payload.session_id
+						else {}
+					),
+				},
+			)
 		else:
 			previous_qna = state.qna
 			answer, truncated = await llm_service.generate_answer(
@@ -1189,7 +1222,7 @@ async def submit_question(
 			final_ans = ("## Single-View Architecture\n\n" + (answer or "").strip()).strip()
 			if payload.save_to_history:
 				await manager.append_qna(state.session_id, payload.question, final_ans)
-			return AnswerOut(answer=final_ans, created_at=utcnow(), truncated=truncated)
+			return AnswerOut(answer=final_ans, session_id=payload.session_id, mode="answer", created_at=utcnow(), truncated=truncated)
 		
 
 	
@@ -1201,6 +1234,8 @@ async def submit_question(
 		if not user_answer:
 			return AnswerOut(
 				answer="",
+				session_id=payload.session_id,
+				mode="mirror",
 				created_at=utcnow(),
 				truncated=False,
 				ui_action="collect_mirror_answer",
@@ -1259,7 +1294,19 @@ async def submit_question(
 
 				yield "event: end\n\n"
 
-			return StreamingResponse(_mirror_event_gen(), media_type="text/event-stream")
+			return StreamingResponse(
+				_mirror_event_gen(),
+				media_type="text/event-stream",
+				headers={
+					"X-Stratax-Chat-Mode": "mirror",
+					"X-Stratax-Session-Id": payload.session_id,
+					**(
+						{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
+						if recovered_from_session_id and recovered_from_session_id != payload.session_id
+						else {}
+					),
+				},
+			)
 
 		md, truncated, report = await llm_service.generate_mirror_report_structured(
 			question=payload.question,
@@ -1304,7 +1351,7 @@ async def submit_question(
 			except Exception:
 				pass
 
-		return AnswerOut(answer=md, created_at=utcnow(), truncated=truncated)
+		return AnswerOut(answer=md, session_id=payload.session_id, mode="mirror", created_at=utcnow(), truncated=truncated)
 
 	if payload.stream:
 		async def event_gen():
@@ -1367,7 +1414,19 @@ async def submit_question(
 			asyncio.create_task(_auto_evaluate_if_code(manager, state.session_id, payload.question, full_answer, api_key))
 			
 			yield "event: end\n\n"
-		return StreamingResponse(event_gen(), media_type="text/event-stream")
+		return StreamingResponse(
+			event_gen(),
+			media_type="text/event-stream",
+			headers={
+				"X-Stratax-Chat-Mode": "answer",
+				"X-Stratax-Session-Id": payload.session_id,
+				**(
+					{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
+					if recovered_from_session_id and recovered_from_session_id != payload.session_id
+					else {}
+				),
+			},
+		)
 
 	# Provide recent QnA as context for follow-ups
 	previous_qna = state.qna
@@ -1441,7 +1500,7 @@ async def submit_question(
 	# Auto-evaluate if response contains code
 	asyncio.create_task(_auto_evaluate_if_code(manager, state.session_id, payload.question, answer, api_key))
 	
-	return AnswerOut(answer=answer, created_at=utcnow(), truncated=truncated)
+	return AnswerOut(answer=answer, session_id=payload.session_id, mode="answer", created_at=utcnow(), truncated=truncated)
 
 
 @router.post("/upload_profile")

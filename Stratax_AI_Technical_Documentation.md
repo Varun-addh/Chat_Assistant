@@ -1118,6 +1118,13 @@ vectors_config = VectorParams(
 
 *This section intentionally documents current limitations to enable informed deployment decisions.*
 
+### Forward-looking hardening checklist
+
+- **JWT hardening (header separation + consistency)**: keep JWT auth in `Authorization` and move user-provided LLM keys to a dedicated header (to avoid ambiguity); consistently use the JWT `sub` as the canonical user identifier.
+- **Redis rate limiting (distributed quotas)**: enable the existing Redis-backed limiter by setting `REDIS_URL` so quotas are shared across workers/instances and resilient to restarts.
+- **Multi-worker scaling**: migrate file-based persistence to Postgres/object storage and run Qdrant as a separate service/managed instance to avoid file-lock conflicts.
+- **Production STT**: replace the WebSocket STT stub with a real streaming STT provider (Deepgram/AssemblyAI/etc.) or a faster-whisper streaming adapter.
+
 ## Critical Issues
 
 ### 1. Port Mismatch in Docker Healthcheck
@@ -1293,7 +1300,7 @@ if not result:
 
 ```bash
 # 1. Navigate to project
-cd InerviewAst
+cd <your-repo-folder>
 
 # 2. Create virtual environment
 python -m venv .venv
@@ -1496,8 +1503,11 @@ curl http://localhost:7860/health
 ## Environment Configuration Priority
 
 1. **System environment variables** (highest)
-2. **`.env` file** (via `python-dotenv`)
+2. **Env files** (via `python-dotenv`)
 3. **`Settings` class defaults** (lowest)
+
+Notes
+- This backend supports layered env files using `ENV_FILE` (comma-separated), e.g. `ENV_FILE=.env,.env.local`. This is useful for local overrides without editing the base `.env`.
 
 **Example:**
 ```bash
@@ -1535,6 +1545,9 @@ export LLM_PROVIDER=gemini
 # Appendices
 
 ## Appendix A: Complete API Reference
+
+Note: This appendix is a practical quick reference and is intentionally **not exhaustive**.
+For the complete, code-derived endpoint table (including History, WebSockets, and all Practice progress endpoints), see `TECHNICAL_DOCUMENTATION.md`.
 
 ### Core Q&A Endpoints
 - `POST /api/session` — Create new session

@@ -2,6 +2,38 @@
 
 > This document is intentionally **grounded in the repository’s code** (primarily under `app/`) and its runtime artifacts (`Dockerfile`, `docker-compose.yml`, `requirements.txt`). Where behavior is inferred from framework conventions (FastAPI/Pydantic), it is stated explicitly as such.
 
+## Executive Summary (Non-Technical)
+
+### What Stratax AI does (in 5 bullets)
+
+- Provides an AI interview copilot that answers technical and behavioral questions with consistent formatting.
+- Runs realistic mock interviews and practice sessions with feedback and scoring.
+- Supports system design assistance, including architecture diagrams and multi-view perspectives.
+- Adds “interview intelligence” search to find and generate relevant questions (company/topic/difficulty).
+- Captures privacy-aware telemetry to turn practice activity into actionable improvement insights.
+
+### Who this backend is for
+
+- Founders and product teams building an interview-prep product (or embedding interview coaching into an existing app).
+- Engineering teams that want a production-shaped API (auth, quotas, rate limits, logging, modular subsystems).
+- Researchers/ML engineers experimenting with retrieval + evaluation + coaching loops.
+- Students and early-career candidates preparing for internships and entry-level roles (via practice sessions, feedback, and curated questions).
+
+### Key differentiators
+
+- Multi-provider LLM orchestration (Groq/Gemini) with a consistent request/response contract.
+- Practice Mode that combines local audio processing (STT/TTS) with coaching-style analytics.
+- Retrieval pipeline (vector search + optional hybrid/rerank/query expansion) designed for “interview question discovery”.
+- Cost controls that support real-world deployment: demo mode, quotas, tier limits, and per-user keys.
+
+### Problems it solves
+
+- Makes interview practice measurable (scores, trends, and recommended focus) instead of purely subjective.
+- Reduces the time to prepare for company-specific or domain-specific interview loops.
+- Helps teams ship an interview assistant safely by default (auth + rate limiting + structured telemetry).
+
+<div style="page-break-after: always;"></div>
+
 ## 1) Project Overview
 
 ### Purpose
@@ -56,7 +88,7 @@ The application entrypoint is `app/main.py`.
 
 ### Runtime / framework
 
-- **Python** (Docker image uses `python:3.12-slim`) — `Dockerfile`
+- **Python** (Docker image uses `python:3.11-slim`) — `Dockerfile`
 - **FastAPI** app + routers — `app/main.py`, `app/routers/*`
 - **Starlette** responses/middleware (`JSONResponse`, CORS) — `app/main.py`
 - **Pydantic / pydantic-settings** for config and schemas — `app/config.py`, `app/schemas.py`
@@ -115,68 +147,78 @@ This project installs the following AI/ML/DSP-related libraries (not all are use
 - Docker build/run — `Dockerfile`
 - docker-compose with optional **Kroki** container for Mermaid rendering — `docker-compose.yml`
 
-## 3) Architecture Diagram (text)
+## 3) Architecture Diagram
 
+```mermaid
+flowchart TB
+  C["Clients<br/>(Web UI / API consumers)"] -->|HTTP| A["FastAPI app<br/>app/main.py"]
+
+  A --> Q["/api (Q&A)<br/>questions.py"]
+  A --> D["/api (diagrams)<br/>diagrams.py"]
+  A --> E["/api (evaluate)<br/>evaluate.py"]
+
+  Q --> SM["SessionManager<br/>session_manager.py"] --> S["data/sessions/<user_id>/<uuid>.json"]
+  D --> AG["ArchitectureGenerator<br/>architecture_generator.py"] --> M["Mermaid output + optional Kroki rendering"]
+  E --> CES["CodeEvaluationService<br/>code_evaluation_service.py"] --> LLM["LLM critique via llm_service"]
+
+  A -. optional .-> II["/api/intelligence<br/>interview_intelligence.py"]
+  II --> IIS["InterviewIntelligenceService<br/>interview_intelligence_service.py"]
+  IIS --> QD["Qdrant + embeddings"]
+  IIS --> EXT["Serper / Cohere / Judge0 (optional)"]
+
+  A --> PM["/api/practice (Practice Mode)<br/>practice_mode.py"]
+  PM --> PMS["PracticeModeService<br/>practice_mode_service.py"]
+  PMS --> STT["LocalSTTService<br/>faster-whisper"]
+  PMS --> TTS["LocalTTSService<br/>pyttsx3/gTTS"]
+
+  A --> WS["WebSocket /ws/stt/<session_id><br/>ws.py + stt_service.py"]
 ```
-                   ┌───────────────────────────────┐
-                   │          Clients              │
-                   │  (Web UI / API consumers)     │
-                   └───────────────┬───────────────┘
-                                   │ HTTP
-                                   ▼
-                        ┌─────────────────────┐
-                        │   FastAPI app       │
-                        │   app/main.py       │
-                        └───────┬─────────────┘
-                                │
-                ┌───────────────┼──────────────────────────────┐
-                │               │                              │
-                ▼               ▼                              ▼
-     ┌────────────────┐  ┌───────────────────┐       ┌───────────────────┐
-     │ /api (Q&A)      │  │ /api (diagrams)   │       │ /api (evaluate)    │
-     │ questions.py    │  │ diagrams.py       │       │ evaluate.py        │
-     └───────┬────────┘  └─────────┬─────────┘       └─────────┬─────────┘
-             │                     │                           │
-             ▼                     ▼                           ▼
-   ┌───────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
-   │ SessionManager     │   │ ArchitectureGenerator │   │ CodeEvaluationService │
-   │ session_manager.py │   │ architecture_generator│   │ code_evaluation...    │
-   └───────┬───────────┘   └─────────┬────────────┘   └─────────┬────────────┘
-           │                         │                          │
-           ▼                         ▼                          ▼
-   data/sessions/<user>/     Mermaid output + optional     LLM critique via
-   <uuid>.json               Kroki rendering               llm_service
 
-                ┌──────────────────────────────────────────────┐
-                │ Optional: /api/intelligence                   │
-                │ interview_intelligence.py                      │
-                └───────────────────┬───────────────────────────┘
-                                    ▼
-                     ┌─────────────────────────────────┐
-                     │ InterviewIntelligenceService      │
-                     │ interview_intelligence_service.py │
-                     ├─────────────────────────────────┤
-                     │ Qdrant (local path) + embeddings │
-                     │ Serper / Cohere / Judge0 (opt.)  │
-                     └─────────────────────────────────┘
+## 3.1 Request Lifecycle (sequence)
 
-                ┌──────────────────────────────────────────────┐
-                │ /api/practice (Practice Mode)                 │
-                │ practice_mode.py                               │
-                └───────────────────┬───────────────────────────┘
-                                    ▼
-                     ┌─────────────────────────────────┐
-                     │ PracticeModeService               │
-                     │ practice_mode_service.py          │
-                     ├─────────────────────────────────┤
-                     │ LocalSTTService (faster-whisper) │
-                     │ LocalTTSService (pyttsx3/gTTS)   │
-                     └─────────────────────────────────┘
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Client
+  participant Router as FastAPI Router
+  participant MW as Middleware (Auth + Rate Limit)
+  participant Svc as Service Layer
+  participant LLM as LLM Provider (Groq/Gemini)
+  participant DB as Persistence (SQLite/Postgres + files)
 
-                                   ┌───────────────────────┐
-                                   │ WebSocket /ws/stt/...  │
-                                   │ ws.py + stt_service.py │
-                                   └───────────────────────┘
+  Client->>Router: HTTP request (JSON / multipart)
+  Router->>MW: pass-through
+  MW->>MW: attach user context (guest/demo/auth)
+  MW->>MW: enforce quotas + rate limiting
+  MW->>Svc: invoke handler/service
+  Svc->>LLM: generate (if needed)
+  LLM-->>Svc: model response
+  Svc->>DB: persist session/history/telemetry (best-effort)
+  DB-->>Svc: ack
+  Svc-->>Router: response DTO
+  Router-->>Client: JSON response
+```
+
+## 3.2 Security Model (high level)
+
+```mermaid
+flowchart TB
+  Req["Request"] --> Gate{"Identity"}
+
+  Gate -->|JWT| U["Authenticated user"]
+  Gate -->|User API key| K["Guest + user key"]
+  Gate -->|Demo| D["Demo user (capped)"]
+  Gate -->|None| G["Guest"]
+
+  U --> Limits["Rate limit + tier quotas"]
+  K --> Limits
+  D --> Limits
+  G --> Limits
+
+  Limits --> Route["Router / endpoint"]
+  Route --> Int{"Intelligence route?"}
+  Int -->|Yes + REQUIRE_USER_API_KEY + no user key| Deny["401 (needs user key)"]
+  Int -->|No / has key| Exec["Execute + persist + respond"]
 ```
 
 ## 4) Module Documentation
@@ -234,10 +276,12 @@ See: `app/config.py`.
 
 `user_auth_middleware` attaches `request.state.user_id` when it can find a user identifier in:
 
-1. `X-User-ID` header
-2. `Authorization: Bearer …` (currently uses the token as user_id; JWT decode is TODO)
-3. `?user_id=…` query parameter
-4. `user_id` cookie
+1. A stable guest identifier header: `x-stratax-guest-id` or `x-client-id` (path-safe)
+2. A cookie: `stratax_guest_id` (path-safe)
+3. A fallback legacy guest id derived from a hash of client IP + user-agent (then persisted as a cookie)
+4. `Authorization: Bearer <token>` only when the token *looks like a JWT* (3 dot-separated segments): it is decoded/validated and used to resolve a real `User` from the DB
+
+Note: `Authorization` is also used in some flows for user-provided LLM API keys. Middleware intentionally avoids attempting JWT decode for non-JWT bearer tokens.
 
 See: `app/middleware/auth.py`.
 
@@ -257,7 +301,10 @@ See: `app/auth.py`, `app/routers/auth_routes.py`, `app/models.py`, `app/database
 
 ### 4.3.2 `app/middleware/rate_limit.py` — tier limits + demo mode
 
-Rate limiting is implemented as an in-memory sliding window limiter:
+Rate limiting is implemented with an in-memory limiter by default, with an optional Redis-backed limiter for multi-worker/multi-instance deployments:
+
+- Default: `InMemoryRateLimiter` (single-instance)
+- If `REDIS_URL` is set: `RedisRateLimiter` (distributed; TTL-based)
 
 - Only meters expensive, LLM-backed routes by allowlist (keeps UX stable)
 - Uses `TIER_QUOTAS` for authenticated users (`User.tier`)
@@ -274,6 +321,13 @@ See: `app/middleware/rate_limit.py`, `app/models.py`.
 - Storage location: `data/sessions/<user_id>/<session_id>.json`.
 - Includes debounce logic to prevent rapid duplicate session creation.
 
+See also (persistence adapter):
+
+### 4.4.1 `app/repositories/*` — persistence adapters
+
+- `ChatSessionRepository` (`app/repositories/chat_sessions.py`) is used by `SessionManager` for file/DB-backed session persistence.
+- `HistoryTabRepository` (`app/repositories/history_tabs.py`) is used by `HistoryManager` for the History tab CRUD surface.
+
 See: `app/services/session_manager.py`.
 
 ### 4.5 `app/services/llm_service.py` — LLM routing + identity guard
@@ -281,6 +335,19 @@ See: `app/services/session_manager.py`.
 - Holds a large “forward prompt” (`CODE_FORWARD_PROMPT`) with formatting rules and identity/attribution rules.
 - Imports Groq SDK and Gemini SDK (Gemini import is optional; guarded).
 - Exposes a global `llm_service` instance used by routers/services.
+
+See also (prompt assembly + post-processing):
+
+### 4.5.1 `app/prompts/*` — prompt composition + response planning
+
+- `app/prompts/builder.py` builds the system prompt using policy modules (`policies.py`, `mirror_policies.py`).
+- `app/prompts/response_plan.py` defines response-structure constraints used to keep answers consistent.
+
+### 4.5.2 `app/services/llm/*` — response normalization + identity/intent helpers
+
+- `app/services/llm/response_postprocess.py` normalizes bullet formatting and output consistency.
+- `app/services/llm/identity.py` implements identity/attribution guard behavior.
+- `app/services/llm/intent_overrides.py` implements deterministic intent routing overrides.
 
 See: `app/services/llm_service.py`.
 
@@ -447,7 +514,8 @@ Evidence: `app/services/ai_native_enhancements.py`, `app/services/interview_inte
 
 ### Settings loading
 
-- `.env` is loaded eagerly via `dotenv.load_dotenv(dotenv_path=".env")` and also configured as `env_file` in `SettingsConfigDict`.
+- Env files are loaded eagerly via `python-dotenv`, supporting layered configs through `ENV_FILE` (comma-separated), e.g. `ENV_FILE=.env,.env.local`.
+- `SettingsConfigDict.env_file` is also set to those same env files (Pydantic loads them as part of settings resolution).
 - `Settings` fields can be overridden via environment variables (Pydantic convention: field name, typically uppercased, e.g. `GROQ_API_KEY`).
 
 See: `app/config.py`.
@@ -497,6 +565,10 @@ See: `Dockerfile`.
 
 - Exposes port `7860:7860`.
 - Sets `KROKI_URL=http://kroki:8000/mermaid/svg` and starts a `yuzutech/kroki` container.
+- Starts supporting infra services for production-like behavior:
+  - Postgres (when `DATABASE_URL` points to it)
+  - Qdrant as a service (avoids local file-lock issues; enables multi-worker)
+  - Redis (distributed rate limiting + shared caches)
 - Mounts `./app` into the container and several `./data/*` directories.
 
 See: `docker-compose.yml`.
@@ -539,6 +611,13 @@ See: `app/main.py`, `app/utils/audit.py`.
 
 ## 9) Known Issues & Recommendations (code-based)
 
+### Forward-looking hardening checklist
+
+- **JWT hardening (header separation + consistency)**: keep JWT auth in `Authorization` and move user-provided LLM keys to a dedicated header (to avoid ambiguity); ensure all request identity flows consistently use the JWT `sub` as the canonical `user_id`.
+- **Redis rate limiting (distributed quotas)**: enable the existing Redis limiter by setting `REDIS_URL` so quotas survive restarts and scale across workers/instances.
+- **Multi-worker scaling**: move file-backed session/history storage to a shared DB/object store and run Qdrant as a separate service (or managed Qdrant) to avoid local file locks.
+- **Production STT**: replace the WebSocket STT stub with a real streaming STT provider (or a faster-whisper streaming adapter) with backpressure + input validation.
+
 1. **Port mismatch in docker-compose healthcheck**
    - Dockerfile runs the app on port **7860**, but `docker-compose.yml` healthcheck requests `http://localhost:8000/health`.
    - This will fail healthchecks unless the app is actually listening on 8000.
@@ -548,9 +627,11 @@ See: `app/main.py`, `app/utils/audit.py`.
    - `STTService.stream_transcribe` yields placeholder tokens rather than real transcripts.
    - Evidence: `app/services/stt_service.py`.
 
-3. **User auth uses bearer token as user_id (JWT decode TODO)**
-   - Authorization parsing exists, but JWT verification/decoding is not implemented.
-   - Evidence: `app/middleware/auth.py`.
+3. **Authorization header dual-use can be confusing**
+  - The API supports both JWT auth and user-supplied LLM keys; some client flows use `Authorization: Bearer ...` for keys.
+  - Middleware only attempts JWT decode when the token looks like a JWT (dot-separated); otherwise the request proceeds as guest.
+  - Recommendation: separate JWT auth from user-key auth via distinct headers.
+  - Evidence: `app/middleware/auth.py`, `app/utils/demo_mode.py`.
 
 4. **Local Qdrant file-lock conflicts are anticipated**
    - Interview Intelligence initialization includes explicit handling for “already accessed by another instance”.
@@ -570,10 +651,10 @@ See: `app/main.py`, `app/utils/audit.py`.
   - Current behavior: backend standard search path skips auto-save; frontend should be the single source of truth (`POST /api/history/`).
   - Evidence: `app/routers/interview_intelligence.py` (`_search_and_build_response`).
 
-7. **Rate limiting is in-memory only**
+7. **Rate limiting defaults to in-memory unless Redis is configured**
   - Good for single-instance deployments; not shared across workers/instances.
-  - Recommendation: use Redis (or another shared store) for distributed rate limiting if scaling horizontally.
-  - Evidence: `app/middleware/rate_limit.py`.
+  - Recommendation: set `REDIS_URL` to enable the built-in `RedisRateLimiter` for distributed rate limiting.
+  - Evidence: `app/middleware/rate_limit.py`, `app/config.py`.
 
 ## 10) Complete API Reference
 
@@ -596,6 +677,7 @@ See: `app/main.py`, `app/utils/audit.py`.
 |--------|----------|-------------|---------------|
 | POST | `/api/session` | Create new Q&A session | No |
 | POST | `/api/question` | Submit question and get AI answer | Optional |
+| POST | `/api/mirror/feedback` | Return “mirror mode” feedback report | No |
 | POST | `/api/upload_profile` | Upload resume/JD for context | No |
 | GET | `/api/sessions` | List all user sessions | No |
 | DELETE | `/api/session/{session_id}` | Delete specific session | No |
@@ -633,13 +715,18 @@ See: `app/main.py`, `app/utils/audit.py`.
 | POST | `/api/practice/interview/start` | Start full practice interview |
 | POST | `/api/practice/interview/submit-answer` | Submit audio answer |
 | POST | `/api/practice/interview/acknowledge-feedback` | Acknowledge and get next question |
+| POST | `/api/practice/interview/rate-feedback` | Rate feedback quality (signal for coaching loop) |
 | GET | `/api/practice/insights` | Get explainable practice insights + recommended focus areas |
+| GET | `/api/practice/progress/summary` | Get progress summary |
+| GET | `/api/practice/progress/heatmap` | Get progress heatmap |
+| GET | `/api/practice/progress/next-session` | Get recommended next session plan |
 | GET | `/api/practice/conversational-response` | Get conversational AI response |
 | GET | `/api/practice/audio/{filename}` | Retrieve synthesized TTS audio |
 | GET | `/api/practice/session/{session_id}` | Get practice session details |
 | DELETE | `/api/practice/session/{session_id}` | Delete practice session |
 | GET | `/api/practice/status` | Get service status |
 | GET | `/api/practice/session/{session_id}/evaluation` | Get final evaluation report |
+| GET | `/api/practice/session/{session_id}/score` | Get normalized session score summary |
 | POST | `/api/practice/cleanup` | Cleanup old audio files |
 
 ### Mock Interview (`/api/mock-interview`)
@@ -801,9 +888,9 @@ pytest tests/ -v
    - Not shared across workers/instances
 
 3. **File-based persistence**
-   - No database; all state in JSON/JSONL files
-   - Concurrent write protection via file locks (session manager)
-   - Backup/rotation strategy not implemented
+  - Mixed persistence: SQLite database for users/usage/telemetry (and optionally Postgres via `DATABASE_URL`), plus JSON/JSONL files for sessions/history
+  - Concurrent write protection via file locks where file-based persistence is used (session manager)
+  - Backup/rotation strategy is not fully documented for file-based artifacts
 
 ### Optimization Opportunities
 
@@ -912,7 +999,7 @@ If Interview Intelligence is not available, common causes are missing optional d
 
 ```bash
 # Clone and setup
-cd InerviewAst
+cd <your-repo-folder>
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -962,7 +1049,7 @@ See: `app/config.py` for full list of configurable settings.
 
 1. **Clone & Install**
    ```bash
-   cd InerviewAst
+  cd <your-repo-folder>
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt

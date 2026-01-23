@@ -1,6 +1,6 @@
 # Docker: Build and Run
 
-This document explains how to build and run the InterviewAst backend using Docker (development and production recommendations).
+This document explains how to build and run the Stratax AI backend using Docker (development and production recommendations).
 
 Prerequisites
 - Docker installed (Windows: Docker Desktop)
