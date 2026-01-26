@@ -15,6 +15,8 @@ from app.schemas import (
     StartInterviewRequest,
     StartInterviewResponse,
     SubmitAnswerResponse,
+    SubmitCodeRequest,
+    SubmitCodeResponse,
     QuestionDifficulty,
     PracticeModeConfig,
     UserProfile,
@@ -30,7 +32,11 @@ from app.schemas import (
     InterviewRound,
     RoundConfig,
     RoundSelectionRequest,
-    RoundSelectionResponse
+    RoundSelectionResponse,
+    ProctoringEventIn,
+    ProctoringEventOut,
+    CodeTestResult,
+    CodeEvaluationFeedback,
 )
 from app.services.practice.practice_mode_service import PracticeModeService
 
@@ -47,6 +53,7 @@ from app.services.practice.practice_progress import (
     save_completed_attempt,
 )
 from app.services.practice.practice_scoring import evaluation_report_to_json, score_session
+from app.services.chat.ai_native_enhancements import CodeExecutionSandbox
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +61,40 @@ router = APIRouter(
     prefix="/api/practice",
     tags=["Practice Mode"]
 )
+
+
+@router.post("/proctoring/event", response_model=ProctoringEventOut)
+async def ingest_proctoring_event(payload: ProctoringEventIn, http_request: Request) -> ProctoringEventOut:
+    """Ingest privacy-safe proctoring events for Practice Mode.
+
+    Notes:
+    - The backend cannot enable the camera; clients must use getUserMedia().
+    - This endpoint stores event metadata only (no frames/audio).
+    - Events are tied to an existing practice session_id.
+    """
+
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+
+    if not practice_service:
+        raise HTTPException(status_code=503, detail="Practice Mode is not initialized")
+
+    sess = practice_service.get_session(payload.session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Practice session not found")
+
+    event_type = f"practice_proctoring_{payload.event_type.value}"
+    _track_practice_event(
+        user_id=user_id,
+        session_id=payload.session_id,
+        event_type=event_type,
+        extra={
+            "severity": payload.severity,
+            "metadata": payload.metadata,
+            "client_timestamp": payload.client_timestamp.isoformat() if payload.client_timestamp else None,
+        },
+    )
+
+    return ProctoringEventOut(ok=True)
 
 # Service instance (will be initialized in main.py)
 practice_service: Optional[PracticeModeService] = None
@@ -776,6 +817,155 @@ async def submit_answer(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Error submitting answer: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/interview/submit_code", response_model=SubmitCodeResponse)
+@router.post("/interview/submit-code", response_model=SubmitCodeResponse)
+async def submit_code(
+    payload: SubmitCodeRequest,
+    http_request: Request,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
+    """Submit a coding answer for a Practice Mode question.
+
+    This endpoint exists primarily to support a coding-question UI.
+    For safety and determinism:
+    - We do NOT execute user code by default.
+    - If code execution is explicitly configured (Judge0 API key), we can run it in a sandbox.
+    """
+    try:
+        if not practice_service:
+            raise HTTPException(status_code=503, detail="Practice mode not initialized")
+
+        user_id = get_user_id_from_request(http_request) or "guest_unknown"
+
+        # API Key selection (Bridge Settings)
+        groq_key = x_api_key
+        gemini_key = x_gemini_key
+        if not groq_key and authorization and authorization.startswith("Bearer "):
+            groq_key = authorization[7:]
+        api_key = gemini_key if gemini_key else groq_key
+
+        session = practice_service.get_session(payload.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Practice session not found")
+
+        # Best-effort: locate the question to determine test cases (if any)
+        question = None
+        try:
+            question = session.questions[int(payload.question_id) - 1]
+        except Exception:
+            question = None
+
+        test_cases = getattr(question, "test_cases", None) if question else None
+
+        # Only run sandbox execution when explicitly configured.
+        should_execute = bool(getattr(settings, "enable_code_execution", False)) and bool(getattr(settings, "judge0_api_key", None))
+
+        execution_success = False
+        execution_output: str = ""
+        execution_error: str = ""
+        if should_execute:
+            try:
+                sandbox = CodeExecutionSandbox(judge0_api_key=getattr(settings, "judge0_api_key", None))
+                result = await sandbox.execute_code(
+                    code=payload.code,
+                    language=(payload.programming_language or "python").lower(),
+                    test_cases=test_cases,
+                )
+                execution_success = bool(result.get("success"))
+                execution_output = str(result.get("output") or "")
+                execution_error = str(result.get("error") or "")
+            except Exception as e:
+                execution_success = False
+                execution_error = str(e)
+
+        # Map test cases into API response format (best-effort; may be empty)
+        results: list[CodeTestResult] = []
+        if isinstance(test_cases, list) and test_cases:
+            for i, tc in enumerate(test_cases, start=1):
+                tc_in = str((tc or {}).get("input", ""))
+                tc_expected = str((tc or {}).get("expected_output", (tc or {}).get("expected", "")))
+                results.append(
+                    CodeTestResult(
+                        test_case_id=i,
+                        input_data=tc_in,
+                        expected_output=tc_expected,
+                        actual_output=(execution_output.strip() or None) if should_execute else None,
+                        passed=bool(execution_success) if should_execute else False,
+                        error=(execution_error.strip() or None) if execution_error else None,
+                    )
+                )
+
+        # Minimal, deterministic scoring (avoid LLM in this path)
+        if should_execute:
+            correctness = 90 if execution_success else 0
+            approach_quality = "good" if execution_success else "needs_improvement"
+            improvements = [] if execution_success else ["Fix runtime/compile errors", "Re-check edge cases"]
+            best_practices = ["Add input validation", "Write small helper functions"] if execution_success else ["Start with a minimal working version"]
+        else:
+            correctness = 0
+            approach_quality = "needs_improvement"
+            improvements = ["Code execution not configured on server (set JUDGE0_API_KEY to enable sandbox execution)"]
+            best_practices = ["Add tests", "Handle edge cases"]
+
+        code_feedback = CodeEvaluationFeedback(
+            correctness_score=int(correctness),
+            approach_quality=str(approach_quality),
+            time_complexity=None,
+            space_complexity=None,
+            strengths=["Submitted a complete solution"] if payload.code.strip() else [],
+            improvements=improvements,
+            best_practices=best_practices,
+            alternative_approaches=None,
+        )
+
+        svc_resp = await practice_service.submit_code(
+            session_id=payload.session_id,
+            question_id=int(payload.question_id),
+            code=payload.code,
+            programming_language=payload.programming_language,
+            time_taken=int(payload.time_taken),
+            correctness_score=int(correctness),
+            summary=(execution_error.strip() if execution_error else "Coding submission received."),
+            api_key=api_key,
+        )
+
+        _track_practice_event(
+            user_id=user_id,
+            session_id=payload.session_id,
+            event_type="practice_code_submitted",
+            question_text=getattr(question, "text", None) if question else None,
+            extra={
+                "question_id": int(payload.question_id),
+                "language": payload.programming_language,
+                "code_len": len(payload.code or ""),
+                "time_taken": int(payload.time_taken),
+                "executed": bool(should_execute),
+                "execution_success": bool(execution_success) if should_execute else None,
+            },
+        )
+
+        return SubmitCodeResponse(
+            test_results=results,
+            all_tests_passed=bool(execution_success) if should_execute else False,
+            code_feedback=code_feedback,
+            complete=bool(svc_resp.get("complete")),
+            next_question=None,
+            evaluation_report=svc_resp.get("evaluation_report"),
+            progress=str(svc_resp.get("progress")),
+            requires_acknowledgment=bool(svc_resp.get("requires_acknowledgment", True)),
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error submitting code: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

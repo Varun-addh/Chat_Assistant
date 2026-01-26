@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, AliasChoices
 from pydantic import ConfigDict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 
 from app.utils.time import utcnow
@@ -267,6 +267,42 @@ class InterviewRound(str, Enum):
 	DEVOPS = "devops"
 	SECURITY = "security"
 	FULL_INTERVIEW = "full_interview"
+
+
+class ProctoringEventType(str, Enum):
+	"""Strict, opt-in proctoring signals for Practice Mode.
+
+	Privacy contract:
+	- Event-only (no frames/audio by default)
+	- Client initiates camera access; backend only logs signals
+	"""
+	CAMERA_STARTED = "camera_started"
+	CAMERA_STOPPED = "camera_stopped"
+	CAMERA_HEARTBEAT = "camera_heartbeat"
+	TAB_SWITCH = "tab_switch"
+	WINDOW_BLUR = "window_blur"
+	FACE_MISSING = "face_missing"
+	MULTIPLE_FACES = "multiple_faces"
+	USER_LEFT_FRAME = "user_left_frame"
+
+
+class ProctoringEventIn(BaseModel):
+	"""Ingest a proctoring signal for an active practice session."""
+	session_id: str = Field(..., description="Practice session identifier")
+	event_type: ProctoringEventType = Field(..., description="Type of proctoring signal")
+	severity: Literal["info", "warning", "violation"] = Field(
+		default="info",
+		description="UI/analytics severity: info|warning|violation",
+	)
+	metadata: Dict[str, Any] = Field(default_factory=dict, description="Small, non-sensitive structured details")
+	client_timestamp: Optional[datetime] = Field(
+		default=None,
+		description="Optional client-side timestamp for correlation (server will still record its own timestamp)",
+	)
+
+
+class ProctoringEventOut(BaseModel):
+	ok: bool = True
 
 
 class RoundConfig(BaseModel):

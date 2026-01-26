@@ -417,6 +417,10 @@ See: `app/routers/mock_interview.py`, `app/services/mock_interview_service.py`.
 
 - Router is mounted at `/api/practice` (router itself sets `prefix="/api/practice"`).
 - Service orchestrates multiple agents, local STT/TTS, and evaluation.
+- Optional “proctoring” is supported via a privacy-safe event-only endpoint:
+  - `POST /api/practice/proctoring/event`
+  - Client initiates camera access; the backend only logs signals (no frames/audio by default)
+  - Events are validated against an active practice `session_id` and logged into `EventRecord` as `practice_proctoring_*`
 - Concrete agent components (constructed inside `PracticeModeService`) include:
   - `InterviewerAgent` (`app/services/interviewer_agent.py`)
   - `AdaptiveInterviewerAgent` (`app/services/adaptive_interviewer_agent.py`)
@@ -486,6 +490,29 @@ Evidence: `app/routers/evaluate.py`, `app/services/code_evaluation_service.py`, 
 5. Next question is gated behind an “acknowledge feedback” endpoint.
 
 Evidence: `app/routers/practice_mode.py`, `app/services/practice_mode_service.py`, `app/services/local_stt_service.py`.
+
+### 5.3.1 Practice Mode proctoring signals (event-only)
+
+The backend cannot enable the camera. Proctoring is client-driven and opt-in:
+
+1. Client starts a practice session (`POST /api/practice/interview/start`).
+2. Client acquires camera permissions locally (`getUserMedia`) and begins monitoring signals.
+3. Client posts privacy-safe events to `POST /api/practice/proctoring/event`.
+4. Server validates the `session_id` exists, then logs an `EventRecord` with:
+   - `event_type`: `practice_proctoring_{event_type}` (example: `practice_proctoring_tab_switch`)
+   - `extra_data`: `severity`, `metadata`, and optional `client_timestamp`
+
+Example request payload:
+
+```json
+{
+  "session_id": "<practice_session_id>",
+  "event_type": "tab_switch",
+  "severity": "violation",
+  "metadata": {"reason": "visibilitychange", "hidden": true},
+  "client_timestamp": "2026-01-26T12:34:56Z"
+}
+```
 
 ### 5.4 Interview Intelligence search flow
 
@@ -713,6 +740,7 @@ See: `app/main.py`, `app/utils/audit.py`.
 | GET | `/api/practice/difficulty-preview` | Preview difficulty levels |
 | POST | `/api/practice/interview/quick-start` | Quick conversational start |
 | POST | `/api/practice/interview/start` | Start full practice interview |
+| POST | `/api/practice/proctoring/event` | Ingest privacy-safe proctoring signals (events only; no media) |
 | POST | `/api/practice/interview/submit-answer` | Submit audio answer |
 | POST | `/api/practice/interview/acknowledge-feedback` | Acknowledge and get next question |
 | POST | `/api/practice/interview/rate-feedback` | Rate feedback quality (signal for coaching loop) |

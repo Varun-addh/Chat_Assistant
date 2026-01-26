@@ -1562,6 +1562,7 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 - `GET /api/practice/rounds/available` — List rounds
 - `POST /api/practice/interview/start-round` — Start round
 - `POST /api/practice/interview/quick-start` — Quick start
+- `POST /api/practice/proctoring/event` — Proctoring signals (events only; no media)
 - `POST /api/practice/interview/submit-answer` — Submit audio
 - `POST /api/practice/interview/acknowledge-feedback` — Next question
 - `GET /api/practice/session/{id}/evaluation` — Final report

@@ -538,6 +538,112 @@ class PracticeModeService:
         except Exception as e:
             logger.error(f"Error processing answer: {e}", exc_info=True)
             raise
+
+    async def submit_code(
+        self,
+        session_id: str,
+        question_id: int,
+        code: str,
+        programming_language: str,
+        time_taken: int,
+        correctness_score: int = 0,
+        summary: str = "Coding submission received.",
+        api_key: Optional[str] = None,
+    ) -> dict:
+        """Record a coding submission as an answered question.
+
+        Practice Mode's data model is centered around AnswerSubmission.
+        For coding questions we store:
+        - transcript: the code itself
+        - metrics: a minimal placeholder (delivery metrics are N/A)
+        - micro_feedback: a minimal placeholder populated from correctness_score/summary
+        """
+
+        try:
+            logger.info(f"Processing code submission for session {session_id}, question {question_id}")
+
+            session = self.sessions.get(session_id)
+            if not session:
+                raise ValueError(f"Session not found: {session_id}")
+
+            session.last_activity_at = utcnow()
+
+            # Validate question index
+            if question_id < 1 or question_id > len(session.questions):
+                raise ValueError(f"Invalid question_id {question_id}")
+
+            # Placeholder delivery metrics (coding doesn't have audio)
+            metrics = SpeechMetrics(
+                filler_count=0,
+                wpm=0.0,
+                longest_silence=0.0,
+                confidence_score=0.0,
+                overtalked=False,
+                duration=0.0,
+                filler_words=[],
+                pause_count=0,
+                pitch_variance=0.0,
+                silence_removed=0.0,
+            )
+
+            is_correct = bool(int(correctness_score) >= 70)
+            micro_feedback = MicroFeedback(
+                delivery_tips=["Coding answer received.", "Review correctness + edge cases."],
+                pace_feedback="N/A (coding submission)",
+                overall_note=(summary or "Coding submission received."),
+                correctness_score=int(correctness_score),
+                technical_accuracy="Good" if is_correct else "Poor",
+                is_correct=is_correct,
+            )
+
+            answer = AnswerSubmission(
+                question_id=int(question_id),
+                transcript=code or "",
+                metrics=metrics,
+                micro_feedback=micro_feedback,
+                audio_duration=0.0,
+            )
+
+            session.answers.append(answer)
+            session.current_question_index = question_id - 1
+
+            is_complete = self.interviewer_agent.is_interview_complete(
+                session.current_question_index,
+                len(session.questions),
+            )
+
+            response = {
+                "complete": is_complete,
+                "progress": self.interviewer_agent.get_progress_indicator(
+                    question_id,
+                    len(session.questions),
+                ),
+                "requires_acknowledgment": not is_complete,
+            }
+
+            if not is_complete:
+                session.pending_next_question = True
+            else:
+                session.is_complete = True
+                session.completed_at = utcnow()
+                try:
+                    evaluation_report = await self.evaluation_agent.evaluate_interview(
+                        session.answers,
+                        session_id,
+                        api_key=api_key,
+                    )
+                    session.evaluation_report = evaluation_report
+                    response["evaluation_report"] = evaluation_report
+                except Exception as eval_error:
+                    logger.error(f"❌ Evaluation generation failed after coding submission: {eval_error}", exc_info=True)
+                    response["evaluation_error"] = str(eval_error)
+                    response["evaluation_report"] = None
+
+            logger.info(f"Code submission processed successfully for session {session_id}")
+            return response
+        except Exception:
+            logger.error("Error processing code submission", exc_info=True)
+            raise
     
     def get_session(self, session_id: str) -> Optional[PracticeSession]:
         """Get session by ID."""
