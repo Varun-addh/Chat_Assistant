@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -487,6 +488,11 @@ Keep it under 100 words."""
         
         prompt = f"""Expert interviewer: Provide COMPREHENSIVE, LEARNING-FOCUSED evaluation.
 
+OUTPUT REQUIREMENTS (STRICT):
+- Return ONLY a single valid JSON object.
+- Do NOT include markdown/code fences.
+- Do NOT include any extra commentary outside the JSON.
+
 Q: {question.question_text}
 Type: {question.interview_type} | Difficulty: {question.difficulty} | Topic: {question.topic}
 
@@ -701,6 +707,59 @@ CRITICAL RULES:
         answer: UserAnswer
     ) -> EvaluationResult:
         """Parse LLM response into EvaluationResult with ultra-robust error handling"""
+
+        def _extract_json_object(text: str) -> str:
+            if not text:
+                return text
+            start = text.find("{")
+            end = text.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return text
+            return text[start : end + 1]
+
+        def _try_parse_jsonish(text: str) -> Optional[Dict]:
+            """Parse strict JSON first, then tolerate common JSON-ish variants."""
+            if not (text or "").strip():
+                return None
+
+            candidate = _extract_json_object(text.strip())
+
+            # 1) Strict JSON
+            try:
+                parsed = json.loads(candidate)
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                pass
+
+            # 2) Python literal dict/list style (single quotes, trailing commas, True/False/None)
+            try:
+                import ast
+
+                py = candidate
+                py = re.sub(r"\btrue\b", "True", py, flags=re.IGNORECASE)
+                py = re.sub(r"\bfalse\b", "False", py, flags=re.IGNORECASE)
+                py = re.sub(r"\bnull\b", "None", py, flags=re.IGNORECASE)
+                parsed = ast.literal_eval(py)
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                pass
+
+            # 3) Quote bare keys + normalize booleans/null, then try JSON again.
+            try:
+                fixed = candidate
+                fixed = re.sub(
+                    r'([\{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)(\s*:)\s*',
+                    r'\1"\2"\3 ',
+                    fixed,
+                )
+                fixed = re.sub(r"\bTrue\b", "true", fixed)
+                fixed = re.sub(r"\bFalse\b", "false", fixed)
+                fixed = re.sub(r"\bNone\b", "null", fixed)
+                fixed = re.sub(r',\s*([\]}])', r'\1', fixed)
+                parsed = json.loads(fixed)
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                return None
         
         # Clean response
         response = response.strip()
@@ -718,21 +777,30 @@ CRITICAL RULES:
         
         # ===== BULLETPROOF JSON REPAIR SYSTEM =====
         response = self._repair_malformed_json(response)
+
+        # Always initialize so we never hit UnboundLocalError on malformed output.
+        data: Optional[Dict] = None
         
-        # Try parsing the repaired JSON
-        try:
-            data = json.loads(response)
-            logger.debug("Successfully parsed JSON on first attempt after repair")
-            
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse failed after repair: {e}")
-            logger.debug(f"Problematic JSON (first 1000 chars): {response[:1000]}")
+        # Try parsing the repaired JSON (strict/loose)
+        data = _try_parse_jsonish(response)
+        if isinstance(data, dict) and data:
+            logger.debug("Successfully parsed JSON (strict/loose)")
+        else:
+            # Keep the existing targeted fix path for strict JSON decode errors (best-effort)
+            try:
+                json.loads(response)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parse failed after repair: {e}")
+                logger.debug(f"Problematic JSON (first 1000 chars): {response[:1000]}")
             
             # FALLBACK 1: Try to fix the specific error location
             try:
                 # Extract the error position
                 error_pos = e.pos if hasattr(e, 'pos') else None
-                if error_pos:
+                if error_pos is None:
+                    raise ValueError("No JSON error position available")
+
+                if error_pos is not None:
                     # Show context around the error
                     start = max(0, error_pos - 100)
                     end = min(len(response), error_pos + 100)
@@ -758,7 +826,7 @@ CRITICAL RULES:
                             response = response[:error_pos] + ':' + response[error_pos:]
                     
                     # Try parsing again
-                    data = json.loads(response)
+                    data = _try_parse_jsonish(response)
                     logger.info("Successfully recovered from JSON error with targeted fix")
                     
             except Exception:
@@ -772,6 +840,10 @@ CRITICAL RULES:
                     # FALLBACK 3: Use basic evaluation
                     logger.error("All parsing attempts failed, using basic evaluation")
                     return self._basic_evaluation(question, answer)
+
+        # If we couldn't get a usable dict, fall back gracefully.
+        if not isinstance(data, dict) or not data:
+            return self._basic_evaluation(question, answer)
         
         # Build EvaluationResult from parsed data
         try:
@@ -855,7 +927,7 @@ CRITICAL RULES:
         
         except Exception as e:
             logger.error(f"Failed to build EvaluationResult from data: {e}")
-            logger.error(f"Data: {data}")
+            logger.error(f"Data: {data if isinstance(data, dict) else '<unavailable>'}")
             return self._basic_evaluation(question, answer)
     
     def _extract_fields_with_regex(self, text: str) -> Optional[Dict]:
@@ -867,7 +939,7 @@ CRITICAL RULES:
             
             # Extract numeric scores
             for field in ['correctness', 'completeness', 'clarity', 'confidence', 'technical_depth']:
-                pattern = rf'"{field}"\s*:\s*([0-9.]+)'
+                pattern = rf'["\']?{field}["\']?\s*:\s*([0-9.]+)'
                 match = re.search(pattern, text)
                 if match:
                     data[field] = float(match.group(1))
@@ -876,21 +948,22 @@ CRITICAL RULES:
             
             # Extract string fields
             for field in ['performance_summary', 'detailed_feedback', 'rating_category', 'model_answer']:
-                pattern = rf'"{field}"\s*:\s*"([^"]+)"'
+                pattern = rf'["\']?{field}["\']?\s*:\s*["\']([^"\']+)["\']'
                 match = re.search(pattern, text)
                 if match:
                     data[field] = match.group(1).replace('\\n', '\n')
                 else:
-                    data[field] = "No data available"
+                    # Prefer empty string over placeholders to keep UI clean.
+                    data[field] = "" if field != "rating_category" else "Fair"
             
             # Extract array fields
             for field in ['strengths', 'weaknesses', 'missing_points', 'improvement_suggestions', 
                          'follow_up_questions', 'key_takeaways', 'recommended_resources']:
-                pattern = rf'"{field}"\s*:\s*\[(.*?)\]'
+                pattern = rf'["\']?{field}["\']?\s*:\s*\[(.*?)\]'
                 match = re.search(pattern, text, re.DOTALL)
                 if match:
                     # Extract quoted strings from array
-                    items = re.findall(r'"([^"]+)"', match.group(1))
+                    items = re.findall(r'["\']([^"\']+)["\']', match.group(1))
                     data[field] = items if items else []
                 else:
                     data[field] = []

@@ -48,8 +48,16 @@ def _demo_feature_limit_for_path(path: str) -> tuple[Optional[str], Optional[int
     # Code execution is expensive; keep demo conservative.
     if p.startswith("/api/code/execute"):
         return "code_exec", 10
-    if p.startswith("/api/mock-interview"):
+    # Mock interview: cap starting a session, but allow in-session turns.
+    # Otherwise demo users get blocked by 429 on every submit-answer/hint request.
+    if p.startswith("/api/mock-interview/sessions/start"):
         return "mock_interviews", DEMO_LIMIT_MOCK_INTERVIEWS
+    if p.startswith("/api/mock-interview/sessions/submit-answer"):
+        return "mock_interview_turns", 20
+    if p.startswith("/api/mock-interview/sessions/"):
+        return "mock_interview_turns", 30
+    if p.startswith("/api/mock-interview"):
+        return "mock_interview_requests", 30
     # Default demo limit for other metered endpoints (keep conservative)
     return "requests", 10
 
@@ -380,6 +388,10 @@ async def rate_limit_middleware(request: Request, call_next):
     Extracts user from request.state (set by auth middleware)
     and checks rate limits based on user tier
     """
+    # Never rate-limit CORS preflight; browsers will retry and UX breaks.
+    if (request.method or "").upper() == "OPTIONS":
+        return await call_next(request)
+
     path = request.url.path
 
     # Skip rate limiting for certain paths.

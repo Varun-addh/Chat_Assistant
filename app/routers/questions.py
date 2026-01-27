@@ -1672,8 +1672,9 @@ async def get_session_chat(session_id: str, request: Request, response: Response
 			response.headers["X-Stratax-Session-AutoCreated"] = "1"
 			# Continue to build response below
 		else:
-			# For authenticated users, keep strict behavior to avoid silent session-spam.
-			raise
+			# For authenticated users, keep strict behavior to avoid silent session-spam,
+			# but do NOT bubble KeyError (would become a 500).
+			raise HTTPException(status_code=404, detail="Session not found. Create one via POST /api/session and reuse its session_id.")
 		# Backward compatibility: earlier builds stored guest sessions under "guest_unknown".
 		# After introducing stable guest IDs (guest_<hash>), old tabs may still hold a legacy
 		# session_id. For guests only, try loading from legacy bucket and migrate forward.
