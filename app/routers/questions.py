@@ -1661,38 +1661,41 @@ async def get_session_chat(session_id: str, request: Request, response: Response
 	"""Get chat history for a session (different from Search Intelligence history)"""
 	user_id = get_user_id_from_request(request) or "guest_unknown"
 	manager = get_session_manager(user_id)
+	user = getattr(request.state, "user", None)
 	try:
 		state = await manager.get_required(session_id)
 	except KeyError:
 		# UX guard: some frontends generate a UUID client-side and navigate directly to
 		# /api/session/{id}/chat before calling POST /api/session.
-		# For guests, it's safe to auto-create an empty session so the UI doesn't break.
-		if user_id.startswith("guest_") or user_id == "guest_unknown":
-			state = await manager.ensure_session(session_id)
-			response.headers["X-Stratax-Session-AutoCreated"] = "1"
-			# Continue to build response below
+		# Treat *any unauthenticated request* as "guest-like" (even if the SPA sends a
+		# custom x-client-id such as "user_xxx"), so refresh/navigation doesn't break.
+		if user is None:
+			# Backward compatibility: earlier builds stored guest sessions under "guest_unknown".
+			# After introducing stable guest IDs or client-provided IDs, old tabs may still
+			# reference a legacy session_id. Try legacy first, then auto-create.
+			if user_id != "guest_unknown":
+				legacy = get_session_manager("guest_unknown")
+				legacy_state = await legacy.get(session_id)
+				if legacy_state is not None:
+					# Migrate session to current guest bucket so future loads succeed.
+					manager._sessions[session_id] = legacy_state  # type: ignore[attr-defined]
+					manager._save(legacy_state, force=True)  # type: ignore[attr-defined]
+					await legacy.delete_session(session_id)
+					response.headers["X-Stratax-Session-Legacy-Migrated"] = "1"
+					state = legacy_state
+				else:
+					state = await manager.ensure_session(session_id)
+					response.headers["X-Stratax-Session-AutoCreated"] = "1"
+			else:
+				state = await manager.ensure_session(session_id)
+				response.headers["X-Stratax-Session-AutoCreated"] = "1"
 		else:
 			# For authenticated users, keep strict behavior to avoid silent session-spam,
 			# but do NOT bubble KeyError (would become a 500).
-			raise HTTPException(status_code=404, detail="Session not found. Create one via POST /api/session and reuse its session_id.")
-		# Backward compatibility: earlier builds stored guest sessions under "guest_unknown".
-		# After introducing stable guest IDs (guest_<hash>), old tabs may still hold a legacy
-		# session_id. For guests only, try loading from legacy bucket and migrate forward.
-		if user_id.startswith("guest_") and user_id != "guest_unknown":
-			legacy = get_session_manager("guest_unknown")
-			legacy_state = await legacy.get(session_id)
-			if legacy_state is not None:
-				# Migrate session to current guest bucket so future loads succeed.
-				manager._sessions[session_id] = legacy_state  # type: ignore[attr-defined]
-				manager._save(legacy_state, force=True)  # type: ignore[attr-defined]
-				await legacy.delete_session(session_id)
-				response.headers["X-Stratax-Session-Legacy-Migrated"] = "1"
-				state = legacy_state
-				# Continue to build response below
-			else:
-				raise HTTPException(status_code=404, detail="Session not found")
-		else:
-			raise HTTPException(status_code=404, detail="Session not found")
+			raise HTTPException(
+				status_code=404,
+				detail="Session not found. Create one via POST /api/session and reuse its session_id.",
+			)
 	
 	items = [
 		QnA(

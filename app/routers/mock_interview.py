@@ -12,6 +12,7 @@ from app.services.interview.mock_interview_service import (
 )
 
 from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
+from app.utils.demo_mode import resolve_effective_api_key
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -78,31 +79,37 @@ async def start_mock_interview(
     Start a new mock interview session
     """
     try:
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization.split(" ")[1]
-            
-        api_key = gemini_key if gemini_key else groq_key
-        
-        # Fallback to dev keys respecting provider preference
-        if not api_key:
-            from app.config import settings
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
-
-        # Demo-mode clamp: mock interview demo is capped to 1 question.
-        user_key = extract_user_provided_api_key(
+        # Resolve key + user type using the shared demo utilities.
+        # IMPORTANT: Demo traffic must use Groq (cost-capped) and should not
+        # accidentally pick up an invalid GEMINI_API_KEY in hosted environments.
+        user_type, api_key, needs_key = resolve_effective_api_key(
             http_request,
             x_api_key=x_api_key,
             x_gemini_key=x_gemini_key,
             authorization=authorization,
         )
+
+        from app.config import settings
+        if user_type == "demo":
+            # In demo, force Groq. If demo pool is disabled (local dev), fall back
+            # to GROQ_API_KEY. Never fall back to Gemini for demo.
+            if not api_key:
+                api_key = settings.groq_api_key
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
+        else:
+            if needs_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
+
+        # Demo-mode clamp: mock interview demo is capped to 1 question.
         effective_num_questions = request.num_questions
-        if infer_user_type(http_request, user_provided_key=user_key) == "demo":
+        if user_type == "demo":
             effective_num_questions = 1
 
         # Start session
@@ -144,6 +151,7 @@ async def start_mock_interview(
 @router.post("/sessions/submit-answer", response_model=SubmitAnswerResponse)
 async def submit_answer(
     request: SubmitAnswerRequest,
+    http_request: Request,
     service = Depends(get_mock_service),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
@@ -172,21 +180,28 @@ async def submit_answer(
     - Next question (if available)
     """
     try:
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization.split(" ")[1]
-            
-        api_key = gemini_key if gemini_key else groq_key
-        
-        # Fallback to dev keys respecting provider preference
-        if not api_key:
-            from app.config import settings
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
+        user_type, api_key, needs_key = resolve_effective_api_key(
+            http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+        )
+
+        from app.config import settings
+        if user_type == "demo":
+            if not api_key:
+                api_key = settings.groq_api_key
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
+        else:
+            if needs_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
 
         # Create UserAnswer object
         answer = UserAnswer(

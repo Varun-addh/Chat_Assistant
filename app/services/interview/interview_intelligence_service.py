@@ -600,17 +600,17 @@ class ModernInterviewIntelligenceService:
             
             logger.info(f"Generating questions with Provider: {provider}")
             
-            # Debug: Log API key status
-            current_key = api_key
-            if not current_key and provider == "groq":
-                current_key = llm_svc._settings.groq_api_key
-            elif not current_key and provider == "gemini":
-                current_key = llm_svc._settings.gemini_api_key
-                
-            if current_key:
-                logger.info(f"Using API Key: {current_key[:4]}...{current_key[-4:] if len(current_key) > 8 else ''} (Length: {len(current_key)})")
+            # Debug: Log API key presence ONLY (never log key fragments).
+            current_key_present = bool(api_key)
+            if not current_key_present and provider == "groq":
+                current_key_present = bool(llm_svc._settings.groq_api_key)
+            elif not current_key_present and provider == "gemini":
+                current_key_present = bool(llm_svc._settings.gemini_api_key)
+
+            if current_key_present:
+                logger.info("Using API Key: [REDACTED]")
             else:
-                logger.warning(f"No API Key found for provider {provider}!")
+                logger.warning("No API Key found for provider %s", provider)
             
             # FIXED: For coding questions, prefer Groq (no safety filters)
             if request.intent.requires_code and provider == "gemini":
