@@ -376,32 +376,277 @@ CONTENT_RELEVANCE: <assessment>"""
         if not user_profile:
             # Fallback to generic questions if no profile
             return await self._generate_generic_questions(difficulty, count, round_type)
-        
+
         # Determine interview level based on experience
         interview_level = self._determine_interview_level(user_profile.experience_years, difficulty)
-        
+
         # Build intelligent prompt (with round context if specified)
         prompt = self._build_adaptive_prompt(user_profile, interview_level, count, round_type)
-        
+
         try:
             round_info = f" for {round_type.value} round" if round_type else ""
-            logger.info(f"Generating {count} adaptive questions{round_info} for {user_profile.domain} with {user_profile.experience_years}yrs experience")
-            
+            logger.info(
+                f"Generating {count} adaptive questions{round_info} for {user_profile.domain} with {user_profile.experience_years}yrs experience"
+            )
+
             response = await self._call_llm(prompt, api_key)
             questions = self._parse_questions(response, user_profile, difficulty, round_type)
-            
+
             if len(questions) < count:
                 logger.warning(f"Only generated {len(questions)}/{count} questions, using fallback")
                 # Fill remaining with generic questions
                 remaining = count - len(questions)
                 generic = await self._generate_generic_questions(difficulty, remaining, round_type)
                 questions.extend(generic[:remaining])
-            
+
             return questions[:count]
-            
+
         except Exception as e:
             logger.error(f"Adaptive question generation failed: {e}", exc_info=True)
             return await self._generate_generic_questions(difficulty, count, round_type)
+
+    async def generate_follow_up_question(
+        self,
+        *,
+        user_profile: Optional[UserProfile],
+        difficulty: QuestionDifficulty,
+        round_type: Optional[InterviewRound],
+        previous_question: PracticeInterviewQuestion,
+        transcript: str,
+        micro_feedback: Optional[MicroFeedback] = None,
+        already_asked: Optional[List[str]] = None,
+        target_question_id: Optional[int] = None,
+        api_key: Optional[str] = None,
+    ) -> Optional[PracticeInterviewQuestion]:
+        """Generate ONE drilling follow-up question based on the candidate's last answer.
+
+        This is used to make Practice Mode feel like a real interviewer:
+        - Ask for clarification
+        - Drill on missed concepts
+        - Increase depth where the answer was shallow
+
+        Returns a PracticeInterviewQuestion or None on failure.
+        """
+
+        try:
+            prompt = self._build_follow_up_prompt(
+                user_profile=user_profile,
+                difficulty=difficulty,
+                round_type=round_type,
+                previous_question=previous_question,
+                transcript=transcript,
+                micro_feedback=micro_feedback,
+                already_asked=already_asked or [],
+            )
+
+            response = await self._call_llm(prompt, api_key)
+            q = self._parse_single_question(
+                response=response,
+                difficulty=difficulty,
+                round_type=round_type,
+                target_question_id=target_question_id,
+            )
+            return q
+        except Exception as e:
+            logger.warning(f"Follow-up question generation failed: {e}")
+            return None
+
+    def _build_follow_up_prompt(
+        self,
+        *,
+        user_profile: Optional[UserProfile],
+        difficulty: QuestionDifficulty,
+        round_type: Optional[InterviewRound],
+        previous_question: PracticeInterviewQuestion,
+        transcript: str,
+        micro_feedback: Optional[MicroFeedback],
+        already_asked: List[str],
+    ) -> str:
+        """Prompt for a single follow-up question (strict JSON object only)."""
+
+        profile_block = ""
+        if user_profile is not None:
+            skills_str = ", ".join((user_profile.skills or [])[:8])
+            focus_areas = ", ".join(user_profile.interview_focus or []) if user_profile.interview_focus else "(not specified)"
+            role_context = f"{user_profile.job_role}" if user_profile.job_role else "(not specified)"
+            company_context = f"{user_profile.company_preference}" if user_profile.company_preference else "(not specified)"
+            profile_block = (
+                "CANDIDATE PROFILE:\n"
+                f"- Domain: {user_profile.domain}\n"
+                f"- Experience: {user_profile.experience_years} years\n"
+                f"- Role: {role_context}\n"
+                f"- Company preference: {company_context}\n"
+                f"- Key skills: {skills_str or '(none)'}\n"
+                f"- Focus areas: {focus_areas}\n\n"
+            )
+
+        round_block = ""
+        if round_type is not None:
+            round_block = f"ROUND: {round_type.value}\n\n"
+
+        prev_key_points = getattr(previous_question, "key_points", None) or []
+        prev_expected = getattr(previous_question, "expected_answer_template", None) or ""
+
+        missed = []
+        improvement = []
+        strengths = []
+        correctness = None
+        if micro_feedback is not None:
+            missed = micro_feedback.key_points_missed or []
+            improvement = micro_feedback.improvement_areas or []
+            strengths = micro_feedback.strengths or []
+            correctness = micro_feedback.correctness_score
+
+        asked = [t.strip() for t in (already_asked or []) if (t or "").strip()]
+        asked_block = "\n".join([f"- {t}" for t in asked[-12:]]) if asked else "(none)"
+
+        prev_category = getattr(previous_question, "category", "technical")
+        prev_type = getattr(previous_question, "question_type", None)
+        prev_type_str = str(prev_type.value) if prev_type is not None else "voice"
+
+        prompt = f"""You are a world-class interviewer running a REALISTIC follow-up drill.
+
+Goal: Ask ONE next question that directly follows from the candidate's last answer.
+
+Constraints:
+- The follow-up MUST be specific to what the candidate said (use their words/claims).
+- If key concepts were missed, drill those first.
+- If the answer was shallow, ask for depth (tradeoffs, edge cases, failure modes, complexity, metrics).
+- Do NOT repeat earlier questions.
+- Keep the question as a SINGLE sentence when possible.
+- Output STRICT JSON ONLY (one JSON object). No markdown, no commentary.
+
+{profile_block}{round_block}
+PREVIOUS QUESTION:
+{previous_question.text}
+
+PREVIOUS QUESTION CONTEXT:
+- category: {prev_category}
+- question_type: {prev_type_str}
+- expected key points: {prev_key_points if prev_key_points else '(none)'}
+- expected answer template: {prev_expected if prev_expected else '(none)'}
+
+CANDIDATE ANSWER (TRANSCRIPT):
+"{(transcript or '').strip()}"
+
+EVALUATION SIGNALS:
+- correctness_score: {correctness if correctness is not None else 'N/A'}
+- strengths: {strengths if strengths else '(none)'}
+- key_points_missed: {missed if missed else '(none)'}
+- improvement_areas: {improvement if improvement else '(none)'}
+
+ALREADY ASKED QUESTIONS (avoid duplicates):
+{asked_block}
+
+Return EXACTLY one JSON object in this schema:
+{{
+  "text": "...",
+  "category": "technical" | "behavioral" | "system_design",
+  "question_type": "voice" | "coding" | "system_design",
+  "time_limit": 90,
+  "difficulty": "easy" | "medium" | "hard",
+  "key_points": ["...", "..."],
+  "expected_answer_template": "...",
+  "programming_language": null
+}}
+
+Guidance:
+- Prefer question_type=voice unless the follow-up truly requires writing code.
+- Keep time_limit realistic: voice 60-180; coding 600-900; system_design 150-180.
+"""
+
+        return prompt
+
+    def _parse_single_question(
+        self,
+        *,
+        response: str,
+        difficulty: QuestionDifficulty,
+        round_type: Optional[InterviewRound],
+        target_question_id: Optional[int],
+    ) -> Optional[PracticeInterviewQuestion]:
+        """Parse a single question JSON object into PracticeInterviewQuestion."""
+        import json
+        import re
+
+        text = (response or "").strip()
+        if not text:
+            return None
+
+        # Strip markdown fences if any
+        if "```json" in text:
+            text = text.split("```json", 1)[1].split("```", 1)[0]
+        elif "```" in text:
+            text = text.split("```", 1)[1].split("```", 1)[0]
+        text = text.strip()
+
+        # Extract first JSON object
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            text = match.group(0).strip()
+
+        try:
+            data = json.loads(text)
+        except Exception:
+            # Best-effort repair: remove trailing commas
+            text = re.sub(r",\s*([\]}])", r"\1", text)
+            try:
+                data = json.loads(text)
+            except Exception:
+                return None
+
+        if not isinstance(data, dict):
+            return None
+
+        q_text = (data.get("text") or "").strip()
+        if not q_text:
+            return None
+
+        category = (data.get("category") or "technical").strip()
+        time_limit = int(data.get("time_limit") or 90)
+
+        from app.schemas import QuestionType
+        qtype_str = str(data.get("question_type") or "voice").lower()
+        if qtype_str == "coding":
+            qtype = QuestionType.CODING
+        elif qtype_str == "system_design":
+            qtype = QuestionType.SYSTEM_DESIGN
+        else:
+            qtype = QuestionType.VOICE
+
+        diff_str = str(data.get("difficulty") or "").lower()
+        if diff_str == "easy":
+            q_diff = QuestionDifficulty.EASY
+        elif diff_str == "hard":
+            q_diff = QuestionDifficulty.HARD
+        elif diff_str == "medium":
+            q_diff = QuestionDifficulty.MEDIUM
+        else:
+            q_diff = difficulty
+
+        key_points = data.get("key_points")
+        if isinstance(key_points, list):
+            key_points = [str(x).strip() for x in key_points if str(x).strip()][:5]
+        else:
+            key_points = None
+
+        expected = (data.get("expected_answer_template") or "").strip() or None
+        programming_language = data.get("programming_language")
+        if programming_language is not None:
+            programming_language = str(programming_language).strip() or None
+
+        return PracticeInterviewQuestion(
+            id=int(target_question_id or 1),
+            text=q_text,
+            difficulty=q_diff,
+            time_limit=max(30, int(time_limit)),
+            category=category,
+            question_type=qtype,
+            programming_language=programming_language,
+            key_points=key_points if key_points else None,
+            expected_answer_template=expected,
+            round_type=round_type,
+        )
     
     def _determine_interview_level(self, experience_years: int, base_difficulty: QuestionDifficulty) -> str:
         """

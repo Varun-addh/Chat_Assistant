@@ -706,6 +706,43 @@ class PracticeModeService:
                 session.questions,
                 session.current_question_index
             )
+
+            # 🚀 ALWAYS-ON ADAPTIVE FOLLOW-UP:
+            # Replace the upcoming question with a drill-down follow-up framed from
+            # the candidate's *last* answer (transcript + micro_feedback). This makes
+            # the practice feel like a real interviewer (even when a topic/profile is selected).
+            try:
+                next_index = session.current_question_index + 1
+                if 0 <= next_index < len(session.questions):
+                    # Find the last answer corresponding to the acknowledged question
+                    last_answer = None
+                    for a in reversed(getattr(session, "answers", []) or []):
+                        if int(getattr(a, "question_id", -1)) == int(question_id):
+                            last_answer = a
+                            break
+
+                    prev_q = session.questions[question_id - 1]
+                    already_asked = [q.text for q in (session.questions or []) if getattr(q, "text", None)]
+
+                    if last_answer is not None:
+                        follow_up = await self.adaptive_interviewer.generate_follow_up_question(
+                            user_profile=session.user_profile,
+                            difficulty=session.difficulty,
+                            round_type=getattr(prev_q, "round_type", None) or session.round_type,
+                            previous_question=prev_q,
+                            transcript=getattr(last_answer, "transcript", "") or "",
+                            micro_feedback=getattr(last_answer, "micro_feedback", None),
+                            already_asked=already_asked,
+                            target_question_id=next_index + 1,
+                            api_key=api_key,
+                        )
+                        if follow_up is not None and getattr(follow_up, "text", "").strip():
+                            # Preserve numbering slot and keep total question count stable
+                            session.questions[next_index] = follow_up
+                            next_question = follow_up
+            except Exception as e:
+                # Never block progression; fall back to the existing pre-generated question.
+                logger.warning(f"Adaptive follow-up injection failed, using fallback next question: {e}")
             
             if not next_question:
                 raise ValueError("No next question available")
