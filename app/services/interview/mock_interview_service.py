@@ -1194,9 +1194,18 @@ CRITICAL RULES:
         
         # Calculate total time spent
         total_time = sum(session.time_per_question.values())
+        if not total_time and session.answers:
+            # Fallback for older sessions/clients that only record time per answer.
+            total_time = sum(int(a.time_taken_seconds or 0) for a in session.answers)
         
         # Calculate total hints used
         total_hints = sum(session.hints_used.values())
+
+        # Score stats for summary cards
+        individual_scores = [float(e.overall_score) for e in session.evaluations] if session.evaluations else []
+        best_score = max(individual_scores) if individual_scores else None
+        lowest_score = min(individual_scores) if individual_scores else None
+        score_range = (best_score - lowest_score) if (best_score is not None and lowest_score is not None) else None
         
         return {
             "session_id": session.session_id,
@@ -1209,6 +1218,10 @@ CRITICAL RULES:
             "average_score": session.average_score,
             "total_time_seconds": total_time,
             "total_hints_used": total_hints,
+            "individual_scores": individual_scores,
+            "best_score": best_score,
+            "lowest_score": lowest_score,
+            "score_range": score_range,
             "time_per_question": session.time_per_question,
             "hints_per_question": session.hints_used,
             "evaluations": [

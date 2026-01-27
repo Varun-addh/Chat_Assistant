@@ -385,10 +385,18 @@ async def end_session(
     """End interview session and get final summary"""
     try:
         summary = await service.end_session(session_id)
-        
+
+        # Provide both shapes:
+        # - Flat fields (what many UIs expect)
+        # - Nested `summary` (older clients / debugging)
+        flat: dict = {}
+        if isinstance(summary, dict):
+            flat.update(summary)
+
         return {
             "status": "completed",
-            "summary": summary
+            **flat,
+            "summary": summary,
         }
     
     except ValueError as e:
