@@ -684,11 +684,21 @@ class CodeExecutionIn(BaseModel):
 	stdin: Optional[str] = Field(default="", max_length=8000)
 	test_cases: Optional[List[CodeExecutionTestCase]] = Field(default=None, description="Optional test cases")
 	trace: bool = Field(default=False, description="If true, return step-by-step trace events (Python only)")
+	explain_trace: bool = Field(
+		default=False,
+		description="If true and trace=true, include a short explanation for each executed line",
+	)
 	trace_max_events: int = Field(
 		default=2000,
 		ge=1,
 		le=10000,
 		description="Max trace events to return when trace=true (Python only)",
+	)
+	explain_max_lines: int = Field(
+		default=200,
+		ge=1,
+		le=2000,
+		description="Max distinct line explanations to return when explain_trace=true",
 	)
 	store_code: bool = Field(default=False, description="If true, allow storing code in telemetry (not recommended)")
 
@@ -698,6 +708,7 @@ class CodeExecutionTraceEvent(BaseModel):
 	line: int
 	event: str = Field(default="line")
 	locals: Optional[Dict[str, str]] = None
+	explanation: Optional[str] = None
 
 
 class CodeExecutionTestResult(BaseModel):
@@ -717,6 +728,7 @@ class CodeExecutionOut(BaseModel):
 	memory_kb: Optional[int] = None
 	test_results: Optional[List[CodeExecutionTestResult]] = None
 	trace_events: Optional[List[CodeExecutionTraceEvent]] = None
+	line_explanations: Optional[Dict[int, str]] = None
 
 
 # Configuration Models for Practice Mode

@@ -10,6 +10,7 @@ from app.database import get_db_context
 from app.middleware.auth import get_user_id_from_request
 from app.schemas import CodeExecutionIn, CodeExecutionOut, CodeExecutionTestResult, CodeExecutionTraceEvent
 from app.services.chat.ai_native_enhancements import CodeExecutionSandbox
+from app.utils.code_line_explain import explain_lines
 from app.utils.event_logging import track_event
 
 logger = logging.getLogger(__name__)
@@ -118,18 +119,34 @@ async def execute_code(payload: CodeExecutionIn, http_request: Request) -> CodeE
             pass
 
         trace_events = None
+        line_explanations = None
         if isinstance(result.get("trace_events"), list):
             trace_events = []
+
+            if bool(payload.trace) and bool(payload.explain_trace):
+                try:
+                    line_nums = [int(ev.get("line") or 0) for ev in result.get("trace_events") if isinstance(ev, dict)]
+                    line_explanations = explain_lines(
+                        code=payload.code,
+                        language=language,
+                        line_numbers=line_nums,
+                        max_lines=int(payload.explain_max_lines or 200),
+                    )
+                except Exception:
+                    line_explanations = None
+
             for ev in result.get("trace_events"):
                 if not isinstance(ev, dict):
                     continue
                 try:
+                    ln = int(ev.get("line") or 0)
                     trace_events.append(
                         CodeExecutionTraceEvent(
                             step=int(ev.get("step") or 0),
-                            line=int(ev.get("line") or 0),
+                            line=ln,
                             event=str(ev.get("event") or "line"),
                             locals=(ev.get("locals") if isinstance(ev.get("locals"), dict) else None),
+                            explanation=(line_explanations.get(ln) if isinstance(line_explanations, dict) else None),
                         )
                     )
                 except Exception:
@@ -144,6 +161,7 @@ async def execute_code(payload: CodeExecutionIn, http_request: Request) -> CodeE
             memory_kb=(int(mem_kb) if mem_kb is not None else None),
             test_results=test_results,
             trace_events=trace_events,
+            line_explanations=line_explanations,
         )
 
     except HTTPException:

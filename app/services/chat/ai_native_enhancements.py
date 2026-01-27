@@ -509,7 +509,8 @@ def _stratax_tracer(frame, event, arg):
         raise SystemExit('trace_max_events')
     try:
         locs = frame.f_locals or {{}}
-        locs_s = {{k: _stratax_safe_val(v) for k, v in list(locs.items())[:40]}}
+        items = [(k, v) for k, v in list(locs.items()) if not (isinstance(k, str) and k.startswith('__'))]
+        locs_s = {{k: _stratax_safe_val(v) for k, v in items[:40]}}
         _STRATAX_TRACE.append({{
             'step': len(_STRATAX_TRACE) + 1,
             'line': int(getattr(frame, 'f_lineno', 0) or 0),

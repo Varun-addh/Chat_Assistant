@@ -92,6 +92,51 @@ def test_code_execute_endpoint_trace_events(monkeypatch):
     assert payload["trace_events"][0]["locals"]["x"] == "1"
 
 
+def test_code_execute_endpoint_trace_explanations(monkeypatch):
+    app = FastAPI()
+    app.include_router(code_router)
+    client = TestClient(app)
+
+    monkeypatch.setattr(settings, "enable_code_execution", True, raising=False)
+
+    import app.routers.code_execution as r
+
+    class _DummySandbox:
+        async def execute_code(self, code, language, test_cases=None, stdin="", trace=False, trace_max_events=2000):
+            return {
+                "success": True,
+                "output": "ok\n",
+                "error": "",
+                "execution_time": 0.01,
+                "memory_used": 123,
+                "status": "Accepted",
+                "trace_events": [
+                    {"step": 1, "line": 1, "event": "line", "locals": {"x": "1"}},
+                    {"step": 2, "line": 2, "event": "line", "locals": {"x": "2"}},
+                ],
+            }
+
+    monkeypatch.setattr(r, "CodeExecutionSandbox", lambda **kwargs: _DummySandbox())
+    monkeypatch.setattr(r, "explain_lines", lambda **kwargs: {1: "Explains line 1", 2: "Explains line 2"})
+
+    resp = client.post(
+        "/api/code/execute",
+        json={
+            "language": "python",
+            "code": "x=1\nprint(x)\n",
+            "trace": True,
+            "explain_trace": True,
+            "trace_max_events": 10,
+        },
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    assert payload["trace_events"][0]["explanation"] == "Explains line 1"
+    assert payload["line_explanations"]["1"] == "Explains line 1"
+
+
 def test_code_execute_endpoint_trace_fallback_for_other_languages(monkeypatch):
     app = FastAPI()
     app.include_router(code_router)
