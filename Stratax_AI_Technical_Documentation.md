@@ -92,6 +92,24 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 - Enforced `REQUIRE_USER_API_KEY` behavior: when enabled, Interview Intelligence requests without a client-supplied key return **401** (no silent fallback).
 - Prevented duplicate history entries by disabling backend auto-save for standard Interview Intelligence search; the UI should save exactly once through the History API.
 
+### Code Studio execution + Visualize (backend sandbox)
+
+- Added a dedicated LeetCode-style execution endpoint: `POST /api/code/execute`.
+- Execution is server-side via sandbox providers (Judge0 via RapidAPI with optional fallback providers).
+- Supports `stdin`, optional `test_cases`, and tracing.
+- Tracing can optionally attach per-line explanations (`explain_trace`) to support a “Visualize” UI.
+
+### Production secrets + encrypted provider keys
+
+- Production now requires persistent `JWT_SECRET_KEY` and `COOKIE_SECRET` (to avoid token/cookie invalidation on restart).
+- Added encryption for user-stored provider keys using `STRATAX_SECRETS_ENCRYPTION_KEY` (Fernet), stored in DB with an `enc:` prefix.
+- Backward compatible: plaintext rows can still be read, but production refuses to store new provider keys unless encryption is configured.
+
+### CI (GitHub Actions)
+
+- Added `.github/workflows/ci.yml` to run `pytest -q` on push/PR.
+- CI sets safe flags (`FAST_STARTUP=true`, `DISABLE_INTERVIEW_INTELLIGENCE=true`, `ENABLE_CODE_EXECUTION=false`) and uses fixed test secrets.
+
 ### Service Architecture
 
 The system is designed as a **monolithic FastAPI service** with optional modular components:
@@ -909,7 +927,9 @@ services:
 | `LLM_PROVIDER` | Provider selection: `groq` or `gemini` | Yes |
 | `API_KEY` | Optional bearer auth for protected endpoints | No |
 | `PRACTICE_MODE_ENABLED` | Enable/disable Practice Mode | No (default: true) |
-| `JWT_SECRET_KEY` | JWT signing secret for `/auth/*` | No (auto-generated default; set explicitly in production) |
+| `JWT_SECRET_KEY` | JWT signing secret for `/auth/*` | Yes (in production) |
+| `COOKIE_SECRET` | Cookie signing secret (OAuth state + cookies) | Yes (in production) |
+| `STRATAX_SECRETS_ENCRYPTION_KEY` | Encrypt/decrypt user-stored provider keys (`enc:` prefix) | Yes (recommended; required for storing keys in production) |
 | `GOOGLE_CLIENT_ID` | Google OAuth | No |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth | No |
 | `BACKEND_BASE_URL` | OAuth redirect base (backend) | No |

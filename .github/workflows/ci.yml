@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "fresh-start"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          APP_ENV: test
+          FAST_STARTUP: "true"
+          DISABLE_INTERVIEW_INTELLIGENCE: "true"
+          ENABLE_CODE_EXECUTION: "false"
+          REQUIRE_USER_API_KEY: "false"
+          JWT_SECRET_KEY: "ci-test-jwt-secret-key"
+          COOKIE_SECRET: "ci-test-cookie-secret"
+        run: |
+          pytest -q

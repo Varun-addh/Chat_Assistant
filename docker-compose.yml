@@ -9,6 +9,10 @@ services:
     env_file:
       - .env
     environment:
+      # Secrets note:
+      # - Keep JWT_SECRET_KEY / COOKIE_SECRET / STRATAX_SECRETS_ENCRYPTION_KEY out of git.
+      # - Provide them via the env_file above (recommended) or host env vars.
+      # - For real production, set APP_ENV=production so the app enforces required secrets.
       # Prefer local Kroki renderer if available (avoids relying on external services)
       - KROKI_URL=http://kroki:8000/mermaid/svg
       # Default to Postgres when running under docker-compose (override in .env if needed)

@@ -251,6 +251,10 @@ Notable settings (non-exhaustive; see file for full list):
 - App identity: `app_name`, `app_developer_name`, `app_developer_attribution`
 - API auth: `api_key` (simple bearer), `cookie_secret`
 - JWT auth: `jwt_secret_key`
+- Secrets encryption: `secrets_encryption_key`
+  - When set (recommended), user-stored provider keys in the `users` table are stored encrypted with an `enc:` prefix (Fernet).
+  - Backward compatibility: older plaintext DB rows can still be read.
+  - Production behavior: the app requires persistent `JWT_SECRET_KEY` and `COOKIE_SECRET` at startup, and profile updates will refuse to store provider keys unless `STRATAX_SECRETS_ENCRYPTION_KEY` is configured.
 - LLM: `llm_provider`, `groq_api_key`, `groq_model`, `gemini_api_key`, `gemini_model`, token/temperature knobs
 - Demo mode key pool (cost-capped public demo):
   - `stratax_demo_api_key`, `stratax_demo_api_keys`
@@ -258,6 +262,8 @@ Notable settings (non-exhaustive; see file for full list):
 - External features: `serper_api_key`, `cohere_api_key`, `judge0_api_key`
 - Feature flags: `enable_hybrid_search`, `enable_reranking`, `enable_code_execution`, `enable_query_expansion`, `enable_streaming`
 - API key policy: `require_user_api_key`
+
+See also (crypto helper used by auth + demo-mode key resolution): `app/utils/secret_crypto.py`.
 - Telemetry (EventRecord stream): `analytics_hmac_key`, `analytics_store_raw_text`, `analytics_text_preview_len`, `enable_event_logging`
 - STT (WebSocket): `stt_provider`
 - Practice mode toggles + audio config (`practice_mode_enabled`, `practice_*`)
@@ -383,6 +389,48 @@ See: `app/routers/diagrams.py`, `app/services/architecture_generator.py`, `app/u
 - `POST /api/evaluate` — runs static analysis and an LLM critique; caches results in-memory by a hash over session + context + code.
 
 See: `app/routers/evaluate.py`, `app/services/code_evaluation_service.py`.
+
+### 4.8.1 `app/routers/code_execution.py` — sandboxed code execution (LeetCode-style)
+
+This repo provides a dedicated backend endpoint for code execution:
+
+- `POST /api/code/execute`
+
+Key properties:
+
+- Execution happens server-side via sandbox providers (Judge0 via RapidAPI, with Piston fallback depending on configuration).
+- Sandbox credentials (e.g. `JUDGE0_API_KEY`) remain backend-only and must never be exposed to clients.
+- HTTP 200 means “request processed”; logical success is represented by the JSON field `success`.
+
+Request shape (see `CodeExecutionIn` in `app/schemas.py`):
+
+- `language` (e.g. `python`, `javascript`, `cpp`)
+- `code` (source)
+- `stdin` (optional)
+- `test_cases` (optional list)
+- `trace` (optional, enables step/line trace when supported)
+- `trace_max_events` (optional cap)
+- `explain_trace` (optional, attaches human-readable per-line explanations when tracing)
+
+Response shape (see `CodeExecutionOut` in `app/schemas.py`):
+
+- `success` boolean
+- `stdout`, `stderr`
+- `status`, `exit_code` (when available)
+- `execution_time_seconds`, `memory_kb` (when available)
+- Optional: `trace_events[]` (Python real tracing; other languages best-effort timeline)
+
+Tracing & explainability:
+
+- Python tracing uses `sys.settrace` and is filtered to user code frames.
+- Per-line explanations use deterministic analysis for Python where possible.
+
+See: `app/routers/code_execution.py`, `app/services/chat/ai_native_enhancements.py`, `app/utils/code_line_explain.py`.
+
+Rate limiting:
+
+- `/api/code/execute` is protected by demo-mode quotas and the global rate limiting/metering middleware.
+- See: `app/middleware/rate_limit.py`.
 
 ### 4.9 `app/routers/interview_intelligence.py` + `app/services/interview_intelligence_service.py`
 
@@ -1039,6 +1087,21 @@ cp .env.example .env  # Create from example if available
 # Run with hot reload
 uvicorn app.main:app --reload --host 0.0.0.0 --port 7860
 ```
+
+### Continuous Integration (GitHub Actions)
+
+The repo includes a GitHub Actions workflow that runs the unit test suite on push/PR:
+
+- Workflow: `.github/workflows/ci.yml`
+- Python: 3.12
+- Command: `pytest -q`
+
+To keep CI fast and deterministic, CI sets conservative environment flags:
+
+- `APP_ENV=test`
+- `FAST_STARTUP=true` and `DISABLE_INTERVIEW_INTELLIGENCE=true` (skips heavier optional subsystems)
+- `ENABLE_CODE_EXECUTION=false` (prevents external sandbox calls)
+- `JWT_SECRET_KEY` / `COOKIE_SECRET` are set to fixed test values
 
 ### Code Organization Best Practices
 

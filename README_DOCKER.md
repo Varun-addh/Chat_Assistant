@@ -67,6 +67,52 @@ Health checks
 Environment variables
 - Required: API keys like SERPER_API_KEY must be set in the container (via `.env` or directly in the environment).
 
+Secrets (production)
+
+These values MUST be stable across restarts in production:
+- `JWT_SECRET_KEY` (signs JWTs)
+- `COOKIE_SECRET` (signs cookies/OAuth state)
+- `STRATAX_SECRETS_ENCRYPTION_KEY` (encrypts user-stored provider keys in DB)
+
+Where to keep them
+- Local dev: keep them in a local `.env` file that is NOT committed (this repo expects that).
+- Docker Compose on a server: keep a server-local env file (e.g. `/etc/stratax/stratax.env`) and reference it via `env_file:`.
+- Managed hosting (Render/Fly/Railway/AWS/etc.): store them in the platform’s secret manager / environment variable settings.
+- Kubernetes: store them in a `Secret` (or sealed-secret) and mount as env vars.
+
+How to generate them
+
+JWT + cookie secrets (random URL-safe strings):
+
+  python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+Encryption key (Fernet):
+
+  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+How to pass them to Docker safely
+
+Option A: Docker Compose env file (recommended for a single VM)
+
+1) Create a server-local env file (do NOT commit it):
+
+  JWT_SECRET_KEY=...\n
+  COOKIE_SECRET=...\n
+  STRATAX_SECRETS_ENCRYPTION_KEY=...\n
+  APP_ENV=production\n
+
+2) Point compose at it:
+
+  services:
+    web:
+      env_file:
+        - /etc/stratax/stratax.env
+
+Option B: Platform secrets
+
+- Set the three env vars in your hosting provider UI.
+- Do not bake secrets into the Docker image and do not commit them to git.
+
 Qdrant + multi-worker
 - If you run multiple Uvicorn workers, set `QDRANT_URL` so all workers share the same Qdrant service.
 - `docker-compose.yml` defaults `QDRANT_URL` to `http://qdrant:6333` for the `web` container.

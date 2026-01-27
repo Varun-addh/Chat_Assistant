@@ -24,6 +24,7 @@ from fastapi import HTTPException, Request
 from app.config import settings
 from app.models import User
 from app.services.chat.demo_key_pool import demo_key_pool
+from app.utils.secret_crypto import decrypt_secret
 
 
 UserType = Literal["demo", "registered"]
@@ -209,7 +210,15 @@ def resolve_effective_api_key(
         else:
             stored = (user.user_groq_api_key or "").strip() or None
         if stored:
-            return "registered", stored, False
+            try:
+                stored = decrypt_secret(stored)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Stored provider key cannot be decrypted (server misconfigured): {e}",
+                )
+            if stored:
+                return "registered", stored, False
 
     # Missing key
     return "registered", None, True

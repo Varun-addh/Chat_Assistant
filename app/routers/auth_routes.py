@@ -19,6 +19,7 @@ from app.auth import (
 )
 from app.models import User, TIER_QUOTAS
 from app.config import settings
+from app.utils.secret_crypto import encrypt_secret, encryption_configured
 from pydantic import BaseModel, ConfigDict
 import logging
 
@@ -183,6 +184,21 @@ async def update_profile(
     
     Requires authentication
     """
+
+    def _maybe_encrypt_provider_key(value: Optional[str]) -> Optional[str]:
+        v = (value or "").strip()
+        if not v:
+            return None
+        if encryption_configured():
+            return encrypt_secret(v)
+        if (settings.app_env or "").strip().lower() == "production":
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Provider key storage requires STRATAX_SECRETS_ENCRYPTION_KEY in production",
+            )
+        # Backward-compatible dev/test behavior: allow plaintext storage when encryption is not configured.
+        return v
+
     # Update fields
     if update_data.full_name is not None:
         user.full_name = update_data.full_name
@@ -201,10 +217,10 @@ async def update_profile(
         user.username = update_data.username
     
     if update_data.user_groq_api_key is not None:
-        user.user_groq_api_key = update_data.user_groq_api_key
+        user.user_groq_api_key = _maybe_encrypt_provider_key(update_data.user_groq_api_key)
     
     if update_data.user_gemini_api_key is not None:
-        user.user_gemini_api_key = update_data.user_gemini_api_key
+        user.user_gemini_api_key = _maybe_encrypt_provider_key(update_data.user_gemini_api_key)
     
     db.commit()
     db.refresh(user)

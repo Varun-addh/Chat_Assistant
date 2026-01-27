@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, AliasChoices, field_validator
+from pydantic import Field, AliasChoices, field_validator, model_validator
 from typing import List
 import secrets
 import os
@@ -53,8 +53,41 @@ class Settings(BaseSettings):
 
 	# Auth
 	api_key: str | None = None  # simple bearer key if provided
-	cookie_secret: str = secrets.token_urlsafe(32)
-	jwt_secret_key: str = secrets.token_urlsafe(32)  # JWT secret for authentication
+	cookie_secret: str | None = Field(default=None, validation_alias=AliasChoices("COOKIE_SECRET", "STRATAX_COOKIE_SECRET"))
+	jwt_secret_key: str | None = Field(default=None, validation_alias=AliasChoices("JWT_SECRET_KEY", "STRATAX_JWT_SECRET_KEY"))  # JWT secret for authentication
+	# Encryption key for user-stored provider secrets (Fernet key). Recommended for production.
+	# Generate with:
+	#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+	secrets_encryption_key: str | None = Field(
+		default=None,
+		validation_alias=AliasChoices("STRATAX_SECRETS_ENCRYPTION_KEY", "SECRETS_ENCRYPTION_KEY"),
+	)
+
+	@model_validator(mode="after")
+	def _require_persistent_secrets_in_production(self):
+		# In dev/test we allow auto-generated secrets for convenience.
+		# In production, secrets MUST be persistent or all sessions/tokens break on restart.
+		env = (self.app_env or "").strip().lower()
+		if env == "production":
+			if not (os.getenv("JWT_SECRET_KEY") or os.getenv("STRATAX_JWT_SECRET_KEY")):
+				raise ValueError("Missing JWT_SECRET_KEY in production")
+			if not (os.getenv("COOKIE_SECRET") or os.getenv("STRATAX_COOKIE_SECRET")):
+				raise ValueError("Missing COOKIE_SECRET in production")
+		return self
+
+	@field_validator("jwt_secret_key", mode="before")
+	@classmethod
+	def _default_jwt_secret_key(cls, v):
+		if v is None or (isinstance(v, str) and not v.strip()):
+			return secrets.token_urlsafe(32)
+		return v
+
+	@field_validator("cookie_secret", mode="before")
+	@classmethod
+	def _default_cookie_secret(cls, v):
+		if v is None or (isinstance(v, str) and not v.strip()):
+			return secrets.token_urlsafe(32)
+		return v
 
 	# LLM Provider Selection
 	llm_provider: str = "gemini"  # default global provider; Interview Intelligence overrides to Groq internally
