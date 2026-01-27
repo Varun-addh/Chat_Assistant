@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator
+from pydantic import Field, AliasChoices, field_validator
 from typing import List
 import secrets
 import os
@@ -63,7 +63,13 @@ class Settings(BaseSettings):
 	cohere_api_key: str | None = None
 
 	# Judge0
-	judge0_api_key: str | None = None
+	judge0_api_key: str | None = Field(
+		default=None,
+		validation_alias=AliasChoices("JUDGE0_API_KEY", "RAPIDAPI_KEY"),
+	)
+	# RapidAPI host header for Judge0. Only override this if you know you need it.
+	# (Do NOT set this to some other RapidAPI host like google-translate.)
+	judge0_rapidapi_host: str = Field(default="judge0-ce.p.rapidapi.com", validation_alias="JUDGE0_RAPIDAPI_HOST")
 
 	# Groq
 	groq_api_key: str | None = None

@@ -45,6 +45,9 @@ def _demo_feature_limit_for_path(path: str) -> tuple[Optional[str], Optional[int
     # Practice mode: only gate starting a round/session; let in-session calls proceed
     if p.startswith("/api/practice/interview/start-round") or p.startswith("/api/practice/interview/start"):
         return "practice_rounds", DEMO_LIMIT_PRACTICE_ROUNDS
+    # Code execution is expensive; keep demo conservative.
+    if p.startswith("/api/code/execute"):
+        return "code_exec", 10
     if p.startswith("/api/mock-interview"):
         return "mock_interviews", DEMO_LIMIT_MOCK_INTERVIEWS
     # Default demo limit for other metered endpoints (keep conservative)

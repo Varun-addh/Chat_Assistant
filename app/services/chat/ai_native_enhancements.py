@@ -18,9 +18,20 @@ from langchain_community.vectorstores import Qdrant
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Qdrant client for production
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+# Qdrant client for production (optional dependency)
+try:
+    from qdrant_client import QdrantClient  # type: ignore
+    from qdrant_client.models import (  # type: ignore
+        Distance,
+        VectorParams,
+        PointStruct,
+        Filter,
+        FieldCondition,
+        MatchValue,
+    )
+except ModuleNotFoundError:  # pragma: no cover
+    QdrantClient = None  # type: ignore
+    Distance = VectorParams = PointStruct = Filter = FieldCondition = MatchValue = None  # type: ignore
 
 # Pydantic models
 from pydantic import BaseModel, Field
@@ -39,6 +50,10 @@ class HybridSearchEngine:
     """
     
     def __init__(self, qdrant_client: QdrantClient, collection_name: str):
+        if QdrantClient is None:  # pragma: no cover
+            raise ModuleNotFoundError(
+                "qdrant_client is not installed. Install optional dependencies to enable Interview Intelligence."
+            )
         self.qdrant_client = qdrant_client
         self.collection_name = collection_name
         import os
@@ -319,8 +334,13 @@ class CodeExecutionSandbox:
     Validates code solutions and generates test cases
     """
     
-    def __init__(self, judge0_api_key: Optional[str] = None):
+    def __init__(
+        self,
+        judge0_api_key: Optional[str] = None,
+        judge0_rapidapi_host: str = "judge0-ce.p.rapidapi.com",
+    ):
         self.judge0_api_key = judge0_api_key
+        self.judge0_rapidapi_host = (judge0_rapidapi_host or "judge0-ce.p.rapidapi.com").strip() or "judge0-ce.p.rapidapi.com"
         self.judge0_url = "https://judge0-ce.p.rapidapi.com"
         self.piston_url = "https://emkc.org/api/v2/piston"
         
@@ -340,7 +360,10 @@ class CodeExecutionSandbox:
         self,
         code: str,
         language: str,
-        test_cases: Optional[List[Dict]] = None
+        test_cases: Optional[List[Dict]] = None,
+        stdin: str = "",
+        trace: bool = False,
+        trace_max_events: int = 2000,
     ) -> Dict[str, Any]:
         """
         Execute code and return results
@@ -360,18 +383,185 @@ class CodeExecutionSandbox:
                 'test_results': List[Dict]
             }
         """
+
+        lang_norm = (language or "").strip().lower()
+
+        # Tracing modes:
+        # - Python: line-level trace with locals (real visualize)
+        # - Other languages: stdout-based timeline (best-effort visualize)
+        if trace and isinstance(test_cases, list) and test_cases:
+            return {
+                "success": False,
+                "output": "",
+                "error": "Tracing is not supported with test_cases",
+                "execution_time": 0,
+                "memory_used": 0,
+                "status": "Unsupported",
+            }
         
+        # If test cases provided, run each case and aggregate a stable result.
+        if isinstance(test_cases, list) and test_cases:
+            results: List[Dict[str, Any]] = []
+            all_passed = True
+            last_meta: Dict[str, Any] = {}
+            for tc in test_cases[:10]:  # hard cap to avoid abuse
+                tc_in = str((tc or {}).get("input", ""))
+                expected = str((tc or {}).get("expected_output", (tc or {}).get("expected", "")))
+
+                single = await self.execute_code(
+                    code,
+                    language,
+                    test_cases=None,
+                    stdin=tc_in,
+                    trace=False,
+                    trace_max_events=trace_max_events,
+                )
+                actual = str(single.get("output") or "")
+                passed = (actual.strip() == expected.strip()) if expected is not None else bool(single.get("success"))
+                all_passed = all_passed and bool(passed)
+
+                results.append(
+                    {
+                        "input": tc_in,
+                        "expected_output": expected,
+                        "actual_output": actual,
+                        "passed": bool(passed),
+                        "error": single.get("error") or "",
+                    }
+                )
+                last_meta = single
+
+            return {
+                "success": bool(all_passed),
+                "output": str(last_meta.get("output") or ""),
+                "error": str(last_meta.get("error") or ""),
+                "execution_time": last_meta.get("execution_time", 0),
+                "memory_used": last_meta.get("memory_used", 0),
+                "status": last_meta.get("status"),
+                "test_results": results,
+            }
+
+        # If trace is requested, instrument Python code to emit trace events.
+        if trace and lang_norm == "python":
+            try:
+                trace_max = int(trace_max_events)
+            except Exception:
+                trace_max = 2000
+            trace_max = max(1, min(10000, trace_max))
+            code = self._wrap_python_with_trace(code, trace_max_events=trace_max)
+
         # Try Judge0 first (more features), fallback to Piston
         if self.judge0_api_key:
-            return await self._execute_judge0(code, language, test_cases)
+            result = await self._execute_judge0(code, language, test_cases, stdin=stdin)
         else:
-            return await self._execute_piston(code, language, test_cases)
+            result = await self._execute_piston(code, language, test_cases, stdin=stdin)
+
+        if trace and lang_norm == "python":
+            cleaned_out, trace_events = self._extract_trace_events(str(result.get("output") or ""))
+            result["output"] = cleaned_out
+            result["trace_events"] = trace_events
+        elif trace:
+            # Fallback: create a "timeline" from stdout lines for any language.
+            try:
+                max_events = int(trace_max_events)
+            except Exception:
+                max_events = 2000
+            max_events = max(1, min(10000, max_events))
+            out = str(result.get("output") or "")
+            lines = out.splitlines()
+            trace_events: list[dict[str, Any]] = []
+            for i, line in enumerate(lines[:max_events], start=1):
+                trace_events.append({"step": i, "line": 0, "event": "stdout", "locals": None})
+            result["trace_events"] = trace_events
+        return result
+
+    @staticmethod
+    def _wrap_python_with_trace(user_code: str, trace_max_events: int = 2000) -> str:
+        # Emit a unique marker so the backend can extract trace JSON from stdout.
+        marker = "__STRATAX_TRACE_EVENTS__="
+        # Use exec(user_code, g, g) so the user's globals behave normally.
+        # Capture only line events to keep payload manageable.
+        return f"""
+import sys, json, traceback
+
+_STRATAX_TRACE_MAX = {int(trace_max_events)}
+_STRATAX_TRACE = []
+_STRATAX_USER_FILENAME = '__stratax_user_code__'
+
+def _stratax_safe_val(v):
+    try:
+        s = repr(v)
+    except Exception:
+        s = '<unrepr>'
+    if len(s) > 200:
+        s = s[:200] + '...'
+    return s
+
+def _stratax_tracer(frame, event, arg):
+    if event != 'line':
+        return _stratax_tracer
+    try:
+        if getattr(frame.f_code, 'co_filename', None) != _STRATAX_USER_FILENAME:
+            return _stratax_tracer
+    except Exception:
+        return _stratax_tracer
+    if len(_STRATAX_TRACE) >= _STRATAX_TRACE_MAX:
+        raise SystemExit('trace_max_events')
+    try:
+        locs = frame.f_locals or {{}}
+        locs_s = {{k: _stratax_safe_val(v) for k, v in list(locs.items())[:40]}}
+        _STRATAX_TRACE.append({{
+            'step': len(_STRATAX_TRACE) + 1,
+            'line': int(getattr(frame, 'f_lineno', 0) or 0),
+            'event': 'line',
+            'locals': locs_s,
+        }})
+    except Exception:
+        pass
+    return _stratax_tracer
+
+sys.settrace(_stratax_tracer)
+_g = {{'__name__': '__main__'}}
+try:
+    _code = compile({user_code!r}, _STRATAX_USER_FILENAME, 'exec')
+    exec(_code, _g, _g)
+except SystemExit:
+    pass
+except Exception:
+    traceback.print_exc()
+finally:
+    sys.settrace(None)
+    try:
+        print('{marker}' + json.dumps(_STRATAX_TRACE, ensure_ascii=True))
+    except Exception:
+        print('{marker}[]')
+"""
+
+    @staticmethod
+    def _extract_trace_events(stdout: str) -> tuple[str, list[dict[str, Any]]]:
+        marker = "__STRATAX_TRACE_EVENTS__="
+        if not stdout or marker not in stdout:
+            return stdout, []
+
+        # Take the last marker occurrence to be robust against user prints.
+        before, _, after = stdout.rpartition(marker)
+        trace_json = after.strip()
+        cleaned = before.rstrip("\n") + ("\n" if before.endswith("\n") else "")
+
+        try:
+            data = json.loads(trace_json)
+            if isinstance(data, list):
+                return cleaned, data
+        except Exception:
+            pass
+        return cleaned, []
     
     async def _execute_judge0(
         self,
         code: str,
         language: str,
-        test_cases: Optional[List[Dict]]
+        test_cases: Optional[List[Dict]],
+        stdin: str = "",
     ) -> Dict[str, Any]:
         """Execute using Judge0 API (paid but better)"""
         
@@ -384,23 +574,54 @@ class CodeExecutionSandbox:
                     f"{self.judge0_url}/submissions",
                     headers={
                         "X-RapidAPI-Key": self.judge0_api_key,
-                        "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
+                        "X-RapidAPI-Host": self.judge0_rapidapi_host,
                         "Content-Type": "application/json"
                     },
                     json={
                         "source_code": code,
                         "language_id": language_id,
-                        "stdin": "",
+                        "stdin": stdin or "",
                         "cpu_time_limit": 2,
                         "memory_limit": 128000
                     },
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as response:
                     if response.status != 201:
-                        return {'success': False, 'error': f'Submission failed: {response.status}'}
-                    
+                        body = ""
+                        try:
+                            body = await response.text()
+                        except Exception:
+                            body = ""
+                        body = (body or "").strip()
+                        if len(body) > 500:
+                            body = body[:500] + "…"
+                        return {
+                            'success': False,
+                            'output': '',
+                            'error': f'Submission failed: {response.status}' + (f' {body}' if body else ''),
+                            'execution_time': 0,
+                            'memory_used': 0,
+                            'status': 'Submission Failed',
+                        }
+
                     data = await response.json()
                     token = data.get('token')
+                    if not token:
+                        preview = ""
+                        try:
+                            preview = json.dumps(data, ensure_ascii=False)
+                        except Exception:
+                            preview = str(data)
+                        if len(preview) > 500:
+                            preview = preview[:500] + "…"
+                        return {
+                            'success': False,
+                            'output': '',
+                            'error': f'Judge0 did not return a token. Response: {preview}',
+                            'execution_time': 0,
+                            'memory_used': 0,
+                            'status': 'Bad Response',
+                        }
                 
                 # Wait for result (poll)
                 for _ in range(10):  # Max 10 attempts
@@ -410,13 +631,50 @@ class CodeExecutionSandbox:
                         f"{self.judge0_url}/submissions/{token}",
                         headers={
                             "X-RapidAPI-Key": self.judge0_api_key,
-                            "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com"
+                            "X-RapidAPI-Host": self.judge0_rapidapi_host
                         },
                         timeout=aiohttp.ClientTimeout(total=5)
                     ) as response:
+                        if response.status != 200:
+                            body = ""
+                            try:
+                                body = await response.text()
+                            except Exception:
+                                body = ""
+                            body = (body or "").strip()
+                            if len(body) > 500:
+                                body = body[:500] + "…"
+                            return {
+                                'success': False,
+                                'output': '',
+                                'error': f'Judge0 polling failed: {response.status}' + (f' {body}' if body else ''),
+                                'execution_time': 0,
+                                'memory_used': 0,
+                                'status': 'Polling Failed',
+                            }
+
                         result = await response.json()
-                        
-                        status = result.get('status', {}).get('description')
+
+                        status = (result.get('status') or {}).get('description')
+                        # Some RapidAPI/Judge0 error responses don't include `status`.
+                        if not status:
+                            msg = result.get('message') or result.get('error') or result.get('detail')
+                            preview = ""
+                            try:
+                                preview = json.dumps(result, ensure_ascii=False)
+                            except Exception:
+                                preview = str(result)
+                            if len(preview) > 500:
+                                preview = preview[:500] + "…"
+                            return {
+                                'success': False,
+                                'output': '',
+                                'error': str(msg) if msg else f'Judge0 unexpected response: {preview}',
+                                'execution_time': result.get('time', 0) or 0,
+                                'memory_used': result.get('memory', 0) or 0,
+                                'status': 'Bad Response',
+                            }
+
                         if status not in ['In Queue', 'Processing']:
                             # Execution complete
                             return {
@@ -428,17 +686,33 @@ class CodeExecutionSandbox:
                                 'status': status
                             }
                 
-                return {'success': False, 'error': 'Execution timeout'}
+                return {
+                    'success': False,
+                    'output': '',
+                    'error': 'Execution timeout',
+                    'execution_time': 0,
+                    'memory_used': 0,
+                    'status': 'Timeout',
+                }
         
         except Exception as e:
             logger.error(f"Judge0 execution failed: {e}")
-            return {'success': False, 'error': str(e)}
+            msg = str(e) or e.__class__.__name__
+            return {
+                'success': False,
+                'output': '',
+                'error': msg,
+                'execution_time': 0,
+                'memory_used': 0,
+                'status': 'Error',
+            }
     
     async def _execute_piston(
         self,
         code: str,
         language: str,
-        test_cases: Optional[List[Dict]]
+        test_cases: Optional[List[Dict]],
+        stdin: str = "",
     ) -> Dict[str, Any]:
         """Execute using Piston API (free but basic)"""
         
@@ -450,7 +724,7 @@ class CodeExecutionSandbox:
                         "language": language.lower(),
                         "version": "*",
                         "files": [{"content": code}],
-                        "stdin": "",
+                        "stdin": stdin or "",
                         "args": []
                     },
                     timeout=aiohttp.ClientTimeout(total=10)

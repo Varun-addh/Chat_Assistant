@@ -4,6 +4,7 @@ Usage tracking utilities for billing and analytics
 from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.models import UsageRecord, SessionRecord, User
 import logging
 
@@ -77,21 +78,73 @@ def track_session(
         session_type: Type of session (qa, mock_interview, practice_mode)
     """
     try:
+        now = datetime.now(timezone.utc)
+
+        # Idempotency: if the session already exists (e.g. retry, refresh, race),
+        # update activity instead of failing on UNIQUE constraint.
+        existing = db.get(SessionRecord, session_id)
+        if existing is not None:
+            existing.last_activity = now
+            existing.is_active = True
+            # Keep metadata in sync (best-effort; avoid surprising flips)
+            if existing.session_type != session_type:
+                existing.session_type = session_type
+            if existing.user_id != user.id:
+                existing.user_id = user.id
+            db.commit()
+            logger.debug(
+                "📊 Session updated: user=%s, session=%s, type=%s",
+                user.id,
+                session_id,
+                session_type,
+            )
+            return
+
         record = SessionRecord(
             id=session_id,
             user_id=user.id,
             session_type=session_type,
             question_count=0,
             is_active=True,
-            created_at=datetime.now(timezone.utc),
-            last_activity=datetime.now(timezone.utc)
+            created_at=now,
+            last_activity=now,
         )
         
         db.add(record)
         db.commit()
         
         logger.debug(f"📊 Session tracked: user={user.id}, session={session_id}, type={session_type}")
-    
+
+    except IntegrityError:
+        # Handle race: another request inserted the same session_id between our
+        # existence check and insert.
+        db.rollback()
+        try:
+            now = datetime.now(timezone.utc)
+            existing = db.get(SessionRecord, session_id)
+            if existing is not None:
+                existing.last_activity = now
+                existing.is_active = True
+                if existing.session_type != session_type:
+                    existing.session_type = session_type
+                if existing.user_id != user.id:
+                    existing.user_id = user.id
+                db.commit()
+                logger.debug(
+                    "📊 Session updated after race: user=%s, session=%s, type=%s",
+                    user.id,
+                    session_id,
+                    session_type,
+                )
+                return
+        except Exception:
+            db.rollback()
+        logger.warning(
+            "Session tracking ignored duplicate session_id=%s (user=%s)",
+            session_id,
+            user.id,
+        )
+
     except Exception as e:
         logger.error(f"❌ Failed to track session: {e}")
         db.rollback()

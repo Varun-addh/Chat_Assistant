@@ -972,6 +972,7 @@ async def submit_code(
 @router.post("/interview/acknowledge-feedback", response_model=NextQuestionResponse)
 async def acknowledge_feedback(
     payload: AcknowledgeFeedbackRequest,
+    background_tasks: BackgroundTasks,
     http_request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
@@ -1030,6 +1031,14 @@ async def acknowledge_feedback(
             # Interview finished
             response.evaluation_report = result.get("evaluation_report")
             logger.info(f"✅ Interview complete for session {payload.session_id}")
+
+            # Flagship loop: persist completed attempt for progress/trends (best-effort)
+            if bool(result.get("evaluation_report")):
+                background_tasks.add_task(
+                    _persist_completed_practice_attempt,
+                    user_id=user_id,
+                    session_id=payload.session_id,
+                )
         else:
             # Next question available
             response.next_question = result["next_question"]

@@ -11,6 +11,7 @@ from app.routers.diagrams import router as diagrams_router
 from app.routers.evaluate import router as evaluate_router
 from app.routers.history import router as history_router
 from app.routers.auth_routes import router as auth_router
+from app.routers.code_execution import router as code_execution_router
 from app.utils.audit import auditor
 from app.services.chat.llm_service import llm_service
 import logging
@@ -245,6 +246,7 @@ app.include_router(history_router, prefix="/api/history", tags=["history"])
 app.include_router(questions_router, prefix="/api", tags=["questions"])
 app.include_router(diagrams_router, prefix="/api", tags=["diagrams"])
 app.include_router(evaluate_router, prefix="/api", tags=["evaluation"]) 
+app.include_router(code_execution_router)
 if INTERVIEW_INTELLIGENCE_AVAILABLE and interview_intelligence is not None:
     app.include_router(interview_intelligence, prefix="/api/intelligence", tags=["interview-intelligence"])
 app.include_router(ws_router, tags=["realtime"]) 

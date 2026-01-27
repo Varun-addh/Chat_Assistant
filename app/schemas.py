@@ -672,6 +672,53 @@ class SubmitCodeResponse(BaseModel):
 	requires_acknowledgment: bool = Field(default=True, description="User must acknowledge feedback")
 
 
+# ------------------------------ Code execution (backend) ------------------------------
+class CodeExecutionTestCase(BaseModel):
+	input: str = Field(default="", description="stdin input")
+	expected_output: Optional[str] = Field(default=None, description="expected stdout for pass/fail (optional)")
+
+
+class CodeExecutionIn(BaseModel):
+	language: str = Field(..., min_length=1, max_length=32)
+	code: str = Field(..., min_length=1, max_length=20000)
+	stdin: Optional[str] = Field(default="", max_length=8000)
+	test_cases: Optional[List[CodeExecutionTestCase]] = Field(default=None, description="Optional test cases")
+	trace: bool = Field(default=False, description="If true, return step-by-step trace events (Python only)")
+	trace_max_events: int = Field(
+		default=2000,
+		ge=1,
+		le=10000,
+		description="Max trace events to return when trace=true (Python only)",
+	)
+	store_code: bool = Field(default=False, description="If true, allow storing code in telemetry (not recommended)")
+
+
+class CodeExecutionTraceEvent(BaseModel):
+	step: int
+	line: int
+	event: str = Field(default="line")
+	locals: Optional[Dict[str, str]] = None
+
+
+class CodeExecutionTestResult(BaseModel):
+	input: str
+	expected_output: Optional[str] = None
+	actual_output: Optional[str] = None
+	passed: bool
+	error: Optional[str] = None
+
+
+class CodeExecutionOut(BaseModel):
+	success: bool
+	status: Optional[str] = None
+	stdout: str = ""
+	stderr: str = ""
+	time_seconds: Optional[float] = None
+	memory_kb: Optional[int] = None
+	test_results: Optional[List[CodeExecutionTestResult]] = None
+	trace_events: Optional[List[CodeExecutionTraceEvent]] = None
+
+
 # Configuration Models for Practice Mode
 class TTSConfig(BaseModel):
 	"""TTS service configuration."""
