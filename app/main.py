@@ -12,6 +12,7 @@ from app.routers.evaluate import router as evaluate_router
 from app.routers.history import router as history_router
 from app.routers.auth_routes import router as auth_router
 from app.routers.code_execution import router as code_execution_router
+from app.routers.health import router as health_router
 from app.utils.audit import auditor
 from app.services.chat.llm_service import llm_service
 import logging
@@ -66,6 +67,13 @@ from app.config_practice_mode import get_practice_config
 
 configure_logging()
 auditor.configure(settings.analytics_path)
+
+# Initialize Sentry for production error tracking
+try:
+    from app.utils.sentry import init_sentry
+    init_sentry()
+except Exception as e:
+    logger.warning(f"Sentry initialization failed: {e}")
 
 # Startup banner
 logger = logging.getLogger(__name__)
@@ -217,10 +225,12 @@ app.middleware("http")(rate_limit_middleware)
 
 @app.get("/health")
 async def health() -> JSONResponse:
+	"""Legacy health endpoint - redirects to /health for backwards compatibility."""
 	return JSONResponse({
 		"status": "ok",
 		"version": app.version,
-		"llm": {"provider": settings.llm_provider, "enabled": llm_service.enabled}
+		"llm": {"provider": settings.llm_provider, "enabled": llm_service.enabled},
+		"message": "Use /health for comprehensive health checks"
 	})
 
 @app.get("/api/identity-check")
@@ -241,6 +251,7 @@ async def identity_check() -> JSONResponse:
 	})
 
 # Routers
+app.include_router(health_router)  # Health checks (no prefix - accessible at /health/*)
 app.include_router(auth_router)  # Authentication routes (register, login, etc.)
 app.include_router(history_router, prefix="/api/history", tags=["history"])
 app.include_router(questions_router, prefix="/api", tags=["questions"])

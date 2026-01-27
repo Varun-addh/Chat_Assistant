@@ -16,7 +16,10 @@ services:
       # Prefer local Kroki renderer if available (avoids relying on external services)
       - KROKI_URL=http://kroki:8000/mermaid/svg
       # Default to Postgres when running under docker-compose (override in .env if needed)
-      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://stratax:stratax@postgres:5432/stratax}
+      # IMPORTANT: we intentionally do NOT read DATABASE_URL from .env here because
+      # .env is typically SQLite for local dev. Use DATABASE_URL_DOCKER if you need
+      # to override the compose default.
+      - DATABASE_URL=${DATABASE_URL_DOCKER:-postgresql+psycopg://stratax:stratax@postgres:5432/stratax}
       # Use Qdrant as a service (fixes local file-lock issues and enables multi-worker)
       - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       # Redis (distributed rate limiting + shared caches)
@@ -58,7 +61,8 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-stratax}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-stratax}
     ports:
-      - "5432:5432"
+      # Use 5433 on host to avoid clashing with a local Postgres install.
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 

@@ -7,13 +7,25 @@ from sqlalchemy.pool import StaticPool
 from contextlib import contextmanager
 from typing import Generator
 from app.models import Base
+from app.config import settings
 import logging
 import os
 
 logger = logging.getLogger(__name__)
 
-# Database URL (SQLite for now, easy to upgrade to PostgreSQL)
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/stratax.db")
+# Database URL
+# NOTE: Prefer settings so env-file layering and aliases are respected.
+DATABASE_URL = (settings.database_url or "sqlite:///./data/stratax.db").strip()
+
+# Normalize Postgres URL to psycopg3 driver if user provided a bare scheme.
+# Many setups use psycopg3 (psycopg) but SQLAlchemy defaults to psycopg2 for
+# "postgresql://" unless a driver is specified.
+if DATABASE_URL.startswith("postgresql://") and "+" not in DATABASE_URL.split("://", 1)[0]:
+    logger.warning(
+        "DATABASE_URL uses 'postgresql://' without an explicit driver; "
+        "using psycopg3 by rewriting to 'postgresql+psycopg://'."
+    )
+    DATABASE_URL = "postgresql+psycopg://" + DATABASE_URL.removeprefix("postgresql://")
 
 # Create engine
 if DATABASE_URL.startswith("sqlite"):
@@ -57,7 +69,10 @@ def init_db():
                 # Create a unique index to enforce uniqueness when google_id is present.
                 conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_id ON users (google_id)"))
                 conn.commit()
-        logger.info(f"✅ Database initialized: {DATABASE_URL}")
+        logger.info("✅ Database initialized: %s", DATABASE_URL)
+        env = (getattr(settings, "app_env", "development") or "development").strip().lower()
+        if env in {"production", "prod"} and DATABASE_URL.startswith("sqlite"):
+            logger.warning("⚠️  Running SQLite in production environment (%s). Use Postgres for concurrency.", env)
     except Exception as e:
         logger.error(f"❌ Failed to initialize database: {e}")
         raise

@@ -62,6 +62,16 @@ class Settings(BaseSettings):
 		default=None,
 		validation_alias=AliasChoices("STRATAX_SECRETS_ENCRYPTION_KEY", "SECRETS_ENCRYPTION_KEY"),
 	)
+	
+	# Sentry error tracking (production only)
+	sentry_dsn: str | None = Field(default=None, validation_alias="SENTRY_DSN")
+	app_version: str = Field(default="1.0.0", validation_alias="APP_VERSION")
+	
+	# Database
+	database_url: str = Field(
+		default="sqlite:///./data/stratax.db",
+		validation_alias=AliasChoices("DATABASE_URL", "STRATAX_DATABASE_URL")
+	)
 
 	@model_validator(mode="after")
 	def _require_persistent_secrets_in_production(self):
@@ -78,14 +88,31 @@ class Settings(BaseSettings):
 	@field_validator("jwt_secret_key", mode="before")
 	@classmethod
 	def _default_jwt_secret_key(cls, v):
+		# ONLY auto-generate in dev/test environments
+		env = os.getenv("APP_ENV", "development").strip().lower()
 		if v is None or (isinstance(v, str) and not v.strip()):
+			if env in ("production", "staging"):
+				# Force explicit configuration in production
+				raise ValueError(
+					"JWT_SECRET_KEY must be explicitly set in production/staging. "
+					"Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+				)
+			# Dev/test convenience - warn about ephemeral secret
+			print("⚠️  WARNING: Using auto-generated JWT secret (dev only). Tokens will be invalid after restart.")
 			return secrets.token_urlsafe(32)
 		return v
 
 	@field_validator("cookie_secret", mode="before")
 	@classmethod
 	def _default_cookie_secret(cls, v):
+		env = os.getenv("APP_ENV", "development").strip().lower()
 		if v is None or (isinstance(v, str) and not v.strip()):
+			if env in ("production", "staging"):
+				raise ValueError(
+					"COOKIE_SECRET must be explicitly set in production/staging. "
+					"Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+				)
+			print("⚠️  WARNING: Using auto-generated cookie secret (dev only). Sessions will be invalid after restart.")
 			return secrets.token_urlsafe(32)
 		return v
 

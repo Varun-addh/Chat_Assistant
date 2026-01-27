@@ -37,6 +37,13 @@ Quickstart (development)
   - `qdrant` (vector DB as a service; required for multi-worker)
   - `kroki` (local Mermaid renderer)
 
+Database note (why you might still see SQLite)
+
+- Your local `.env` often sets `DATABASE_URL=sqlite:///...` for non-docker runs.
+- `docker-compose.yml` now defaults the container to Postgres regardless.
+- If you need to override inside compose, set `DATABASE_URL_DOCKER` (recommended) instead of `DATABASE_URL`.
+  You can put it in a local `.env.docker` file based on `.env.docker.example`.
+
   After startup, the API will be available at:
   - http://localhost:7860
 

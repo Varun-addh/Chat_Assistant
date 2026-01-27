@@ -40,6 +40,8 @@ python-jose[cryptography]>=3.3.0
 # passlib 1.7.x expects bcrypt.__about__.__version__ which was removed in newer bcrypt versions.
 # Pin bcrypt to a compatible release to avoid trapped warnings and hashing edge-case failures.
 bcrypt==4.0.1
+# Production error tracking
+sentry-sdk[fastapi]>=1.40.0
 
 # Database
 sqlalchemy>=2.0.0
