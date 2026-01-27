@@ -1664,6 +1664,16 @@ async def get_session_chat(session_id: str, request: Request, response: Response
 	try:
 		state = await manager.get_required(session_id)
 	except KeyError:
+		# UX guard: some frontends generate a UUID client-side and navigate directly to
+		# /api/session/{id}/chat before calling POST /api/session.
+		# For guests, it's safe to auto-create an empty session so the UI doesn't break.
+		if user_id.startswith("guest_") or user_id == "guest_unknown":
+			state = await manager.ensure_session(session_id)
+			response.headers["X-Stratax-Session-AutoCreated"] = "1"
+			# Continue to build response below
+		else:
+			# For authenticated users, keep strict behavior to avoid silent session-spam.
+			raise
 		# Backward compatibility: earlier builds stored guest sessions under "guest_unknown".
 		# After introducing stable guest IDs (guest_<hash>), old tabs may still hold a legacy
 		# session_id. For guests only, try loading from legacy bucket and migrate forward.

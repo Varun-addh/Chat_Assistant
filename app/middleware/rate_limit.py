@@ -398,6 +398,9 @@ async def rate_limit_middleware(request: Request, call_next):
         "/api/render_mermaid",
         "/api/sessions",
         "/api/session",
+        # Mock interview history reads are cheap and are frequently polled by UI.
+        # Do not meter these under demo/mock-interview quotas.
+        "/api/mock-interview/history",
         # Practice Mode dashboard endpoints are cheap DB reads and are frequently polled by UI.
         # Never rate-limit these, especially for demo users.
         "/api/practice/progress",
