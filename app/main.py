@@ -223,15 +223,17 @@ from app.middleware.rate_limit import rate_limit_middleware
 app.middleware("http")(rate_limit_middleware)
 
 
-@app.get("/health")
-async def health() -> JSONResponse:
-	"""Legacy health endpoint - redirects to /health for backwards compatibility."""
-	return JSONResponse({
-		"status": "ok",
-		"version": app.version,
-		"llm": {"provider": settings.llm_provider, "enabled": llm_service.enabled},
-		"message": "Use /health for comprehensive health checks"
-	})
+@app.get("/health/simple")
+async def health_simple() -> JSONResponse:
+    """Lightweight health endpoint.
+
+    The comprehensive health checks live in the health router at `GET /health`.
+    """
+    return JSONResponse({
+        "status": "ok",
+        "version": app.version,
+        "llm": {"provider": settings.llm_provider, "enabled": llm_service.enabled},
+    })
 
 @app.get("/api/identity-check")
 async def identity_check() -> JSONResponse:

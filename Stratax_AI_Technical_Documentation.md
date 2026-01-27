@@ -48,10 +48,10 @@ Stratax AI addresses these challenges through a multi-layered backend architectu
 
 ## Technology Foundation
 
-**Runtime:** Python 3.12 + FastAPI + Starlette  
+**Runtime:** Python 3.11+ + FastAPI + Starlette  
 **AI/ML:** Groq SDK, Google Generative AI, sentence-transformers, faster-whisper  
-**Storage:** SQLite (`data/stratax.db`) for structured records (users/usage/rate limits/telemetry), Qdrant vector DB for semantic retrieval, plus file-based JSON/JSONL persistence for sessions/audit logs  
-**Deployment:** Docker containerization with docker-compose orchestration  
+**Storage:** SQL DB via `DATABASE_URL` (SQLite or Postgres) for structured records (users/usage/rate limits/telemetry), Qdrant vector DB for semantic retrieval, plus file-based JSON/JSONL persistence for sessions/audit logs  
+**Deployment:** Docker containerization with docker-compose orchestration (defaults to Postgres + Qdrant + Redis)  
 **Audio:** librosa, soundfile, pyttsx3, gTTS
 
 ## Target Users
@@ -107,7 +107,7 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 
 ### CI (GitHub Actions)
 
-- Added `.github/workflows/ci.yml` to run `pytest -q` on push/PR.
+- `.github/workflows/ci.yml` runs tests on push/PR (Python 3.11/3.12 matrix), produces coverage, and runs lint/format/security checks.
 - CI sets safe flags (`FAST_STARTUP=true`, `DISABLE_INTERVIEW_INTELLIGENCE=true`, `ENABLE_CODE_EXECUTION=false`) and uses fixed test secrets.
 
 ### Service Architecture
@@ -115,7 +115,7 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 The system is designed as a **monolithic FastAPI service** with optional modular components:
 
 - **Always Available:** Q&A engine, session management, health endpoints
-- **New:** Auth subsystem (JWT + optional Google OAuth) backed by SQLite (`data/stratax.db`)
+- **New:** Auth subsystem (JWT + optional Google OAuth) backed by the configured SQL DB (`DATABASE_URL`; SQLite or Postgres)
 - **New:** Tier-based rate limiting middleware (plus demo-mode quotas + debug headers)
 - **Optional Components:**
   - Interview Intelligence (requires Qdrant and sentence-transformers)
@@ -125,7 +125,7 @@ The system is designed as a **monolithic FastAPI service** with optional modular
 ### Deployment Model
 
 **Single Service Container** running on port 7860 with:
-- Single worker process (Qdrant lock constraint)
+- Worker count controlled by `UVICORN_WORKERS` (defaults to 1 in Dockerfile; docker-compose uses 2)
 - Lifespan-managed initialization of shared components
 - File-system persistence for sessions and vector indices
 - Optional Kroki sidecar for Mermaid rendering
@@ -849,36 +849,41 @@ When enabled (`settings.analytics_path`), the system logs:
 
 ### Container Architecture
 
-**Base Image:** `python:3.12-slim`  
+**Base Image:** `python:3.11-slim`  
 **Exposed Port:** 7860  
-**Entry Command:** `uvicorn app.main:app --host 0.0.0.0 --port 7860 --workers 1`
+**Entry Command:** `uvicorn app.main:app --host 0.0.0.0 --port 7860 --workers ${UVICORN_WORKERS}`
 
-**Why Single Worker?**  
-Qdrant local file lock prevents multi-process access. Mitigation: Shared Qdrant client initialized in `lifespan` startup.
+**Worker Notes**  
+- Single-worker is safest when using a file-backed local Qdrant store.
+- With docker-compose (Qdrant runs as a separate service), multi-worker is supported.
 
 ### Health Check
 
-The container exposes a health endpoint:
+The container exposes operational health endpoints:
 
 ```bash
 GET /health
+GET /health/ready
+GET /health/live
 ```
 
-**Response:**
+**Response (example shape):**
 ```json
 {
-    "status": "ok",
-    "version": "0.1.0",
-    "llm": {"provider": "gemini", "enabled": true}
+    "status": "healthy",
+    "timestamp": "2026-01-01T00:00:00.000000",
+    "app_name": "...",
+    "environment": "...",
+    "version": "1.0.0",
+    "checks": {
+        "database": {"status": "healthy", "latency_ms": 12.34},
+        "llm_service": {"status": "configured", "provider": "gemini"},
+        "vector_db": {"status": "disabled"}
+    }
 }
 ```
 
-**Known Issue:** `docker-compose.yml` healthcheck currently targets port **8000** instead of **7860**. Fix:
-
-```yaml
-healthcheck:
-  test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
-```
+Note: a lightweight legacy endpoint is also available at `GET /health/simple`.
 
 ### Volume Mounts
 
@@ -905,13 +910,32 @@ services:
       - "7860:7860"
     environment:
       - KROKI_URL=http://kroki:8000/mermaid/svg
-    depends_on:
-      - kroki
+            - DATABASE_URL=postgresql+psycopg://...  # docker-compose defaults to Postgres unless overridden
+        depends_on:
+            - postgres
+            - qdrant
+            - redis
+            - kroki
 
   kroki:
     image: yuzutech/kroki
     ports:
       - "8000:8000"
+
+    postgres:
+        image: postgres:16
+        ports:
+            - "5433:5432"
+
+    qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+            - "6333:6333"
+
+    redis:
+        image: redis:7-alpine
+        ports:
+            - "6379:6379"
 ```
 
 **Kroki Integration:** Optional Mermaid diagram rendering service. If unavailable, diagrams return text-only Mermaid syntax.
@@ -1149,21 +1173,7 @@ vectors_config = VectorParams(
 
 ### 1. Port Mismatch in Docker Healthcheck
 
-**Issue:** `docker-compose.yml` healthcheck requests `http://localhost:8000/health`, but application runs on port **7860**.
-
-**Impact:** Containers marked as "unhealthy" despite functioning correctly.
-
-**Fix:**
-```yaml
-# docker-compose.yml
-healthcheck:
-  test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
-  interval: 30s
-  timeout: 10s
-  retries: 3
-```
-
-**Priority:** High — Affects monitoring and orchestration.
+**Status:** Resolved — `docker-compose.yml` healthcheck targets `http://localhost:7860/health`.
 
 ---
 

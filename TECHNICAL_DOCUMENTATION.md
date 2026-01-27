@@ -66,7 +66,7 @@ The backend provides a FastAPI service for an “AI Interview Assistant” with:
 The application entrypoint is `app/main.py`.
 
 - FastAPI app is created with a `lifespan` manager that initializes:
-  - SQLite database tables (and lightweight SQLite migration for OAuth column/index)
+  - Database tables via SQLAlchemy (SQLite or Postgres depending on `DATABASE_URL`)
   - In-memory rate limiter cleanup loop
   - Interview Intelligence (if optional deps available; guarded on `qdrant_client` import)
   - Mock interview service
@@ -80,7 +80,10 @@ The application entrypoint is `app/main.py`.
   - See: `app/config.py`, `app/main.py`
 
 - Health endpoints:
-  - `GET /health` (returns version + LLM provider + enabled flag)
+  - `GET /health` (comprehensive health: DB + LLM config + vector DB status)
+  - `GET /health/ready` (readiness probe; returns 200 only if DB is reachable)
+  - `GET /health/live` (liveness probe; returns 200 if process is running)
+  - `GET /health/simple` (small legacy shape: version + LLM provider)
   - `GET /api/identity-check` (diagnostic for “identity guard” behavior)
   - `app/main.py`
 
@@ -659,7 +662,7 @@ See: `app/utils/security.py`, `app/routers/ws.py`.
 
 ### User authentication (JWT)
 
-- User accounts are stored in SQLite (`data/stratax.db`).
+- User accounts are stored in the configured SQL DB (`DATABASE_URL`; SQLite or Postgres).
 - JWT bearer auth is used for `/auth/*` protected routes (FastAPI `HTTPBearer`).
 - Google OAuth is supported when `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are configured.
 
@@ -693,27 +696,22 @@ See: `app/main.py`, `app/utils/audit.py`.
 - **Multi-worker scaling**: move file-backed session/history storage to a shared DB/object store and run Qdrant as a separate service (or managed Qdrant) to avoid local file locks.
 - **Production STT**: replace the WebSocket STT stub with a real streaming STT provider (or a faster-whisper streaming adapter) with backpressure + input validation.
 
-1. **Port mismatch in docker-compose healthcheck**
-   - Dockerfile runs the app on port **7860**, but `docker-compose.yml` healthcheck requests `http://localhost:8000/health`.
-   - This will fail healthchecks unless the app is actually listening on 8000.
-   - Evidence: `Dockerfile`, `docker-compose.yml`.
-
-2. **WebSocket STT is currently a stub**
+1. **WebSocket STT is currently a stub**
    - `STTService.stream_transcribe` yields placeholder tokens rather than real transcripts.
    - Evidence: `app/services/stt_service.py`.
 
-3. **Authorization header dual-use can be confusing**
+2. **Authorization header dual-use can be confusing**
   - The API supports both JWT auth and user-supplied LLM keys; some client flows use `Authorization: Bearer ...` for keys.
   - Middleware only attempts JWT decode when the token looks like a JWT (dot-separated); otherwise the request proceeds as guest.
   - Recommendation: separate JWT auth from user-key auth via distinct headers.
   - Evidence: `app/middleware/auth.py`, `app/utils/demo_mode.py`.
 
-4. **Local Qdrant file-lock conflicts are anticipated**
+3. **Local Qdrant file-lock conflicts are anticipated**
    - Interview Intelligence initialization includes explicit handling for “already accessed by another instance”.
    - Lifespan startup attempts to share a single vector client across services to avoid lock conflicts.
    - Evidence: `app/main.py`, `app/services/interview_intelligence_service.py`.
 
-5. **Mixed persistence models**
+4. **Mixed persistence models**
    - Sessions: per-session JSON files per user.
    - Mock interview: one JSON file containing many sessions.
    - History: JSONL-style storage (via HistoryManager).
@@ -1093,8 +1091,10 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 7860
 The repo includes a GitHub Actions workflow that runs the unit test suite on push/PR:
 
 - Workflow: `.github/workflows/ci.yml`
-- Python: 3.12
-- Command: `pytest -q`
+- Python: 3.11 + 3.12 matrix
+- Tests: `pytest` with coverage (`pytest --cov=app ...`)
+- Lint: `ruff check` + `ruff format --check` (non-blocking)
+- Security: `safety` + `bandit` (non-blocking)
 
 To keep CI fast and deterministic, CI sets conservative environment flags:
 
