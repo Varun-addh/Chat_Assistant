@@ -16,11 +16,11 @@
 
 ## Overview
 
-Stratax AI is an advanced AI-powered interview assistant platform that leverages large language models (LLMs), vector databases, and speech processing to provide comprehensive interview preparation and technical evaluation capabilities. The backend service is architected as a modern, scalable FastAPI application that orchestrates multiple AI subsystems to deliver real-time interview coaching, intelligent question generation, and automated code evaluation.
+Stratax AI is an interview simulation and evaluation engine designed to model real interviewer behavior and generate structured, explainable assessment reports. Unlike traditional interview prep platforms focused on question banks or competitive coding, Stratax evaluates reasoning quality, communication clarity, and decision-making at the session level.
 
 ## Problem Statement
 
-Technical interview preparation faces several critical challenges:
+Structured interview simulation and evaluation faces several critical challenges:
 - **Lack of personalized feedback** on communication delivery and technical accuracy
 - **Limited access** to company-specific and domain-targeted interview questions
 - **Insufficient real-time coaching** during practice sessions
@@ -42,7 +42,7 @@ Stratax AI addresses these challenges through a multi-layered backend architectu
 - **Local speech processing** using faster-whisper (STT) and pyttsx3/gTTS (TTS) for offline practice
 - **Hybrid retrieval system** combining BM25 lexical search with semantic vector search via Qdrant
 - **Agent-based architecture** with specialized components for interviewing, evaluation, and speech analytics
-- **Company-specific interview preparation** with targeted question generation
+- **Company-specific interview intelligence** with targeted question generation
 - **Real-time feedback loops** with micro-coaching on delivery metrics (pace, fillers, confidence)
 - **Telemetry-driven personalization** using a structured event stream (privacy-safe stable hashes) and deterministic learning loops for recommended practice focus areas
 
@@ -57,9 +57,64 @@ Stratax AI addresses these challenges through a multi-layered backend architectu
 ## Target Users
 
 - **Engineering Teams** integrating AI interview capabilities into products
-- **Platform Developers** building interview preparation services
+- **Platform Developers** building interview simulation and evaluation services
 - **Technical Architects** evaluating AI-driven coaching systems
 - **DevOps Engineers** deploying and scaling the service
+
+## Who This System Is For (And Who It Is Not)
+
+### Target users
+
+- Hiring teams conducting mock or structured interviews
+- Internal L&D teams evaluating interview readiness
+- Bootcamps and training institutes running interview simulations
+- Recruitment agencies performing candidate screening
+
+### Individual use (students & tech professionals)
+
+Individual candidates (students and working professionals) use Stratax to:
+
+- experience realistic interview simulations
+- practice explaining reasoning, not just coding
+- receive structured feedback similar to real interviews
+- identify gaps in communication, problem-solving, and approach
+
+This individual usage mirrors how the system is used by hiring teams and training programs, making it suitable both for self-directed practice and formal evaluation.
+
+**The same evaluation and reporting pipeline is used for both individual practice and institutional assessment.**
+
+### Non-goals
+
+- Stratax is not a competitive programming platform (e.g., LeetCode)
+- It does not focus on large-scale coding challenge libraries
+- It is not designed for mass B2C, consumer-scale self-serve practice
+
+### Positioning
+
+Stratax is an **Interview Simulation and Evaluation Engine**, focused on:
+
+All subsystems are designed to support a single goal: producing realistic interview simulations and reliable evaluation signals.
+
+While Stratax is used by individual candidates, its evaluation and feedback system improves through aggregated, anonymized practice data rather than static question banks.
+
+- interviewer-style questioning
+- reasoning and explanation quality
+- session-level intelligence
+- structured evaluation reports
+- fairness, consistency, and auditability
+
+## Learning From Individual Interview Practice
+
+Stratax is designed for students and tech professionals preparing for interviews.
+Each practice session generates anonymized behavioral and performance signals such as:
+
+- communication pace and hesitation
+- reasoning depth and follow-up quality
+- confidence self-assessment after interviews
+
+These signals allow Stratax to identify patterns of improvement, common mistakes, and confidence progression across repeated practice sessions.
+
+Over time, this enables more accurate feedback and more realistic interview simulations, even for individual users.
 
 <div style="page-break-after: always;"></div>
 
@@ -226,6 +281,23 @@ graph TB
     style Persist fill:#d1fae5,stroke:#10b981,stroke-width:2px
 ```
 
+## Primary Use Case: Structured Interview Simulation for Hiring
+
+1. An interview session is created.
+2. The candidate completes a simulated interview (questions + follow-ups).
+3. The system captures:
+    - answers
+    - reasoning/explanations
+    - timing (e.g., pace/pauses)
+    - proctoring events (where enabled)
+4. The system produces:
+    - evaluation scores
+    - strengths & gaps
+    - red flags
+    - an interview readiness signal
+
+This mirrors how real interviews are evaluated, not how coding platforms rank users.
+
 ## Request Flow Example: Practice Mode Audio Submission
 
 ```mermaid
@@ -357,7 +429,7 @@ The Practice Mode subsystem implements a multi-agent pattern:
 ## 1. Q&A Engine
 
 ### Purpose
-Conversational AI assistant for technical interview preparation with persistent session context and multi-turn conversation support.
+Conversational AI assistant for interview simulation with persistent session context and multi-turn conversation support.
 
 ### Key Responsibilities
 - Session lifecycle management (create, list, delete, title updates)
@@ -415,7 +487,25 @@ PracticeModeService (Orchestrator)
 ### Differentiators
 - **Local processing:** No cloud STT dependency (faster-whisper runs offline)
 - **Dynamic filler detection:** Not hardcoded lists; detects repetitions, fragments, false starts
-- **Company-specific preparation:** Generates questions tailored to Google, Meta, Amazon, etc.
+- **Company-specific interview intelligence:** Generates questions tailored to Google, Meta, Amazon, etc.
+
+## What Makes This Different
+
+- Session-level evaluation instead of question-level scoring
+- Interviewer-style follow-up logic
+- Feedback is informed by real practice behavior, not just LLM-generated answers
+- Confidence and communication signals are tracked across sessions for the same user
+- LLM-provider-aware evaluation (Groq/Gemini routing)
+- Proctoring signal capture (focus, tab switches, presence)
+- Explainable evaluation output (not just pass/fail)
+
+### Core Differentiation
+
+- Interviewer-style follow-up logic (not static Q&A)
+- Session-level evaluation (not per-question gamification)
+- Explainable scoring (strengths, gaps, red flags)
+- Proctoring signals integrated into evaluation context
+- Same engine used for self-practice and formal assessment
 
 ---
 
@@ -737,7 +827,7 @@ Server validates via `websocket_verify_api_key` function.
 The system extracts `user_id` from multiple sources (priority order):
 
 1. **Header:** `X-User-ID`
-2. **Bearer Token:** Extracted from `Authorization` header (currently used as-is; JWT decode TODO)
+2. **Bearer Token:** Extracted from `Authorization` header (JWT is verified for authenticated routes; legacy/non-auth flows may still treat the token as a caller-provided identifier)
 3. **Query Parameter:** `?user_id=...`
 4. **Cookie:** `user_id` cookie
 
@@ -745,6 +835,11 @@ The system extracts `user_id` from multiple sources (priority order):
 - Session isolation (each user has separate session directory)
 - History segregation
 - Audit logging
+
+### Privacy & Data Use
+
+Practice data is anonymized and used only to improve feedback quality.
+For learning/analytics, the system relies on derived signals; raw audio and direct personal identifiers are not used for learning or analytics.
 
 ## Data Isolation
 
@@ -811,11 +906,11 @@ allow_origins=[
 
 **Recommendation:** For production horizontal scaling, move rate limiting to Redis (or another shared store) and keep the same header contract.
 
-### 3. WebSocket STT is Currently a Stub
+### 3. WebSocket STT is intentionally deferred
 
-**Security Implication:** Placeholder implementation means no actual audio validation.
+**Current State:** The WebSocket STT endpoint exists, but the streaming transcription path is intentionally deferred (not used as the primary production STT).
 
-**Recommendation:** Integrate production STT service with input sanitization.
+**Recommendation:** Practice Mode uses faster-whisper via `LocalSTTService` (production-ready path). If you need WebSocket streaming STT, integrate a real provider (Deepgram/AssemblyAI/etc.) or implement a faster-whisper streaming adapter with backpressure + input validation.
 
 ### 4. API Keys in Configuration
 
@@ -844,6 +939,16 @@ When enabled (`settings.analytics_path`), the system logs:
 <div style="page-break-after: always;"></div>
 
 # Deployment & Operations
+
+## Production Readiness (short)
+
+- Neon Postgres used for production persistence
+- Docker Postgres is dev-only (profile-based)
+- Multi-LLM fallback routing implemented
+- Email verification & password reset enabled
+- Rate limiting & demo gating enforced
+
+Stratax is intentionally not optimized for large-scale competitive coding or leaderboard-driven learning.
 
 ## Docker Configuration
 
@@ -910,9 +1015,10 @@ services:
       - "7860:7860"
     environment:
       - KROKI_URL=http://kroki:8000/mermaid/svg
-            - DATABASE_URL=postgresql+psycopg://...  # docker-compose defaults to Postgres unless overridden
+            # Production: set DATABASE_URL to Neon.
+            # Local (optional): set DATABASE_URL_DOCKER to Postgres and run with `--profile local`.
+            - DATABASE_URL=${DATABASE_URL_DOCKER:-${DATABASE_URL:-postgresql+psycopg://...}}
         depends_on:
-            - postgres
             - qdrant
             - redis
             - kroki
@@ -923,6 +1029,7 @@ services:
       - "8000:8000"
 
     postgres:
+        profiles: ["local"]
         image: postgres:16
         ports:
             - "5433:5432"
@@ -1167,7 +1274,7 @@ vectors_config = VectorParams(
 - **JWT hardening (header separation + consistency)**: keep JWT auth in `Authorization` and move user-provided LLM keys to a dedicated header (to avoid ambiguity); consistently use the JWT `sub` as the canonical user identifier.
 - **Redis rate limiting (distributed quotas)**: enable the existing Redis-backed limiter by setting `REDIS_URL` so quotas are shared across workers/instances and resilient to restarts.
 - **Multi-worker scaling**: migrate file-based persistence to Postgres/object storage and run Qdrant as a separate service/managed instance to avoid file-lock conflicts.
-- **Production STT**: replace the WebSocket STT stub with a real streaming STT provider (Deepgram/AssemblyAI/etc.) or a faster-whisper streaming adapter.
+- **Production STT**: WebSocket STT is intentionally deferred; if you need streaming STT, integrate a real provider (Deepgram/AssemblyAI/etc.) or implement a faster-whisper streaming adapter.
 
 ## Critical Issues
 
@@ -1177,44 +1284,29 @@ vectors_config = VectorParams(
 
 ---
 
-### 2. WebSocket STT is a Stub Implementation
+### 2. WebSocket STT is intentionally deferred
 
-**Issue:** `STTService.stream_transcribe()` yields placeholder tokens (`"..."` or `"(audio)"`) rather than real transcriptions.
+**Status:** WebSocket STT is intentionally deferred; Practice Mode uses faster-whisper (production-ready).
 
-**Impact:** WebSocket endpoint non-functional for production use.
+**Current Behavior:** `STTService.stream_transcribe()` yields placeholder tokens (`"..."` or `"(audio)"`) rather than real transcriptions.
 
-**Workaround:** Practice Mode uses `LocalSTTService` (faster-whisper) which **is** functional.
+**Impact:** The WebSocket STT endpoint is not intended for production streaming transcription.
 
-**Recommendation:** Integrate production STT service (e.g., Deepgram, AssemblyAI) or finalize faster-whisper streaming adapter.
+**Recommendation:** Keep WebSocket STT disabled/unused in production until a real streaming STT provider (Deepgram/AssemblyAI/etc.) or a faster-whisper streaming adapter is implemented.
 
 **Priority:** Medium — Practice Mode unaffected; only impacts WebSocket-based UX.
 
 ---
 
-### 3. JWT Verification Not Implemented
+### 3. JWT verification is implemented (with legacy identity fallbacks)
 
-**Issue:** Bearer token from `Authorization` header is used directly as `user_id` without signature verification.
+**Current State (as implemented):** JWT verification is implemented for authenticated routes via `app/auth.py` (FastAPI `HTTPBearer` + JWT decode).
 
-**Security Risk:** Token forgery allowing unauthorized access.
+**Important nuance:** A legacy/convenience `user_id` extraction path still exists for non-auth / demo / guest flows, where request identity may be derived from headers/cookies/query params.
 
-**Implementation Needed:**
-```python
-import jwt
-from app.config import settings
+**Risk:** In multi-tenant deployments, treating an unverified bearer token (or other caller-controlled identifier) as a stable `user_id` in non-auth flows can allow spoofing.
 
-def verify_jwt_token(token: str) -> str:
-    try:
-        payload = jwt.decode(
-            token, 
-            settings.jwt_secret, 
-            algorithms=["HS256"]
-        )
-        return payload["sub"]  # user_id
-    except jwt.InvalidTokenError:
-        raise HTTPException(401, "Invalid token")
-```
-
-**Priority:** High — Security vulnerability in multi-tenant deployments.
+**Recommendation:** Keep JWT auth in `Authorization` and move user-provided LLM keys / guest identifiers to dedicated headers. Prefer the validated JWT `sub` as the canonical user identifier when present.
 
 ---
 

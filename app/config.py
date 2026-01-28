@@ -73,6 +73,14 @@ class Settings(BaseSettings):
 		validation_alias=AliasChoices("DATABASE_URL", "STRATAX_DATABASE_URL")
 	)
 
+	# Practice Learning (privacy-safe aggregates only)
+	# When enabled, the app stores small per-session aggregate metrics and optional
+	# self-reported outcomes (no raw audio, no raw transcripts).
+	enable_practice_learning: bool = Field(
+		default=False,
+		validation_alias=AliasChoices("ENABLE_PRACTICE_LEARNING", "STRATAX_ENABLE_PRACTICE_LEARNING"),
+	)
+
 	# Email (verification + password reset)
 	# If email_enabled is false, the API will still generate tokens and (in dev)
 	# can return URLs for manual testing, but it won't attempt SMTP.

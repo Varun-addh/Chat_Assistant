@@ -58,7 +58,7 @@ The backend provides a FastAPI service for an “AI Interview Assistant” with:
   - `app/routers/auth_routes.py`, `app/auth.py`, `app/models.py` (`User`)
 - **Rate limiting + demo-mode cost controls** (tier-based metering for expensive endpoints)
   - `app/middleware/rate_limit.py`, `app/models.py` (`UserTier`, `TIER_QUOTAS`), `app/config.py` (demo key pool flags)
-- **Real-time partial transcripts over WebSocket** (STT streaming stub)
+- **Real-time partial transcripts over WebSocket** (intentionally deferred; placeholder implementation)
   - `app/routers/ws.py`, `app/services/stt_service.py`
 
 ### Entry point and lifecycle
@@ -487,7 +487,7 @@ See: `app/routers/practice_mode.py`, `app/services/practice_mode_service.py`, `a
 
 - WebSocket endpoint: `GET ws://.../ws/stt/{session_id}`.
 - Requires API key only if `settings.api_key` is set, provided via `Sec-WebSocket-Protocol` header.
-- The `STTService` in `app/services/stt_service.py` is currently a stub: if enabled, it yields `"..."` per chunk; if disabled, it yields `"(audio)"` per chunk.
+- WebSocket STT is intentionally deferred; Practice Mode uses faster-whisper (production-ready). The `STTService` in `app/services/stt_service.py` currently yields placeholder tokens (`"..."` or `"(audio)"`) rather than real transcripts.
 
 See: `app/routers/ws.py`, `app/utils/security.py`, `app/services/stt_service.py`.
 
@@ -694,11 +694,12 @@ See: `app/main.py`, `app/utils/audit.py`.
 - **JWT hardening (header separation + consistency)**: keep JWT auth in `Authorization` and move user-provided LLM keys to a dedicated header (to avoid ambiguity); ensure all request identity flows consistently use the JWT `sub` as the canonical `user_id`.
 - **Redis rate limiting (distributed quotas)**: enable the existing Redis limiter by setting `REDIS_URL` so quotas survive restarts and scale across workers/instances.
 - **Multi-worker scaling**: move file-backed session/history storage to a shared DB/object store and run Qdrant as a separate service (or managed Qdrant) to avoid local file locks.
-- **Production STT**: replace the WebSocket STT stub with a real streaming STT provider (or a faster-whisper streaming adapter) with backpressure + input validation.
+- **Production STT**: WebSocket STT is intentionally deferred; keep it disabled/unused in production unless you integrate a real streaming STT provider (or a faster-whisper streaming adapter) with backpressure + input validation.
 
-1. **WebSocket STT is currently a stub**
-   - `STTService.stream_transcribe` yields placeholder tokens rather than real transcripts.
-   - Evidence: `app/services/stt_service.py`.
+1. **WebSocket STT is intentionally deferred**
+  - The WebSocket STT service yields placeholder tokens rather than real transcripts.
+  - Practice Mode uses faster-whisper via `LocalSTTService` (production-ready path).
+  - Evidence: `app/services/stt_service.py`, `app/services/local_stt_service.py`.
 
 2. **Authorization header dual-use can be confusing**
   - The API supports both JWT auth and user-supplied LLM keys; some client flows use `Authorization: Bearer ...` for keys.
@@ -1222,3 +1223,11 @@ See: `app/config.py` for full list of configurable settings.
 - **Healthcheck fails**: Verify port 7860 (not 8000)
 
 ---
+
+## Production checklist (quick)
+
+- ✅ `DATABASE_URL` points to Neon
+- ✅ `APP_ENV=production`
+- ✅ `JWT_SECRET_KEY` set
+- ✅ `COOKIE_SECRET` set
+- ✅ `EMAIL_ENABLED` verified

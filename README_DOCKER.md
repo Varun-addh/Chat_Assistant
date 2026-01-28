@@ -23,7 +23,8 @@ Quickstart (development)
 
    # Build and start
   docker compose build --pull
-  docker compose up --detach
+  # Local stack (includes Postgres)
+  docker compose --profile local up --detach
 
    # View logs
   docker compose logs -f
@@ -33,16 +34,18 @@ Quickstart (development)
 
   The compose stack brings up:
   - `web` (FastAPI)
-  - `postgres` (session/history persistence when DATABASE_URL is Postgres)
+  - `postgres` (optional; only with `--profile local`)
   - `qdrant` (vector DB as a service; required for multi-worker)
   - `kroki` (local Mermaid renderer)
 
 Database note (why you might still see SQLite)
 
 - Your local `.env` often sets `DATABASE_URL=sqlite:///...` for non-docker runs.
-- `docker-compose.yml` now defaults the container to Postgres regardless.
-- If you need to override inside compose, set `DATABASE_URL_DOCKER` (recommended) instead of `DATABASE_URL`.
-  You can put it in a local `.env.docker` file based on `.env.docker.example`.
+- `docker-compose.yml` sets `DATABASE_URL` inside the container using this precedence:
+  - `DATABASE_URL_DOCKER` (if set)
+  - else `DATABASE_URL` (commonly Neon in production)
+  - else a Postgres URL pointing at the compose `postgres` service
+- If you're running the local profile (`--profile local`) and want Postgres, set `DATABASE_URL_DOCKER` to the compose Postgres URL.
 
   After startup, the API will be available at:
   - http://localhost:7860
@@ -58,6 +61,11 @@ Environment selection without editing `.env`
 - Docker compose (example): you can optionally add overrides using a second env file.
   Newer Compose supports multiple `--env-file` flags.
   If yours does not, keep overrides in `.env` or use shell env vars.
+
+Production vs local compose
+
+- Local dev (with Postgres): `docker compose --profile local up -d` and use `DATABASE_URL_DOCKER=postgresql+psycopg://...@postgres:5432/...`.
+- Production (with Neon): `docker compose up -d` and set `DATABASE_URL` to your Neon connection string. Postgres won't start.
 
 Production recommendations
 - Do not mount the host source into the container.

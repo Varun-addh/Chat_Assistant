@@ -37,6 +37,8 @@ from app.schemas import (
     ProctoringEventOut,
     CodeTestResult,
     CodeEvaluationFeedback,
+    PracticeConfidenceOutcomeIn,
+    PracticeConfidenceOutcomeOut,
 )
 from app.services.practice.practice_mode_service import PracticeModeService
 
@@ -46,6 +48,8 @@ from app.middleware.auth import get_user_id_from_request
 from app.utils.event_logging import track_event, stable_question_id, stable_hash
 from app.services.practice.learning_loops import compute_practice_insights, merge_focus_areas
 from app.models import PracticeAttemptRecord
+from app.services.practice.practice_learning import upsert_practice_session_metrics
+from app.services.practice.practice_learning import upsert_practice_session_outcome_confidence
 from app.services.practice.practice_progress import (
     get_dimension_heatmap,
     get_latest_next_session_plan,
@@ -61,6 +65,64 @@ router = APIRouter(
     prefix="/api/practice",
     tags=["Practice Mode"]
 )
+
+
+@router.post("/session/{session_id}/outcome/confidence", response_model=PracticeConfidenceOutcomeOut)
+async def submit_practice_confidence_outcome(
+    session_id: str,
+    payload: PracticeConfidenceOutcomeIn,
+    http_request: Request,
+) -> PracticeConfidenceOutcomeOut:
+    """Submit a self-reported confidence outcome (1-5) for a completed session.
+
+    Notes:
+    - Gated behind ENABLE_PRACTICE_LEARNING.
+    - Stores only the score (no raw audio/transcripts).
+    """
+
+    if not bool(getattr(settings, "enable_practice_learning", False)):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+
+    # Ensure the session is complete (runtime session OR persisted attempt).
+    runtime_ok = False
+    if practice_service:
+        sess = practice_service.get_session(session_id)
+        runtime_ok = bool(sess and getattr(sess, "is_complete", False))
+
+    with get_db_context() as db:
+        attempt_ok = (
+            db.query(PracticeAttemptRecord)
+            .filter(PracticeAttemptRecord.session_id == session_id)
+            .filter(PracticeAttemptRecord.user_id == user_id)
+            .first()
+            is not None
+        )
+
+        if not (runtime_ok or attempt_ok):
+            raise HTTPException(status_code=400, detail="Session is not complete")
+
+        upsert_practice_session_outcome_confidence(
+            db,
+            user_id=user_id,
+            session_id=session_id,
+            confidence_1_5=int(payload.confidence_1_5),
+        )
+
+    _track_practice_event(
+        user_id=user_id,
+        session_id=session_id,
+        event_type="practice_outcome_confidence_submitted",
+        question_text=None,
+        extra={"confidence_1_5": int(payload.confidence_1_5)},
+    )
+
+    return PracticeConfidenceOutcomeOut(
+        ok=True,
+        session_id=session_id,
+        confidence_1_5=int(payload.confidence_1_5),
+    )
 
 
 @router.post("/proctoring/event", response_model=ProctoringEventOut)
@@ -183,10 +245,12 @@ def _persist_completed_practice_attempt(*, user_id: str, session_id: str) -> Non
                 .filter(PracticeAttemptRecord.session_id == session_id)
                 .first()
             )
-            if existing:
-                return
+            if not existing:
+                save_completed_attempt(db, user_id=user_id, session=sess)
 
-            save_completed_attempt(db, user_id=user_id, session=sess)
+            # Privacy-safe learning: store aggregate metrics only.
+            if bool(getattr(settings, "enable_practice_learning", False)):
+                upsert_practice_session_metrics(db, user_id=user_id, session_id=session_id, session=sess)
     except Exception:
         return
 

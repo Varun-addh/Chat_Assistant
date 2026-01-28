@@ -11,6 +11,8 @@ from datetime import datetime
 import asyncio
 
 from app.utils.time import utcnow
+from app.config import settings
+from app.database import get_db_context
 
 from app.schemas import (
     PracticeSession,
@@ -88,6 +90,27 @@ class PracticeModeService:
         asyncio.create_task(self._warmup_models())
         
         logger.info("Practice Mode Service initialized successfully with auto-cleanup")
+
+    def _maybe_add_peer_learning_insight(self, evaluation_report: EvaluationReport) -> None:
+        if not bool(getattr(settings, "enable_practice_learning", False)):
+            return
+        try:
+            from app.services.practice.practice_learning import (
+                derive_peer_bucket,
+                compute_peer_confidence_benchmark,
+                format_peer_confidence_insight,
+            )
+
+            bucket = derive_peer_bucket(evaluation_report.metrics_summary)
+            with get_db_context() as db:
+                avg_conf, n = compute_peer_confidence_benchmark(db, bucket=bucket, min_samples=3)
+            if avg_conf is not None:
+                evaluation_report.learning_insight = format_peer_confidence_insight(
+                    avg_confidence_1_5=avg_conf,
+                    n=n,
+                )
+        except Exception:
+            return
     
     async def _background_cleanup_loop(self):
         """Perpetual background task to clean up expired sessions."""
@@ -516,6 +539,8 @@ class PracticeModeService:
                         session_id,
                         api_key=api_key
                     )
+
+                    self._maybe_add_peer_learning_insight(evaluation_report)
                     
                     session.evaluation_report = evaluation_report
                     response["evaluation_report"] = evaluation_report
@@ -632,6 +657,8 @@ class PracticeModeService:
                         session_id,
                         api_key=api_key,
                     )
+
+                    self._maybe_add_peer_learning_insight(evaluation_report)
                     session.evaluation_report = evaluation_report
                     response["evaluation_report"] = evaluation_report
                 except Exception as eval_error:

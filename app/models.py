@@ -4,7 +4,7 @@ Database models for Stratax AI
 from datetime import datetime, timezone
 from typing import Optional, List
 from enum import Enum
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, JSON
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 import uuid
 
@@ -293,6 +293,60 @@ class PracticeAttemptDimensionRecord(Base):
 
     def __repr__(self) -> str:
         return f"<PracticeAttemptDimensionRecord attempt={self.attempt_id} {self.dimension}={self.score}>"
+
+
+class PracticeSessionMetrics(Base):
+    """Privacy-safe, per-session aggregate metrics (no raw audio/transcripts)."""
+
+    __tablename__ = "practice_session_metrics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    user_id = Column(String, nullable=False, index=True)
+    session_id = Column(String, nullable=False, index=True)
+
+    # Aggregates (derived from SpeechMetrics across answers)
+    answers_count = Column(Integer, nullable=False, default=0)
+    avg_wpm = Column(Float, nullable=True)
+    total_fillers = Column(Integer, nullable=True)
+    filler_per_minute = Column(Float, nullable=True)
+    total_pause_count = Column(Integer, nullable=True)
+    longest_pause_seconds = Column(Float, nullable=True)
+    total_duration_seconds = Column(Float, nullable=True)
+    avg_voice_confidence_0_10 = Column(Float, nullable=True)
+    overtalked_count = Column(Integer, nullable=True)
+
+    # Simple bucketing to support cohort benchmarks (no ML)
+    wpm_bucket = Column(String, nullable=True, index=True)
+    filler_bucket = Column(String, nullable=True, index=True)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "session_id", name="uq_practice_session_metrics_user_session"),
+    )
+
+
+class PracticeSessionOutcome(Base):
+    """Self-reported outcome captured after session completion."""
+
+    __tablename__ = "practice_session_outcomes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    user_id = Column(String, nullable=False, index=True)
+    session_id = Column(String, nullable=False, index=True)
+
+    # User self-report (1-5)
+    confidence_1_5 = Column(Integer, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "session_id", name="uq_practice_session_outcome_user_session"),
+    )
 
 
 # Tier quotas (requests per day)

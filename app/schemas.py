@@ -430,7 +430,20 @@ class EvaluationReport(BaseModel):
 	metrics_summary: MetricsSummary = Field(..., description="Aggregated metrics")
 	action_plan: ActionPlan = Field(..., description="Concrete action steps")
 	practice_recommendation: str = Field(..., description="Estimated practice sessions needed")
+	# Optional, privacy-safe cohort insight (only when enabled)
+	learning_insight: Optional[str] = Field(default=None, description="Optional peer benchmark insight")
 	generated_at: datetime = Field(default_factory=utcnow)
+
+
+class PracticeConfidenceOutcomeIn(BaseModel):
+	"""Self-reported confidence after a completed practice session (1-5)."""
+	confidence_1_5: int = Field(..., ge=1, le=5, description="Self-reported confidence (1-5)")
+
+
+class PracticeConfidenceOutcomeOut(BaseModel):
+	ok: bool = True
+	session_id: str
+	confidence_1_5: int
 
 
 class PracticeSession(BaseModel):

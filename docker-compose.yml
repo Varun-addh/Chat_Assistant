@@ -15,11 +15,11 @@ services:
       # - For real production, set APP_ENV=production so the app enforces required secrets.
       # Prefer local Kroki renderer if available (avoids relying on external services)
       - KROKI_URL=http://kroki:8000/mermaid/svg
-      # Default to Postgres when running under docker-compose (override in .env if needed)
-      # IMPORTANT: we intentionally do NOT read DATABASE_URL from .env here because
-      # .env is typically SQLite for local dev. Use DATABASE_URL_DOCKER if you need
-      # to override the compose default.
-      - DATABASE_URL=${DATABASE_URL_DOCKER:-postgresql+psycopg://stratax:stratax@postgres:5432/stratax}
+      # Database selection (single source of truth at runtime):
+      # - Production: set DATABASE_URL to your Neon connection string.
+      # - Docker local dev (optional): set DATABASE_URL_DOCKER to point at the compose Postgres.
+      # - Fallback: defaults to the compose Postgres URL.
+      - DATABASE_URL=${DATABASE_URL_DOCKER:-${DATABASE_URL:-postgresql+psycopg://stratax:stratax@postgres:5432/stratax}}
       # Use Qdrant as a service (fixes local file-lock issues and enables multi-worker)
       - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       # Redis (distributed rate limiting + shared caches)
@@ -28,7 +28,6 @@ services:
       # Multi-worker
       - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
     depends_on:
-      - postgres
       - qdrant
       - redis
     volumes:
@@ -56,6 +55,7 @@ services:
     image: postgres:16
     container_name: interview_ast_postgres
     restart: unless-stopped
+    profiles: ["local"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-stratax}
       - POSTGRES_USER=${POSTGRES_USER:-stratax}
