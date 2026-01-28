@@ -83,6 +83,23 @@ def init_db():
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_email_verification_token_hash ON users (email_verification_token_hash)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_password_reset_token_hash ON users (password_reset_token_hash)"))
                 conn.commit()
+        else:
+            # Lightweight additive migrations for Postgres/MySQL-like DBs.
+            # This keeps production deployments resilient even if Alembic migrations
+            # weren't executed for a fresh database.
+            with engine.connect() as conn:
+                # Postgres supports IF NOT EXISTS; other dialects may ignore it.
+                # We keep these statements simple and additive.
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_token_hash VARCHAR"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_expires_at TIMESTAMPTZ"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token_hash VARCHAR"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_used_at TIMESTAMPTZ"))
+                # Indexes (safe no-ops if already present)
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_email_verification_token_hash ON users (email_verification_token_hash)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_password_reset_token_hash ON users (password_reset_token_hash)"))
+                conn.commit()
         logger.info("✅ Database initialized: %s", DATABASE_URL)
         env = (getattr(settings, "app_env", "development") or "development").strip().lower()
         if env in {"production", "prod"} and DATABASE_URL.startswith("sqlite"):
