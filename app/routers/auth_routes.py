@@ -3,13 +3,16 @@
 Includes Google OAuth popup flow endpoints.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from typing import Optional
 from urllib.parse import urlencode
 import secrets
 import httpx
+from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
 
 from app.database import get_db
 from app.auth import (
@@ -20,6 +23,7 @@ from app.auth import (
 from app.models import User, TIER_QUOTAS
 from app.config import settings
 from app.utils.secret_crypto import encrypt_secret, encryption_configured
+from app.utils.email_sender import send_email_best_effort, email_enabled
 from pydantic import BaseModel, ConfigDict
 import logging
 
@@ -75,6 +79,206 @@ class PasswordChange(BaseModel):
     """Change password"""
     current_password: str
     new_password: str
+
+
+class EmailOnly(BaseModel):
+    """Email payload (avoid leaking user existence)."""
+    email: str
+
+
+class TokenOnly(BaseModel):
+    token: str
+
+
+class ResetPasswordBody(BaseModel):
+    token: str
+    new_password: str
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc_aware(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    # SQLite frequently round-trips timezone-aware datetimes as naive.
+    # Treat naive values as UTC to avoid TypeError on comparisons.
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _hash_action_token(raw_token: str) -> str:
+    """Hash tokens for DB storage.
+
+    We use HMAC-SHA256 with COOKIE_SECRET (or JWT secret as fallback) so that even
+    if DB is leaked, tokens can't be trivially reversed.
+    """
+    secret = (settings.cookie_secret or settings.jwt_secret_key or "").encode("utf-8")
+    if not secret:
+        # Should never happen in real deployments because settings enforces secrets,
+        # but keep a safe fallback for unusual tests.
+        secret = b"stratax-dev-secret"
+    msg = (raw_token or "").encode("utf-8")
+    return hmac.new(secret, msg, hashlib.sha256).hexdigest()
+
+
+def _verification_link(token: str) -> str:
+    base = settings.frontend_url.rstrip("/")
+    return f"{base}/auth/verify-email?token={token}"
+
+
+def _password_reset_link(token: str) -> str:
+    base = settings.frontend_url.rstrip("/")
+    return f"{base}/auth/reset-password?token={token}"
+
+
+def _should_return_links_in_response() -> bool:
+    # For local dev/testing UX we return the links.
+    return (settings.app_env or "development").strip().lower() != "production"
+
+
+@router.post("/request-email-verification")
+async def request_email_verification(
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Request an email verification link for the current user."""
+    if user.is_verified:
+        return {"detail": "Email already verified"}
+
+    token = secrets.token_urlsafe(32)
+    token_hash = _hash_action_token(token)
+    expires_at = _now_utc() + timedelta(minutes=int(getattr(settings, "email_verification_token_ttl_minutes", 1440) or 1440))
+
+    user.email_verification_token_hash = token_hash
+    user.email_verification_expires_at = expires_at
+    # Do not toggle is_verified here.
+    db.commit()
+
+    link = _verification_link(token)
+    body = (
+        "Verify your email for Stratax AI\n\n"
+        f"Click this link to verify: {link}\n\n"
+        "If you did not request this, you can ignore this email."
+    )
+    if email_enabled():
+        background_tasks.add_task(
+            send_email_best_effort,
+            to_email=user.email,
+            subject="Verify your Stratax AI email",
+            body_text=body,
+        )
+
+    resp = {"detail": "Verification link generated"}
+    if _should_return_links_in_response():
+        resp["verification_url"] = link
+        resp["email_enabled"] = bool(email_enabled())
+    return resp
+
+
+@router.get("/verify-email")
+async def verify_email(token: str, db: Session = Depends(get_db)):
+    """Verify email by token (token is sent to the user's email)."""
+    if not token or not token.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing token")
+
+    token_hash = _hash_action_token(token)
+    user = db.query(User).filter(User.email_verification_token_hash == token_hash).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired token")
+
+    now = _now_utc()
+    exp = _as_utc_aware(user.email_verification_expires_at)
+    if not exp or exp < now:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired token")
+
+    user.is_verified = True
+    user.email_verified_at = now
+    user.email_verification_token_hash = None
+    user.email_verification_expires_at = None
+    db.commit()
+
+    return {"detail": "Email verified"}
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    body: EmailOnly,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Request a password reset link.
+
+    Always returns a generic response to avoid leaking whether a user exists.
+    """
+    email = (body.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing email")
+
+    user = db.query(User).filter(User.email == email).first()
+    reset_url = None
+    if user and user.is_active:
+        token = secrets.token_urlsafe(32)
+        user.password_reset_token_hash = _hash_action_token(token)
+        user.password_reset_expires_at = _now_utc() + timedelta(
+            minutes=int(getattr(settings, "password_reset_token_ttl_minutes", 30) or 30)
+        )
+        user.password_reset_used_at = None
+        db.commit()
+
+        reset_url = _password_reset_link(token)
+        body_text = (
+            "Reset your Stratax AI password\n\n"
+            f"Click this link to reset: {reset_url}\n\n"
+            "If you did not request this, you can ignore this email."
+        )
+        if email_enabled():
+            background_tasks.add_task(
+                send_email_best_effort,
+                to_email=user.email,
+                subject="Reset your Stratax AI password",
+                body_text=body_text,
+            )
+
+    resp = {"detail": "If an account exists for that email, a reset link was sent"}
+    if _should_return_links_in_response() and reset_url:
+        resp["reset_url"] = reset_url
+        resp["email_enabled"] = bool(email_enabled())
+    return resp
+
+
+@router.post("/reset-password")
+async def reset_password(body: ResetPasswordBody, db: Session = Depends(get_db)):
+    """Reset password using a single-use token."""
+    token = (body.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing token")
+    if not (body.new_password or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing new_password")
+
+    token_hash = _hash_action_token(token)
+    user = db.query(User).filter(User.password_reset_token_hash == token_hash).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired token")
+
+    now = _now_utc()
+    if user.password_reset_used_at is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired token")
+    exp = _as_utc_aware(user.password_reset_expires_at)
+    if not exp or exp < now:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired token")
+
+    user.hashed_password = hash_password(body.new_password)
+    user.password_reset_used_at = now
+    user.password_reset_token_hash = None
+    user.password_reset_expires_at = None
+    user.last_login = None
+    db.commit()
+
+    return {"detail": "Password reset successful"}
 
 
 @router.post("/register", response_model=Token, status_code=status.HTTP_201_CREATED)

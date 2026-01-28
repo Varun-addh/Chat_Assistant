@@ -134,6 +134,57 @@ Content-Type: application/json
 }
 ```
 
+#### Request Email Verification
+```bash
+POST /auth/request-email-verification
+Authorization: Bearer <token>
+
+Response (dev):
+{
+  "detail": "Verification link generated",
+  "verification_url": "http://localhost:8080/auth/verify-email?token=...",
+  "email_enabled": false
+}
+```
+
+#### Verify Email
+```bash
+GET /auth/verify-email?token=<token>
+
+Response:
+{
+  "detail": "Email verified"
+}
+```
+
+#### Forgot Password
+```bash
+POST /auth/forgot-password
+Content-Type: application/json
+
+{
+  "email": "user@example.com"
+}
+
+Response (dev, if user exists):
+{
+  "detail": "If an account exists for that email, a reset link was sent",
+  "reset_url": "http://localhost:8080/auth/reset-password?token=...",
+  "email_enabled": false
+}
+```
+
+#### Reset Password
+```bash
+POST /auth/reset-password
+Content-Type: application/json
+
+{
+  "token": "...",
+  "new_password": "NewPassword456!"
+}
+```
+
 ## Using Protected Routes
 
 All API routes now support authentication. Add the JWT token to your requests:
@@ -197,9 +248,26 @@ Add to your `.env` file:
 # JWT Secret (CHANGE THIS IN PRODUCTION!)
 JWT_SECRET_KEY=your-super-secret-key-change-me-in-production
 
+# Cookie secret (required in production)
+COOKIE_SECRET=your-cookie-secret
+
 # Database (optional, defaults to SQLite)
 DATABASE_URL=sqlite:///./data/stratax.db
 # DATABASE_URL=postgresql://user:pass@localhost/stratax  # For PostgreSQL
+
+# Redis (optional; enables distributed rate limiting)
+REDIS_URL=redis://localhost:6379/0
+REDIS_KEY_PREFIX=stratax
+
+# Email (optional; enables verification + password reset emails)
+EMAIL_ENABLED=false
+EMAIL_FROM=no-reply@yourdomain.com
+SMTP_HOST=smtp.yourdomain.com
+SMTP_PORT=587
+SMTP_USERNAME=your-smtp-username
+SMTP_PASSWORD=your-smtp-password
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
 ```
 
 ## Upgrading to PostgreSQL (Production)
@@ -218,14 +286,8 @@ DATABASE_URL=postgresql://user:password@localhost:5432/stratax
 
 ## Upgrading to Redis (Production)
 
-For distributed systems, use Redis for rate limiting:
-
-1. Install Redis client:
-```bash
-pip install redis
-```
-
-2. Update `app/middleware/rate_limit.py` to use Redis instead of in-memory storage
+For distributed systems, set `REDIS_URL` and the middleware will automatically
+switch to the Redis-backed rate limiter.
 
 ## Security Checklist
 
@@ -243,8 +305,8 @@ pip install redis
 2. ✅ **Rate Limiting** - DONE!
 3. 🔜 **Usage Tracking** - Track API usage for billing
 4. 🔜 **Stripe Integration** - Accept payments
-5. 🔜 **Email Verification** - Send verification emails
-6. 🔜 **Password Reset** - Forgot password flow
+5. ✅ **Email Verification** - Token + endpoints (SMTP optional)
+6. ✅ **Password Reset** - Token + endpoints (SMTP optional)
 
 ---
 

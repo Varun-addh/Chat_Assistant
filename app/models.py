@@ -45,6 +45,13 @@ class User(Base):
     # Status
     is_active = Column(Boolean, default=True, nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
+    # Email verification + password reset (token hashes are stored, never raw tokens)
+    email_verified_at = Column(DateTime(timezone=True), nullable=True)
+    email_verification_token_hash = Column(String, nullable=True, index=True)
+    email_verification_expires_at = Column(DateTime(timezone=True), nullable=True)
+    password_reset_token_hash = Column(String, nullable=True, index=True)
+    password_reset_expires_at = Column(DateTime(timezone=True), nullable=True)
+    password_reset_used_at = Column(DateTime(timezone=True), nullable=True)
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

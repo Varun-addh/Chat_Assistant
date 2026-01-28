@@ -73,6 +73,22 @@ class Settings(BaseSettings):
 		validation_alias=AliasChoices("DATABASE_URL", "STRATAX_DATABASE_URL")
 	)
 
+	# Email (verification + password reset)
+	# If email_enabled is false, the API will still generate tokens and (in dev)
+	# can return URLs for manual testing, but it won't attempt SMTP.
+	email_enabled: bool = False  # env: EMAIL_ENABLED
+	email_from: str | None = Field(default=None, validation_alias=AliasChoices("EMAIL_FROM", "SMTP_FROM"))
+	smtp_host: str | None = Field(default=None, validation_alias=AliasChoices("SMTP_HOST", "EMAIL_SMTP_HOST"))
+	smtp_port: int = Field(default=587, validation_alias=AliasChoices("SMTP_PORT", "EMAIL_SMTP_PORT"))
+	smtp_username: str | None = Field(default=None, validation_alias=AliasChoices("SMTP_USERNAME", "EMAIL_SMTP_USERNAME"))
+	smtp_password: str | None = Field(default=None, validation_alias=AliasChoices("SMTP_PASSWORD", "EMAIL_SMTP_PASSWORD"))
+	smtp_use_tls: bool = Field(default=True, validation_alias=AliasChoices("SMTP_USE_TLS", "EMAIL_SMTP_USE_TLS"))
+	smtp_use_ssl: bool = Field(default=False, validation_alias=AliasChoices("SMTP_USE_SSL", "EMAIL_SMTP_USE_SSL"))
+
+	# Token expirations
+	email_verification_token_ttl_minutes: int = 60 * 24  # env: EMAIL_VERIFICATION_TOKEN_TTL_MINUTES (default 24h)
+	password_reset_token_ttl_minutes: int = 30  # env: PASSWORD_RESET_TOKEN_TTL_MINUTES
+
 	@model_validator(mode="after")
 	def _require_persistent_secrets_in_production(self):
 		# In dev/test we allow auto-generated secrets for convenience.
@@ -83,6 +99,17 @@ class Settings(BaseSettings):
 				raise ValueError("Missing JWT_SECRET_KEY in production")
 			if not (os.getenv("COOKIE_SECRET") or os.getenv("STRATAX_COOKIE_SECRET")):
 				raise ValueError("Missing COOKIE_SECRET in production")
+			# Prevent accidental SQLite usage in production.
+			if (self.database_url or "").strip().lower().startswith("sqlite"):
+				raise ValueError("SQLite is not allowed in production. Set DATABASE_URL to a Postgres URL.")
+			# If email is enabled, require SMTP config.
+			if bool(self.email_enabled):
+				if not (self.email_from and self.email_from.strip()):
+					raise ValueError("EMAIL_FROM is required when EMAIL_ENABLED=true in production")
+				if not (self.smtp_host and self.smtp_host.strip()):
+					raise ValueError("SMTP_HOST is required when EMAIL_ENABLED=true in production")
+				if self.smtp_username and not self.smtp_password:
+					raise ValueError("SMTP_PASSWORD is required when SMTP_USERNAME is set")
 		return self
 
 	@field_validator("jwt_secret_key", mode="before")

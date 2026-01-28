@@ -66,8 +66,22 @@ def init_db():
                 cols = [row[1] for row in conn.execute(text("PRAGMA table_info(users)"))]
                 if "google_id" not in cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN google_id VARCHAR"))
+                if "email_verified_at" not in cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN email_verified_at DATETIME"))
+                if "email_verification_token_hash" not in cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN email_verification_token_hash VARCHAR"))
+                if "email_verification_expires_at" not in cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN email_verification_expires_at DATETIME"))
+                if "password_reset_token_hash" not in cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_token_hash VARCHAR"))
+                if "password_reset_expires_at" not in cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_expires_at DATETIME"))
+                if "password_reset_used_at" not in cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN password_reset_used_at DATETIME"))
                 # Create a unique index to enforce uniqueness when google_id is present.
                 conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_id ON users (google_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_email_verification_token_hash ON users (email_verification_token_hash)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_password_reset_token_hash ON users (password_reset_token_hash)"))
                 conn.commit()
         logger.info("✅ Database initialized: %s", DATABASE_URL)
         env = (getattr(settings, "app_env", "development") or "development").strip().lower()
