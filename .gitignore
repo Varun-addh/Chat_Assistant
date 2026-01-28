@@ -63,6 +63,11 @@ debug.log
 *.backup
 *.tmp
 
+# Local databases (binary files not allowed on Hugging Face)
+*.db
+*.sqlite
+*.sqlite3
+
 # IDEs
 .vscode/
 .idea/
