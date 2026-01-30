@@ -38,6 +38,30 @@ def track_api_usage(
             # Track guest usage with special user_id
             # Prefer a stable per-client guest id (e.g. "guest_<hash>") when available.
             user_id = guest_user_id or "guest"
+
+            # Ensure the guest user exists in `users` table to satisfy FK constraints.
+            # Create a minimal stub user record for analytics if missing.
+            if user_id and user_id.startswith("guest"):
+                try:
+                    existing_user = db.get(User, user_id)
+                    if existing_user is None:
+                        # Create a minimal placeholder user. Fill required fields with safe placeholders.
+                        placeholder_email = f"{user_id}@guest.invalid"
+                        placeholder_password = ""  # hashed_password required by schema; leave blank
+                        stub = User(
+                            id=user_id,
+                            email=placeholder_email,
+                            username=user_id,
+                            hashed_password=placeholder_password,
+                            is_active=False,
+                        )
+                        db.add(stub)
+                        db.commit()
+                        logger.debug(f"Created stub guest user for analytics: {user_id}")
+                except Exception as e:
+                    # If creating the stub user fails for any reason, log and continue; we will still
+                    # attempt to insert the usage record and handle FK failures gracefully below.
+                    logger.debug(f"Could not create stub guest user {user_id}: {e}")
         else:
             user_id = user.id
         
