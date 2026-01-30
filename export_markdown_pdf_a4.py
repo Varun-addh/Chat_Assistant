@@ -223,9 +223,11 @@ def render_html(*, md_path: Path, title: str | None = None) -> str:
       /* Mermaid blocks get SVG inserted by Mermaid */
       .mermaid {
         margin: 10pt 0;
+        display: flex;
+        justify-content: center;
       }
       .mermaid svg {
-        width: 100% !important;
+        width: auto !important;
         max-width: 100% !important;
         height: auto !important;
         display: block;
@@ -260,13 +262,29 @@ def render_html(*, md_path: Path, title: str | None = None) -> str:
       import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
       mermaid.initialize({
         startOnLoad: true,
-        theme: 'default',
+        theme: 'base',
         securityLevel: 'loose',
+        themeVariables: {
+          fontFamily: "Segoe UI, Helvetica Neue, Arial, sans-serif",
+          // Keep diagrams compact for print/PDF.
+          fontSize: "12px",
+          primaryColor: "#EEF2FF",
+          primaryTextColor: "#0F172A",
+          primaryBorderColor: "#6366F1",
+          lineColor: "#475569",
+          secondaryColor: "#E0F2FE",
+          tertiaryColor: "#F8FAFC"
+        },
         flowchart: {
-          nodeSpacing: 28,
-          rankSpacing: 28
+          // Prevent Mermaid from stretching diagrams to container width.
+          useMaxWidth: false,
+          nodeSpacing: 18,
+          rankSpacing: 18,
+          padding: 8,
+          curve: 'linear'
         },
         sequence: {
+          useMaxWidth: false,
           diagramMarginX: 10,
           diagramMarginY: 10,
           actorMargin: 20,

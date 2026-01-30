@@ -50,7 +50,7 @@ Stratax AI addresses these challenges through a multi-layered backend architectu
 
 **Runtime:** Python 3.11+ + FastAPI + Starlette  
 **AI/ML:** Groq SDK, Google Generative AI, sentence-transformers, faster-whisper  
-**Storage:** SQL DB via `DATABASE_URL` (SQLite or Postgres) for structured records (users/usage/rate limits/telemetry), Qdrant vector DB for semantic retrieval, plus file-based JSON/JSONL persistence for sessions/audit logs  
+**Storage:** SQL DB via `DATABASE_URL` (SQLite or Postgres) for structured records (users/usage/rate limits/telemetry), Qdrant vector DB for semantic retrieval, plus file-based JSON/JSONL persistence for sessions/audit logs. SQLite is supported for local development only; production deployments are expected to use PostgreSQL (e.g., Neon).  
 **Deployment:** Docker containerization with docker-compose orchestration (defaults to Postgres + Qdrant + Redis)  
 **Audio:** librosa, soundfile, pyttsx3, gTTS
 
@@ -253,7 +253,7 @@ graph TB
         Vector["<b>Vector Layer</b><br/>• Qdrant<br/>• sentence-transformers"]
     end
     
-    Persist["<b>Persistence Layer</b><br/>• SQLite: users/usage/rate limits/telemetry<br/>• Sessions: JSON per user<br/>• Vector DB: Qdrant local store<br/>• Audio: WAV files<br/>• History/Audit: JSONL logs"]
+    Persist["<b>Persistence Layer</b><br/>• SQL DB (SQLite dev / Postgres prod): users/usage/rate limits/telemetry<br/>• Sessions: JSON per user<br/>• Vector DB: Qdrant local store<br/>• Audio: WAV files (session only)<br/>• History/Audit: JSONL logs"]
     
     Client -->|HTTP/WebSocket| Gateway
     Gateway --> QA
@@ -269,16 +269,6 @@ graph TB
     LLM --> Persist
     Audio --> Persist
     Vector --> Persist
-    
-    style Client fill:#e0f2fe,stroke:#0284c7,stroke-width:2px
-    style Gateway fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-    style QA fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
-    style PM fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
-    style IE fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
-    style LLM fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style Audio fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style Vector fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style Persist fill:#d1fae5,stroke:#10b981,stroke-width:2px
 ```
 
 ## Primary Use Case: Structured Interview Simulation for Hiring
@@ -309,15 +299,6 @@ graph TD
     E --> F["InterviewerAgent<br/>generates micro-feedback<br/>(optional: Gemini)"]
     F --> G["AdaptiveInterviewerAgent<br/>evaluates comprehensively<br/>(shared llm_service)"]
     G --> H["Response assembled<br/>with feedback + next question"]
-    
-    style A fill:#e0f2fe,stroke:#0284c7,stroke-width:2px
-    style B fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-    style C fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
-    style D fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style E fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style F fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style G fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style H fill:#d1fae5,stroke:#10b981,stroke-width:2px
 ```
 
 ## Data Flow: Interview Intelligence Search
@@ -334,16 +315,6 @@ graph TD
     SEM --> RR
     RR --> LG["LLM generates fresh questions<br/><i>Optional</i>"]
     LG --> RES["Results returned with<br/>metadata + code solutions"]
-    
-    style Q fill:#e0f2fe,stroke:#0284c7,stroke-width:2px
-    style R fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-    style QE fill:#fef9c3,stroke:#eab308,stroke-width:1px,stroke-dasharray: 5 5
-    style HS fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
-    style BM25 fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style SEM fill:#fce7f3,stroke:#ec4899,stroke-width:2px
-    style RR fill:#fef9c3,stroke:#eab308,stroke-width:1px,stroke-dasharray: 5 5
-    style LG fill:#fef9c3,stroke:#eab308,stroke-width:1px,stroke-dasharray: 5 5
-    style RES fill:#d1fae5,stroke:#10b981,stroke-width:2px
 ```
 
 <div style="page-break-after: always;"></div>
@@ -405,7 +376,7 @@ The Practice Mode subsystem implements a multi-agent pattern:
 ### Persistence Strategy
 - User sessions: `data/sessions/{user_id}/{session_id}.json`
 - Vector indices: `data/interview_intelligence_v2/vector_db/`
-- Audio recordings: `data/practice_audio/` (WAV format)
+- Audio recordings: `data/practice_audio/` (WAV format). Audio files are used for session-level processing and user playback only and are not used for learning or analytics.
 - Model cache: `data/models/` (sentence-transformers downloads)
 
 *Note: File-based architecture chosen for simplicity; DB migration path available for scaling.*
@@ -456,6 +427,8 @@ User Request → Router → SessionManager → LLM Service → Response
 ### Purpose
 Real-time audio-based interview simulator with comprehensive speech analytics, micro-feedback, and end-to-end evaluation.
 
+When `ENABLE_PRACTICE_LEARNING` is enabled, Practice Mode optionally captures anonymized behavioral metrics (e.g., speaking pace, hesitation, follow-up depth) and a post-session confidence score provided by the user. These signals are aggregated across sessions to improve feedback quality over time. No raw audio or transcripts are stored.
+
 ### Key Responsibilities
 - **Round-based interviews:** Pre-configured rounds (HR, Technical, System Design) with dynamic question generation
 - **Quick-start onboarding:** Conversational AI infers user profile from natural language
@@ -483,6 +456,10 @@ PracticeModeService (Orchestrator)
 4. **Processing:** STT → analytics → evaluation → micro-feedback
 5. **Acknowledgment Gate:** User acknowledges feedback before next question
 6. **Completion:** Final evaluation report generated with comprehensive coaching
+
+### Learning Insights
+
+When practice learning is enabled and a minimum cohort size is met (currently 3+ sessions in the same peer bucket), evaluation reports may include a learning insight derived from aggregated, anonymized practice data. Insights are omitted for small cohorts to avoid misleading feedback.
 
 ### Differentiators
 - **Local processing:** No cloud STT dependency (faster-whisper runs offline)
@@ -838,8 +815,7 @@ The system extracts `user_id` from multiple sources (priority order):
 
 ### Privacy & Data Use
 
-Practice data is anonymized and used only to improve feedback quality.
-For learning/analytics, the system relies on derived signals; raw audio and direct personal identifiers are not used for learning or analytics.
+Practice learning uses aggregated, anonymized metrics only; derived signals are used to improve feedback quality over time, and no raw audio, transcripts, or personally identifiable information are retained for learning purposes.
 
 ## Data Isolation
 
@@ -1086,6 +1062,7 @@ ENABLE_RERANKING=true
 ENABLE_CODE_EXECUTION=true
 ENABLE_QUERY_EXPANSION=false
 ENABLE_STREAMING=true
+ENABLE_PRACTICE_LEARNING=false
 ```
 
 ### Demo-mode cost controls (optional)
@@ -1725,6 +1702,7 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 - `ENABLE_RERANKING`
 - `ENABLE_CODE_EXECUTION`
 - `PRACTICE_MODE_ENABLED`
+- `ENABLE_PRACTICE_LEARNING`
 
 *Full list: 50+ configurable settings in `app/config.py`*
 

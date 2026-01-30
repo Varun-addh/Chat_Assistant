@@ -56,7 +56,13 @@ def init_db():
         # Ensure data directory exists
         os.makedirs("data", exist_ok=True)
         
-        # Create all tables
+        # Create all tables.
+        # Under pytest, ensure each test starts from a clean DB to avoid
+        # cross-test data leakage. Only do this for SQLite so we don't
+        # accidentally wipe a developer's Postgres database.
+        if os.getenv("PYTEST_CURRENT_TEST") and DATABASE_URL.startswith("sqlite"):
+            Base.metadata.drop_all(bind=engine)
+
         Base.metadata.create_all(bind=engine)
 
         # Lightweight SQLite "migration" for new columns we add over time.

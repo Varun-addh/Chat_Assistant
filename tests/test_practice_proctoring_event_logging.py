@@ -61,7 +61,13 @@ def test_practice_mode_proctoring_event_logged(monkeypatch):
     start = client.post(
         "/api/practice/interview/start",
         headers={"X-API-Key": "test_key"},
-        json={"difficulty": "medium", "category": "behavioral", "question_count": 1},
+        json={
+            "screen_shared": True,
+            "camera_enabled": True,
+            "difficulty": "medium",
+            "category": "behavioral",
+            "question_count": 1,
+        },
     )
     assert start.status_code == 200
     session_id = start.json()["session_id"]

@@ -266,25 +266,21 @@ class PracticeModeService:
             # Generate TTS audio for first question (optional - continue without it if it fails)
             audio_filename = None
             try:
-                audio_filename = f"{session_id}_q1.mp3"  # Use mp3 for gTTS
-                audio_path = str(self.audio_dir / audio_filename)
+                # Use wav as the requested container for pyttsx3 (Windows SAPI); gTTS will return mp3.
+                audio_path = str(self.audio_dir / f"{session_id}_q1.wav")
                 
                 formatted_text = self.interviewer_agent.format_tts_text(
                     first_question,
                     total_questions=len(questions),
                     company_name=user_profile.company_preference if user_profile else None
                 )
-                result = await asyncio.wait_for(
-                    self.tts_service.synthesize_async(formatted_text, audio_path),
-                    timeout=15.0  # 15 second timeout for TTS
-                )
+                result_path = await self.tts_service.synthesize_async(formatted_text, audio_path)
+                audio_filename = Path(result_path).name
                 
                 # Store audio filename
-                session.audio_files.append(audio_filename)
+                if audio_filename:
+                    session.audio_files.append(audio_filename)
                 logger.info(f"TTS audio generated for question 1: {audio_filename}")
-            except asyncio.TimeoutError:
-                logger.warning(f"TTS generation timed out for question 1, continuing without audio")
-                audio_filename = None
             except Exception as e:
                 logger.warning(f"TTS generation failed for question 1: {e}, continuing without audio")
                 audio_filename = None
@@ -777,8 +773,8 @@ class PracticeModeService:
             # Generate TTS for next question
             audio_filename = None
             try:
-                audio_filename = f"{session_id}_q{next_question.id}.mp3"
-                audio_path = str(self.audio_dir / audio_filename)
+                # Use wav as the requested container for pyttsx3 (Windows SAPI); gTTS will return mp3.
+                audio_path = str(self.audio_dir / f"{session_id}_q{next_question.id}.wav")
                 
                 formatted_text = self.interviewer_agent.format_tts_text(
                     next_question,
@@ -786,15 +782,11 @@ class PracticeModeService:
                     company_name=session.company_name
                 )
                 
-                result = await asyncio.wait_for(
-                    self.tts_service.synthesize_async(formatted_text, audio_path),
-                    timeout=15.0
-                )
-                session.audio_files.append(audio_filename)
+                result_path = await self.tts_service.synthesize_async(formatted_text, audio_path)
+                audio_filename = Path(result_path).name
+                if audio_filename:
+                    session.audio_files.append(audio_filename)
                 logger.info(f"✅ TTS generated after acknowledgment for Q{next_question.id}")
-            except asyncio.TimeoutError:
-                logger.warning(f"TTS timeout for Q{next_question.id}")
-                audio_filename = None
             except Exception as e:
                 logger.warning(f"TTS failed for Q{next_question.id}: {e}")
                 audio_filename = None

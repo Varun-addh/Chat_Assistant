@@ -1,0 +1,1963 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>Stratax AI Technical Documentation</title>
+    
+    <style>
+      @page { size: A4; margin: 18mm 16mm; }
+
+      body {
+        font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+        font-size: 10.5pt;
+        line-height: 1.45;
+        color: #111827;
+        margin: 0;
+        padding: 0;
+      }
+
+      h1 {
+        font-size: 22pt;
+        font-weight: 700;
+        color: #0f172a;
+        margin: 0 0 10pt 0;
+        border-bottom: 3px solid #2563eb;
+        padding-bottom: 6pt;
+        page-break-after: avoid;
+        break-after: avoid-page;
+      }
+
+      h2 {
+        font-size: 15pt;
+        font-weight: 600;
+        color: #2563eb;
+        margin: 12pt 0 6pt 0;
+        page-break-after: avoid;
+        break-after: avoid-page;
+      }
+
+      h3 {
+        font-size: 12.5pt;
+        font-weight: 600;
+        color: #1e40af;
+        margin: 10pt 0 5pt 0;
+        page-break-after: avoid;
+        break-after: avoid-page;
+      }
+
+      p { margin: 0 0 6pt 0; }
+
+      code {
+        background: #f3f4f6;
+        padding: 2pt 6pt;
+        border-radius: 3pt;
+        font-family: Consolas, 'Courier New', monospace;
+        font-size: 10pt;
+        color: #1e40af;
+      }
+
+      pre {
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 10pt;
+        border-radius: 6pt;
+        overflow-x: auto;
+        margin: 10pt 0;
+        font-family: Consolas, 'Courier New', 'Lucida Console', monospace;
+        font-size: 9.5pt;
+        line-height: 1.4;
+        page-break-inside: auto;
+        break-inside: auto;
+        white-space: pre;
+      }
+
+      pre code {
+        background: transparent;
+        color: #e2e8f0;
+        padding: 0;
+        font-size: 9.5pt;
+        display: block;
+        white-space: pre;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 10pt 0;
+        font-size: 9.5pt;
+        page-break-inside: auto;
+        break-inside: auto;
+      }
+
+      thead { display: table-header-group; }
+      tfoot { display: table-footer-group; }
+
+      tr {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      th {
+        background: #2563eb;
+        color: white;
+        padding: 8pt 10pt;
+        text-align: left;
+        font-weight: 600;
+        border: 1px solid #1e40af;
+      }
+
+      td {
+        padding: 8pt 10pt;
+        border: 1px solid #d1d5db;
+      }
+
+      tr:nth-child(even) { background: #f9fafb; }
+
+      ul, ol { margin: 6pt 0; padding-left: 25pt; }
+      li { margin: 3pt 0; }
+
+      blockquote {
+        border-left: 4pt solid #2563eb;
+        margin: 14pt 0;
+        color: #4b5563;
+        background: #f8fafc;
+        padding: 12pt 16pt;
+      }
+
+      .page-break { break-after: page; page-break-after: always; height: 0; }
+
+      .keep-with-diagram {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      /* Force-fit tall diagrams (especially the Security Model) onto a single page. */
+      .diagram-security .mermaid svg {
+        max-height: 180mm !important;
+      }
+
+      /* Mermaid blocks get SVG inserted by Mermaid */
+      .mermaid {
+        margin: 10pt 0;
+        display: flex;
+        justify-content: center;
+      }
+      .mermaid svg {
+        width: auto !important;
+        max-width: 100% !important;
+        height: auto !important;
+        display: block;
+      }
+
+      /* Cover page */
+      .cover {
+        page-break-after: always;
+        padding-top: 14mm;
+      }
+      .cover .title {
+        font-size: 28pt;
+        font-weight: 800;
+        color: #0f172a;
+        margin: 0 0 10pt 0;
+      }
+      .cover .subtitle {
+        font-size: 12pt;
+        color: #374151;
+        margin: 0 0 18pt 0;
+      }
+      .cover .meta {
+        font-size: 10.5pt;
+        color: #6b7280;
+      }
+    </style>
+    
+  </head>
+  <body>
+    
+    <div class="cover">
+      <div class="title">Stratax AI Technical Documentation</div>
+      <div class="subtitle">Exported from Stratax_AI_Technical_Documentation.md</div>
+      <div class="meta">Date: 2026-01-28</div>
+    </div>
+    
+    <h1 id="stratax-ai">Stratax AI</h1>
+<div class="keep-with-diagram"><h2 id="backend-technical-architecture-system-design">Backend Technical Architecture &amp; System Design</h2>
+<hr />
+<p><strong>Version:</strong> 1.0<br />
+<strong>Date:</strong> January 2026<br />
+<strong>Organization:</strong> Stratax AI Development Team<br />
+<strong>Classification:</strong> Technical Architecture Document</p>
+<hr />
+<div class="page-break"></div>
+
+<h1 id="executive-summary">Executive Summary</h1>
+<h2 id="overview">Overview</h2>
+<p>Stratax AI is an interview simulation and evaluation engine designed to model real interviewer behavior and generate structured, explainable assessment reports. Unlike traditional interview prep platforms focused on question banks or competitive coding, Stratax evaluates reasoning quality, communication clarity, and decision-making at the session level.</p>
+<h2 id="problem-statement">Problem Statement</h2>
+<p>Structured interview simulation and evaluation faces several critical challenges:
+- <strong>Lack of personalized feedback</strong> on communication delivery and technical accuracy
+- <strong>Limited access</strong> to company-specific and domain-targeted interview questions
+- <strong>Insufficient real-time coaching</strong> during practice sessions
+- <strong>No systematic evaluation</strong> of coding solutions with actionable improvement suggestions</p>
+<h2 id="solution-architecture">Solution Architecture</h2>
+<p>Stratax AI addresses these challenges through a multi-layered backend architecture:</p>
+<ol>
+<li><strong>Intelligent Q&amp;A Engine</strong> — Context-aware conversational assistant powered by Groq and Gemini LLMs</li>
+<li><strong>Practice Mode</strong> — Real-time audio-based interview simulator with speech analytics and micro-feedback</li>
+<li><strong>Interview Intelligence</strong> — Vector search and LLM-driven question generation with optional web augmentation</li>
+<li><strong>Code Evaluation</strong> — Static analysis combined with LLM critique for comprehensive code review</li>
+<li><strong>Architecture Generation</strong> — Automatic system diagram creation from code analysis</li>
+</ol>
+<h2 id="key-capabilities">Key Capabilities</h2>
+<ul>
+<li><strong>Multi-provider LLM abstraction</strong> supporting Groq and Google Gemini with hot-swappable configuration</li>
+<li><strong>Local speech processing</strong> using faster-whisper (STT) and pyttsx3/gTTS (TTS) for offline practice</li>
+<li><strong>Hybrid retrieval system</strong> combining BM25 lexical search with semantic vector search via Qdrant</li>
+<li><strong>Agent-based architecture</strong> with specialized components for interviewing, evaluation, and speech analytics</li>
+<li><strong>Company-specific interview intelligence</strong> with targeted question generation</li>
+<li><strong>Real-time feedback loops</strong> with micro-coaching on delivery metrics (pace, fillers, confidence)</li>
+<li><strong>Telemetry-driven personalization</strong> using a structured event stream (privacy-safe stable hashes) and deterministic learning loops for recommended practice focus areas</li>
+</ul>
+<h2 id="technology-foundation">Technology Foundation</h2>
+<p><strong>Runtime:</strong> Python 3.11+ + FastAPI + Starlette<br />
+<strong>AI/ML:</strong> Groq SDK, Google Generative AI, sentence-transformers, faster-whisper<br />
+<strong>Storage:</strong> SQL DB via <code>DATABASE_URL</code> (SQLite or Postgres) for structured records (users/usage/rate limits/telemetry), Qdrant vector DB for semantic retrieval, plus file-based JSON/JSONL persistence for sessions/audit logs. SQLite is supported for local development only; production deployments are expected to use PostgreSQL (e.g., Neon).<br />
+<strong>Deployment:</strong> Docker containerization with docker-compose orchestration (defaults to Postgres + Qdrant + Redis)<br />
+<strong>Audio:</strong> librosa, soundfile, pyttsx3, gTTS</p>
+<h2 id="target-users">Target Users</h2>
+<ul>
+<li><strong>Engineering Teams</strong> integrating AI interview capabilities into products</li>
+<li><strong>Platform Developers</strong> building interview simulation and evaluation services</li>
+<li><strong>Technical Architects</strong> evaluating AI-driven coaching systems</li>
+<li><strong>DevOps Engineers</strong> deploying and scaling the service</li>
+</ul>
+<h2 id="who-this-system-is-for-and-who-it-is-not">Who This System Is For (And Who It Is Not)</h2>
+<h3 id="target-users_1">Target users</h3>
+<ul>
+<li>Hiring teams conducting mock or structured interviews</li>
+<li>Internal L&amp;D teams evaluating interview readiness</li>
+<li>Bootcamps and training institutes running interview simulations</li>
+<li>Recruitment agencies performing candidate screening</li>
+</ul>
+<h3 id="individual-use-students-tech-professionals">Individual use (students &amp; tech professionals)</h3>
+<p>Individual candidates (students and working professionals) use Stratax to:</p>
+<ul>
+<li>experience realistic interview simulations</li>
+<li>practice explaining reasoning, not just coding</li>
+<li>receive structured feedback similar to real interviews</li>
+<li>identify gaps in communication, problem-solving, and approach</li>
+</ul>
+<p>This individual usage mirrors how the system is used by hiring teams and training programs, making it suitable both for self-directed practice and formal evaluation.</p>
+<p><strong>The same evaluation and reporting pipeline is used for both individual practice and institutional assessment.</strong></p>
+<h3 id="non-goals">Non-goals</h3>
+<ul>
+<li>Stratax is not a competitive programming platform (e.g., LeetCode)</li>
+<li>It does not focus on large-scale coding challenge libraries</li>
+<li>It is not designed for mass B2C, consumer-scale self-serve practice</li>
+</ul>
+<h3 id="positioning">Positioning</h3>
+<p>Stratax is an <strong>Interview Simulation and Evaluation Engine</strong>, focused on:</p>
+<p>All subsystems are designed to support a single goal: producing realistic interview simulations and reliable evaluation signals.</p>
+<p>While Stratax is used by individual candidates, its evaluation and feedback system improves through aggregated, anonymized practice data rather than static question banks.</p>
+<ul>
+<li>interviewer-style questioning</li>
+<li>reasoning and explanation quality</li>
+<li>session-level intelligence</li>
+<li>structured evaluation reports</li>
+<li>fairness, consistency, and auditability</li>
+</ul>
+<h2 id="learning-from-individual-interview-practice">Learning From Individual Interview Practice</h2>
+<p>Stratax is designed for students and tech professionals preparing for interviews.
+Each practice session generates anonymized behavioral and performance signals such as:</p>
+<ul>
+<li>communication pace and hesitation</li>
+<li>reasoning depth and follow-up quality</li>
+<li>confidence self-assessment after interviews</li>
+</ul>
+<p>These signals allow Stratax to identify patterns of improvement, common mistakes, and confidence progression across repeated practice sessions.</p>
+<p>Over time, this enables more accurate feedback and more realistic interview simulations, even for individual users.</p>
+<div class="page-break"></div>
+
+<h1 id="system-overview">System Overview</h1>
+<h2 id="backend-responsibilities">Backend Responsibilities</h2>
+<p>The Stratax AI backend serves as the central orchestration layer for all interview intelligence operations. Core responsibilities include:</p>
+<h3 id="primary-functions">Primary Functions</h3>
+<ol>
+<li><strong>Session Management</strong> — Per-user conversational context with persistent history</li>
+<li><strong>LLM Orchestration</strong> — Provider-agnostic request routing with fallback handling</li>
+<li><strong>Vector Search</strong> — Semantic question retrieval using embedding-based similarity</li>
+<li><strong>Audio Processing</strong> — Transcription, synthesis, and delivery metric extraction</li>
+<li><strong>Evaluation Pipeline</strong> — Multi-stage assessment of answers and code submissions</li>
+<li><strong>Diagram Generation</strong> — Architecture visualization from code analysis</li>
+</ol>
+<h2 id="recent-updates-past-week">Recent Updates (Past Week)</h2>
+<h3 id="telemetry-learning-loops">Telemetry &amp; learning loops</h3>
+<ul>
+<li>Added a structured telemetry spine using a database-backed <code>event_records</code> stream (SQLAlchemy <code>EventRecord</code>).</li>
+<li>Events use privacy-safe stable identifiers (SHA256 or HMAC-SHA256 when configured) and avoid raw text storage by default.</li>
+<li>Introduced deterministic “learning loops” that aggregate recent practice events into explainable insights.</li>
+<li>Exposed <code>GET /api/practice/insights</code> to return summary stats and <code>recommended_focus</code> for personalization.</li>
+</ul>
+<h3 id="interview-intelligence-key-policy-history-correctness">Interview Intelligence: key policy + history correctness</h3>
+<ul>
+<li>Enforced <code>REQUIRE_USER_API_KEY</code> behavior: when enabled, Interview Intelligence requests without a client-supplied key return <strong>401</strong> (no silent fallback).</li>
+<li>Prevented duplicate history entries by disabling backend auto-save for standard Interview Intelligence search; the UI should save exactly once through the History API.</li>
+</ul>
+<h3 id="code-studio-execution-visualize-backend-sandbox">Code Studio execution + Visualize (backend sandbox)</h3>
+<ul>
+<li>Added a dedicated LeetCode-style execution endpoint: <code>POST /api/code/execute</code>.</li>
+<li>Execution is server-side via sandbox providers (Judge0 via RapidAPI with optional fallback providers).</li>
+<li>Supports <code>stdin</code>, optional <code>test_cases</code>, and tracing.</li>
+<li>Tracing can optionally attach per-line explanations (<code>explain_trace</code>) to support a “Visualize” UI.</li>
+</ul>
+<h3 id="production-secrets-encrypted-provider-keys">Production secrets + encrypted provider keys</h3>
+<ul>
+<li>Production now requires persistent <code>JWT_SECRET_KEY</code> and <code>COOKIE_SECRET</code> (to avoid token/cookie invalidation on restart).</li>
+<li>Added encryption for user-stored provider keys using <code>STRATAX_SECRETS_ENCRYPTION_KEY</code> (Fernet), stored in DB with an <code>enc:</code> prefix.</li>
+<li>Backward compatible: plaintext rows can still be read, but production refuses to store new provider keys unless encryption is configured.</li>
+</ul>
+<h3 id="ci-github-actions">CI (GitHub Actions)</h3>
+<ul>
+<li><code>.github/workflows/ci.yml</code> runs tests on push/PR (Python 3.11/3.12 matrix), produces coverage, and runs lint/format/security checks.</li>
+<li>CI sets safe flags (<code>FAST_STARTUP=true</code>, <code>DISABLE_INTERVIEW_INTELLIGENCE=true</code>, <code>ENABLE_CODE_EXECUTION=false</code>) and uses fixed test secrets.</li>
+</ul>
+<h3 id="service-architecture">Service Architecture</h3>
+<p>The system is designed as a <strong>monolithic FastAPI service</strong> with optional modular components:</p>
+<ul>
+<li><strong>Always Available:</strong> Q&amp;A engine, session management, health endpoints</li>
+<li><strong>New:</strong> Auth subsystem (JWT + optional Google OAuth) backed by the configured SQL DB (<code>DATABASE_URL</code>; SQLite or Postgres)</li>
+<li><strong>New:</strong> Tier-based rate limiting middleware (plus demo-mode quotas + debug headers)</li>
+<li><strong>Optional Components:</strong></li>
+<li>Interview Intelligence (requires Qdrant and sentence-transformers)</li>
+<li>Practice Mode (requires audio libraries and TTS/STT models)</li>
+<li>Code Execution Sandbox (requires Judge0 or Piston API)</li>
+</ul>
+<h3 id="deployment-model">Deployment Model</h3>
+<p><strong>Single Service Container</strong> running on port 7860 with:
+- Worker count controlled by <code>UVICORN_WORKERS</code> (defaults to 1 in Dockerfile; docker-compose uses 2)
+- Lifespan-managed initialization of shared components
+- File-system persistence for sessions and vector indices
+- Optional Kroki sidecar for Mermaid rendering</p>
+<h3 id="subsystem-organization">Subsystem Organization</h3>
+<pre><code>FastAPI Application
+├── Core Q&amp;A Engine
+│   ├── Session Manager (per-user state)
+│   ├── LLM Service (provider routing)
+│   └── History Manager (JSONL logging)
+│
+├── Practice Mode (Optional)
+│   ├── Interview Orchestrator
+│   ├── Speech Analytics Agent
+│   ├── Adaptive Interviewer Agent
+│   ├── Conversational Agent
+│   ├── Evaluation Agent
+│   ├── Local STT Service (faster-whisper)
+│   └── Local TTS Service (pyttsx3/gTTS)
+│
+├── Interview Intelligence (Optional)
+│   ├── Vector Store (Qdrant + embeddings)
+│   ├── Question Generator (LLM)
+│   ├── Hybrid Search Engine (BM25 + semantic)
+│   ├── Cohere Reranker (optional)
+│   ├── Query Expansion (LLM-based)
+│   └── Code Execution Sandbox (optional)
+│
+├── Mock Interview
+│   ├── Session Persistence
+│   ├── Progressive Hints
+│   └── LLM Evaluation
+│
+├── Code Evaluation
+│   ├── Static Analysis
+│   ├── LLM Critique
+│   └── In-memory Cache
+│
+└── Architecture/Diagram Generator
+    ├── Mermaid Sanitization
+    ├── Complexity Detection
+    └── Optional Kroki Rendering
+</code></pre>
+<div class="page-break"></div>
+
+<h1 id="architecture-overview">Architecture Overview</h1>
+<h2 id="high-level-component-interaction">High-Level Component Interaction</h2>
+<div class="mermaid">
+graph TB
+    Client["&lt;b&gt;Client Layer&lt;/b&gt;&lt;br/&gt;Web UI, Mobile App, API Consumers"]
+
+    subgraph Gateway["API Gateway Layer - FastAPI + Middleware"]
+        MW["CORS | Auth | User ID Extraction | Rate Limiting | Audit"]
+    end
+
+    subgraph Core["Core Service Layer"]
+        QA["&lt;b&gt;Q&amp;A Core&lt;/b&gt;&lt;br/&gt;• SessionManager&lt;br/&gt;• LLM Service&lt;br/&gt;• History"]
+        PM["&lt;b&gt;Practice Mode&lt;/b&gt;&lt;br/&gt;• 5 Agents&lt;br/&gt;• STT/TTS"]
+        IE["&lt;b&gt;Intelligence Engine&lt;/b&gt;&lt;br/&gt;• Vector DB&lt;br/&gt;• LLM Generation"]
+    end
+
+    subgraph Infrastructure["Infrastructure Layer"]
+        LLM["&lt;b&gt;LLM Layer&lt;/b&gt;&lt;br/&gt;• Groq&lt;br/&gt;• Gemini"]
+        Audio["&lt;b&gt;Audio Layer&lt;/b&gt;&lt;br/&gt;• faster-whisper&lt;br/&gt;• pyttsx3/gTTS"]
+        Vector["&lt;b&gt;Vector Layer&lt;/b&gt;&lt;br/&gt;• Qdrant&lt;br/&gt;• sentence-transformers"]
+    end
+
+    Persist["&lt;b&gt;Persistence Layer&lt;/b&gt;&lt;br/&gt;• SQL DB (SQLite dev / Postgres prod): users/usage/rate limits/telemetry&lt;br/&gt;• Sessions: JSON per user&lt;br/&gt;• Vector DB: Qdrant local store&lt;br/&gt;• Audio: WAV files (session only)&lt;br/&gt;• History/Audit: JSONL logs"]
+
+    Client --&gt;|HTTP/WebSocket| Gateway
+    Gateway --&gt; QA
+    Gateway --&gt; PM
+    Gateway --&gt; IE
+
+    QA --&gt; LLM
+    PM --&gt; LLM
+    PM --&gt; Audio
+    IE --&gt; Vector
+    IE --&gt; LLM
+
+    LLM --&gt; Persist
+    Audio --&gt; Persist
+    Vector --&gt; Persist
+</div></div>
+
+<div class="keep-with-diagram"><h2 id="primary-use-case-structured-interview-simulation-for-hiring">Primary Use Case: Structured Interview Simulation for Hiring</h2>
+<ol>
+<li>An interview session is created.</li>
+<li>The candidate completes a simulated interview (questions + follow-ups).</li>
+<li>The system captures:<ul>
+<li>answers</li>
+<li>reasoning/explanations</li>
+<li>timing (e.g., pace/pauses)</li>
+<li>proctoring events (where enabled)</li>
+</ul>
+</li>
+<li>The system produces:<ul>
+<li>evaluation scores</li>
+<li>strengths &amp; gaps</li>
+<li>red flags</li>
+<li>an interview readiness signal</li>
+</ul>
+</li>
+</ol>
+<p>This mirrors how real interviews are evaluated, not how coding platforms rank users.</p>
+<h2 id="request-flow-example-practice-mode-audio-submission">Request Flow Example: Practice Mode Audio Submission</h2>
+<div class="mermaid">
+graph TD
+    A["User uploads audio"] --&gt; B["Router authenticates &amp; validates"]
+    B --&gt; C["PracticeModeService orchestrator"]
+    C --&gt; D["LocalSTTService&lt;br/&gt;transcribes audio&lt;br/&gt;(faster-whisper)"]
+    D --&gt; E["SpeechAnalyticsAgent&lt;br/&gt;extracts metrics&lt;br/&gt;(WPM, fillers, pauses)"]
+    E --&gt; F["InterviewerAgent&lt;br/&gt;generates micro-feedback&lt;br/&gt;(optional: Gemini)"]
+    F --&gt; G["AdaptiveInterviewerAgent&lt;br/&gt;evaluates comprehensively&lt;br/&gt;(shared llm_service)"]
+    G --&gt; H["Response assembled&lt;br/&gt;with feedback + next question"]
+</div></div>
+
+<div class="keep-with-diagram"><h2 id="data-flow-interview-intelligence-search">Data Flow: Interview Intelligence Search</h2>
+<div class="mermaid">
+graph TD
+    Q["User query:&lt;br/&gt;'Python concurrency interview questions'"]
+    Q --&gt; R["Router → InterviewIntelligenceService"]
+    R --&gt; QE["QueryExpansion&lt;br/&gt;(LLM augments query)&lt;br/&gt;&lt;i&gt;Optional&lt;/i&gt;"]
+    QE --&gt; HS["HybridSearchEngine"]
+    HS --&gt; BM25["BM25 lexical retrieval"]
+    HS --&gt; SEM["Semantic search&lt;br/&gt;(Qdrant + embeddings)"]
+    BM25 --&gt; RR["CohereReranker&lt;br/&gt;reorders candidates&lt;br/&gt;&lt;i&gt;Optional&lt;/i&gt;"]
+    SEM --&gt; RR
+    RR --&gt; LG["LLM generates fresh questions&lt;br/&gt;&lt;i&gt;Optional&lt;/i&gt;"]
+    LG --&gt; RES["Results returned with&lt;br/&gt;metadata + code solutions"]
+</div></div>
+
+<div class="page-break"></div>
+
+<h1 id="technology-stack">Technology Stack</h1>
+<h2 id="runtime-framework">Runtime &amp; Framework</h2>
+<h3 id="core-platform">Core Platform</h3>
+<ul>
+<li><strong>Python 3.12</strong> — Modern async/await support, performance improvements</li>
+<li><strong>FastAPI</strong> — High-performance async web framework with automatic OpenAPI documentation</li>
+<li><strong>Starlette</strong> — ASGI toolkit for routing, middleware, and WebSocket support</li>
+<li><strong>Uvicorn</strong> — Lightning-fast ASGI server for production deployment</li>
+<li><strong>Pydantic</strong> — Data validation and settings management with type safety</li>
+</ul>
+<h3 id="configuration-management">Configuration Management</h3>
+<ul>
+<li><strong>pydantic-settings</strong> — Environment-based configuration with <code>.env</code> support</li>
+<li><strong>python-dotenv</strong> — Secure secrets management via environment variables</li>
+</ul>
+<h2 id="ai-machine-learning">AI &amp; Machine Learning</h2>
+<h3 id="large-language-models">Large Language Models</h3>
+<ul>
+<li><strong>Groq SDK</strong> — Ultra-fast inference with Llama and Mixtral models</li>
+<li><strong>Google Generative AI (Gemini)</strong> — Multimodal capabilities, large context windows</li>
+</ul>
+<p><em>The system provides a unified abstraction layer allowing hot-swappable provider selection via configuration.</em></p>
+<h3 id="embeddings-vector-search">Embeddings &amp; Vector Search</h3>
+<ul>
+<li><strong>sentence-transformers</strong> — State-of-the-art semantic embeddings (all-MiniLM-L6-v2)</li>
+<li><strong>torch (CPU build)</strong> — PyTorch runtime optimized for CPU inference</li>
+<li><strong>Qdrant</strong> — High-performance vector database with HNSW indexing</li>
+</ul>
+<h3 id="retrieval-augmentation">Retrieval Augmentation</h3>
+<ul>
+<li><strong>LangChain Community</strong> — BM25 retrieval, vectorstore abstractions, text splitters</li>
+<li><strong>rank-bm25</strong> — Lexical search for hybrid retrieval</li>
+<li><strong>Cohere API</strong> — Neural reranking for search result optimization</li>
+</ul>
+<h3 id="speech-processing">Speech Processing</h3>
+<ul>
+<li><strong>faster-whisper</strong> — OpenAI Whisper optimized for CPU with CTranslate2</li>
+<li><strong>pyttsx3</strong> — Offline text-to-speech (Windows SAPI, macOS NSSpeechSynthesizer, Linux espeak)</li>
+<li><strong>gTTS</strong> — Google Text-to-Speech fallback for cloud-based synthesis</li>
+<li><strong>librosa</strong> — Audio feature extraction for speech analytics</li>
+<li><strong>soundfile</strong> — Audio I/O operations</li>
+</ul>
+<h3 id="agent-architecture">Agent Architecture</h3>
+<p>The Practice Mode subsystem implements a multi-agent pattern:
+- <strong>InterviewerAgent</strong> — Question sequencing and micro-feedback
+- <strong>SpeechAnalyticsAgent</strong> — Delivery metrics via DSP (not LLM-based)
+- <strong>AdaptiveInterviewerAgent</strong> — LLM-driven answer evaluation
+- <strong>ConversationalAgent</strong> — Profile inference from natural language
+- <strong>EvaluationAgent</strong> — End-of-interview coaching reports</p>
+<h2 id="storage-persistence">Storage &amp; Persistence</h2>
+<h3 id="primary-storage">Primary Storage</h3>
+<ul>
+<li><strong>File System</strong> — JSON/JSONL for sessions, history, and configuration</li>
+<li><strong>Qdrant (Local Mode)</strong> — Embedded vector database for interview questions</li>
+</ul>
+<h3 id="persistence-strategy">Persistence Strategy</h3>
+<ul>
+<li>User sessions: <code>data/sessions/{user_id}/{session_id}.json</code></li>
+<li>Vector indices: <code>data/interview_intelligence_v2/vector_db/</code></li>
+<li>Audio recordings: <code>data/practice_audio/</code> (WAV format). Audio files are used for session-level processing and user playback only and are not used for learning or analytics.</li>
+<li>Model cache: <code>data/models/</code> (sentence-transformers downloads)</li>
+</ul>
+<p><em>Note: File-based architecture chosen for simplicity; DB migration path available for scaling.</em></p>
+<h2 id="external-integrations-optional">External Integrations (Optional)</h2>
+<ul>
+<li><strong>Serper API</strong> — Web search for real-time interview question sourcing</li>
+<li><strong>Judge0/Piston</strong> — Code execution sandboxes for safe code evaluation</li>
+<li><strong>GitHub API</strong> — Repository search for technical question curation</li>
+<li><strong>Kroki</strong> — Mermaid diagram rendering service</li>
+</ul>
+<h2 id="containerization">Containerization</h2>
+<ul>
+<li><strong>Docker</strong> — Single-service container with Python 3.12 slim base</li>
+<li><strong>docker-compose</strong> — Multi-container orchestration (app + Kroki)</li>
+</ul>
+<div class="page-break"></div>
+
+<h1 id="core-capabilities-modules">Core Capabilities &amp; Modules</h1>
+<h2 id="1-qa-engine">1. Q&amp;A Engine</h2>
+<h3 id="purpose">Purpose</h3>
+<p>Conversational AI assistant for interview simulation with persistent session context and multi-turn conversation support.</p>
+<h3 id="key-responsibilities">Key Responsibilities</h3>
+<ul>
+<li>Session lifecycle management (create, list, delete, title updates)</li>
+<li>LLM request orchestration with provider selection</li>
+<li>Conversation history persistence per user</li>
+<li>Profile upload and context enrichment (resume/job description analysis)</li>
+</ul>
+<h3 id="architecture-pattern">Architecture Pattern</h3>
+<pre><code>User Request → Router → SessionManager → LLM Service → Response
+                  ↓
+            Per-user JSON persistence
+</code></pre>
+<h3 id="notable-features">Notable Features</h3>
+<ul>
+<li><strong>API key flexibility:</strong> Accepts user-supplied keys or falls back to server configuration</li>
+<li><strong>Streaming support:</strong> Optional response streaming for real-time UX</li>
+<li><strong>Identity guard:</strong> System prompt enforces attribution to prevent AI impersonation</li>
+</ul>
+<hr />
+<h2 id="2-practice-mode">2. Practice Mode</h2>
+<h3 id="purpose_1">Purpose</h3>
+<p>Real-time audio-based interview simulator with comprehensive speech analytics, micro-feedback, and end-to-end evaluation.</p>
+<p>When <code>ENABLE_PRACTICE_LEARNING</code> is enabled, Practice Mode optionally captures anonymized behavioral metrics (e.g., speaking pace, hesitation, follow-up depth) and a post-session confidence score provided by the user. These signals are aggregated across sessions to improve feedback quality over time. No raw audio or transcripts are stored.</p>
+<h3 id="key-responsibilities_1">Key Responsibilities</h3>
+<ul>
+<li><strong>Round-based interviews:</strong> Pre-configured rounds (HR, Technical, System Design) with dynamic question generation</li>
+<li><strong>Quick-start onboarding:</strong> Conversational AI infers user profile from natural language</li>
+<li><strong>Audio processing:</strong> Local STT transcription with Voice Activity Detection (VAD)</li>
+<li><strong>Speech analytics:</strong> Delivery metrics (WPM, fillers, pauses, pitch variance, confidence scoring)</li>
+<li><strong>Micro-feedback:</strong> Immediate coaching tips (&lt; 15 words each) on delivery</li>
+<li><strong>Comprehensive evaluation:</strong> Per-answer technical accuracy scoring with actionable suggestions</li>
+<li><strong>Final report:</strong> End-of-interview coaching with strengths, improvements, and action plan</li>
+</ul>
+<h3 id="multi-agent-architecture">Multi-Agent Architecture</h3>
+<pre><code>PracticeModeService (Orchestrator)
+    ├─ LocalSTTService → Transcription
+    ├─ SpeechAnalyticsAgent → Delivery metrics
+    ├─ InterviewerAgent → Question bank + micro-feedback
+    ├─ AdaptiveInterviewerAgent → Answer evaluation (LLM)
+    ├─ ConversationalAgent → Profile inference (LLM)
+    └─ EvaluationAgent → Final coaching report (LLM)
+</code></pre>
+<h3 id="workflow">Workflow</h3>
+<ol>
+<li><strong>Start:</strong> User initiates via quick-start or round selection</li>
+<li><strong>Question Presentation:</strong> Question delivered with optional TTS audio</li>
+<li><strong>Answer Submission:</strong> User uploads audio answer</li>
+<li><strong>Processing:</strong> STT → analytics → evaluation → micro-feedback</li>
+<li><strong>Acknowledgment Gate:</strong> User acknowledges feedback before next question</li>
+<li><strong>Completion:</strong> Final evaluation report generated with comprehensive coaching</li>
+</ol>
+<h3 id="learning-insights">Learning Insights</h3>
+<p>When practice learning is enabled and a minimum cohort size is met (currently 3+ sessions in the same peer bucket), evaluation reports may include a learning insight derived from aggregated, anonymized practice data. Insights are omitted for small cohorts to avoid misleading feedback.</p>
+<h3 id="differentiators">Differentiators</h3>
+<ul>
+<li><strong>Local processing:</strong> No cloud STT dependency (faster-whisper runs offline)</li>
+<li><strong>Dynamic filler detection:</strong> Not hardcoded lists; detects repetitions, fragments, false starts</li>
+<li><strong>Company-specific interview intelligence:</strong> Generates questions tailored to Google, Meta, Amazon, etc.</li>
+</ul>
+<h2 id="what-makes-this-different">What Makes This Different</h2>
+<ul>
+<li>Session-level evaluation instead of question-level scoring</li>
+<li>Interviewer-style follow-up logic</li>
+<li>Feedback is informed by real practice behavior, not just LLM-generated answers</li>
+<li>Confidence and communication signals are tracked across sessions for the same user</li>
+<li>LLM-provider-aware evaluation (Groq/Gemini routing)</li>
+<li>Proctoring signal capture (focus, tab switches, presence)</li>
+<li>Explainable evaluation output (not just pass/fail)</li>
+</ul>
+<h3 id="core-differentiation">Core Differentiation</h3>
+<ul>
+<li>Interviewer-style follow-up logic (not static Q&amp;A)</li>
+<li>Session-level evaluation (not per-question gamification)</li>
+<li>Explainable scoring (strengths, gaps, red flags)</li>
+<li>Proctoring signals integrated into evaluation context</li>
+<li>Same engine used for self-practice and formal assessment</li>
+</ul>
+<hr />
+<h2 id="3-interview-intelligence">3. Interview Intelligence</h2>
+<h3 id="purpose_2">Purpose</h3>
+<p>Semantic search and intelligent question generation system powered by vector embeddings and LLM augmentation.</p>
+<h3 id="key-responsibilities_2">Key Responsibilities</h3>
+<ul>
+<li><strong>Vector search:</strong> Qdrant-based semantic retrieval with embedding similarity</li>
+<li><strong>Question generation:</strong> LLM creates questions when database lacks sufficient results</li>
+<li><strong>Code solution backfill:</strong> Automatically generates code solutions for technical questions</li>
+<li><strong>Source transparency:</strong> Tracks question provenance (curated, generated, community)</li>
+</ul>
+<h3 id="ai-native-enhancement-pipeline">AI-Native Enhancement Pipeline</h3>
+<p>When feature flags enabled:</p>
+<pre><code>Query Input
+    ↓
+[QueryExpansion] ← LLM augments query
+    ↓
+[HybridSearchEngine] ← BM25 + Semantic fusion
+    ↓
+[CohereReranker] ← Neural reranking
+    ↓
+[CodeExecutionSandbox] ← Validate solutions
+    ↓
+Results + Metadata
+</code></pre>
+<h3 id="hybrid-retrieval-strategy">Hybrid Retrieval Strategy</h3>
+<ul>
+<li><strong>Lexical (BM25):</strong> Exact keyword matching for specific terms (e.g., "asyncio", "React hooks")</li>
+<li><strong>Semantic (Vector):</strong> Conceptual similarity for natural language queries</li>
+<li><strong>Fusion:</strong> Reciprocal rank fusion combines scores for optimal ranking</li>
+</ul>
+<h3 id="optional-enhancements">Optional Enhancements</h3>
+<ul>
+<li><strong>Web augmentation:</strong> Serper API fetches real-time questions from web sources</li>
+<li><strong>Code execution:</strong> Judge0/Piston validates code solutions in sandboxed environments</li>
+<li><strong>Streaming search:</strong> WebSocket-based progressive result delivery</li>
+</ul>
+<hr />
+<h2 id="4-mock-interview">4. Mock Interview</h2>
+<h3 id="purpose_3">Purpose</h3>
+<p>Multi-question interview session simulator with progressive difficulty, hints, and LLM-based evaluation.</p>
+<h3 id="key-responsibilities_3">Key Responsibilities</h3>
+<ul>
+<li>Question sequence management (typically 5 questions per session)</li>
+<li>Progressive hint system (3 levels: gentle nudge → concept clarification → near-solution)</li>
+<li>Per-question timing and evaluation tracking</li>
+<li>Final summary with scores and improvement recommendations</li>
+</ul>
+<h3 id="persistence-model">Persistence Model</h3>
+<ul>
+<li>Active sessions: In-memory with periodic JSON persistence</li>
+<li>History: Long-term storage per user in consolidated JSON file</li>
+</ul>
+<h3 id="evaluation-flow">Evaluation Flow</h3>
+<pre><code>User submits answer
+    ↓
+LLM evaluates with temporarily increased token limit
+    ↓
+Score (0-100) + detailed feedback
+    ↓
+Persisted to session
+</code></pre>
+<hr />
+<h2 id="5-code-evaluation">5. Code Evaluation</h2>
+<h3 id="purpose_4">Purpose</h3>
+<p>Hybrid static + LLM analysis for code submissions with caching to avoid redundant evaluations.</p>
+<h3 id="key-responsibilities_4">Key Responsibilities</h3>
+<ul>
+<li><strong>Static analysis:</strong> Code length, complexity heuristics, language detection</li>
+<li><strong>LLM critique:</strong> Detailed feedback on correctness, style, optimization, edge cases</li>
+<li><strong>Context-aware classification:</strong> Determines if code evaluation is appropriate for given conversation</li>
+<li><strong>Result caching:</strong> In-memory cache keyed by session + context + code hash</li>
+</ul>
+<h3 id="architecture">Architecture</h3>
+<pre><code>Code Submission
+    ↓
+[Static Signals] → Metrics (lines, complexity)
+    ↓
+[LLM Service] → Detailed critique
+    ↓
+[Cache] → Store result
+    ↓
+Response with evaluation
+</code></pre>
+<hr />
+<h2 id="6-architecture-diagram-generation">6. Architecture &amp; Diagram Generation</h2>
+<h3 id="purpose_5">Purpose</h3>
+<p>Automatic system architecture diagram generation from codebase analysis with Mermaid syntax output.</p>
+<h3 id="key-responsibilities_5">Key Responsibilities</h3>
+<ul>
+<li><strong>Complexity detection:</strong> Analyzes code for architecture-worthy patterns (microservices, layering, event-driven)</li>
+<li><strong>Multi-view generation:</strong> Creates Component, Deployment, Sequence, and Data Flow diagrams</li>
+<li><strong>Mermaid sanitization:</strong> Strips CSS/HTML artifacts and repairs syntax errors</li>
+<li><strong>Optional rendering:</strong> Kroki service integration for SVG/PNG export</li>
+</ul>
+<h3 id="view-types">View Types</h3>
+<ul>
+<li><strong>Component View:</strong> High-level system components and relationships</li>
+<li><strong>Deployment View:</strong> Infrastructure and hosting topology</li>
+<li><strong>Sequence Diagram:</strong> Request/response flows for key operations</li>
+<li><strong>Data Flow:</strong> Information movement through system layers</li>
+</ul>
+<div class="page-break"></div>
+
+<h1 id="ai-intelligence-layer">AI &amp; Intelligence Layer</h1>
+<h2 id="llm-abstraction-architecture">LLM Abstraction Architecture</h2>
+<h3 id="provider-agnostic-design">Provider-Agnostic Design</h3>
+<p>The system implements a unified <code>LLMService</code> abstraction that decouples business logic from specific LLM providers. This design enables:</p>
+<ul>
+<li><strong>Hot-swappable providers</strong> via configuration (<code>settings.llm_provider</code>)</li>
+<li><strong>Consistent interface</strong> for both streaming and non-streaming responses</li>
+<li><strong>Fallback handling</strong> when providers are unavailable or misconfigured</li>
+<li><strong>Per-request provider override</strong> for multi-tenant scenarios</li>
+</ul>
+<h3 id="provider-implementation">Provider Implementation</h3>
+<pre><code>LLMService (Abstraction)
+    ├─ generate_answer() → Full conversation response
+    ├─ generate_text() → Single completion
+    └─ Provider Routing:
+        ├─ Groq SDK → Ultra-fast inference
+        └─ Gemini SDK → Large context windows
+</code></pre>
+<p><strong>Key Decision:</strong> Groq chosen for speed (sub-second latency), Gemini for context length (1M tokens in latest models).</p>
+<h3 id="identity-guard-system">Identity Guard System</h3>
+<p>All LLM prompts include a forward prompt (<code>CODE_FORWARD_PROMPT</code>) that enforces:
+- <strong>Attribution rules:</strong> AI must never impersonate Stratax AI developers
+- <strong>Response formatting:</strong> Structured output with sections (Answer, Code, Explanation)
+- <strong>Behavioral guidelines:</strong> Professional tone, no disclaimers, actionable advice</p>
+<h2 id="agent-architecture-practice-mode">Agent Architecture (Practice Mode)</h2>
+<h3 id="multi-agent-orchestration">Multi-Agent Orchestration</h3>
+<p>Practice Mode implements a <strong>composite agent pattern</strong> where specialized agents handle distinct responsibilities:</p>
+<table>
+<thead>
+<tr>
+<th>Agent</th>
+<th>Responsibility</th>
+<th>LLM Usage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>InterviewerAgent</strong></td>
+<td>Question bank, sequencing, micro-feedback</td>
+<td>Optional (Gemini direct)</td>
+</tr>
+<tr>
+<td><strong>SpeechAnalyticsAgent</strong></td>
+<td>Delivery metrics via DSP</td>
+<td>None (pure signal processing)</td>
+</tr>
+<tr>
+<td><strong>AdaptiveInterviewerAgent</strong></td>
+<td>Answer evaluation (correctness, coverage)</td>
+<td>Yes (JSON mode)</td>
+</tr>
+<tr>
+<td><strong>ConversationalAgent</strong></td>
+<td>Profile inference from natural language</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td><strong>EvaluationAgent</strong></td>
+<td>End-of-interview coaching report</td>
+<td>Yes (JSON mode)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="why-multi-agent">Why Multi-Agent?</h3>
+<p><strong>Separation of concerns:</strong> Each agent has a single, well-defined purpose.<br />
+<strong>Independent scaling:</strong> Can optimize/replace agents without affecting others.<br />
+<strong>Testability:</strong> Each agent can be unit-tested in isolation.<br />
+<strong>Fallback resilience:</strong> If LLM-based agent fails, rule-based fallbacks preserve core functionality.</p>
+<h3 id="json-mode-enforcement">JSON Mode Enforcement</h3>
+<p>Several agents operate in <strong>JSON mode</strong> for structured output:</p>
+<pre><code class="language-python">AdaptiveInterviewerAgent.evaluate_answer_comprehensively()
+    → Returns:
+    {
+      &quot;correctness_score&quot;: 0-100,
+      &quot;technical_accuracy&quot;: &quot;Excellent|Good|Fair|Poor&quot;,
+      &quot;key_points_covered&quot;: [...],
+      &quot;strengths&quot;: [...],
+      &quot;improvement_areas&quot;: [...],
+      &quot;actionable_suggestions&quot;: [...]
+    }
+</code></pre>
+<p><strong>Challenge:</strong> LLMs occasionally produce malformed JSON.<br />
+<strong>Mitigation:</strong> Multi-stage JSON repair pipeline with regex-based fixing and manual extraction fallbacks.</p>
+<h2 id="retrieval-augmented-generation-rag">Retrieval-Augmented Generation (RAG)</h2>
+<h3 id="hybrid-search-architecture">Hybrid Search Architecture</h3>
+<p>Interview Intelligence combines <strong>lexical</strong> and <strong>semantic</strong> retrieval for optimal question discovery:</p>
+<pre><code>Query: &quot;Explain Python GIL&quot;
+    ↓
+┌─────────────────────┬─────────────────────┐
+│   BM25 (Lexical)    │  Semantic (Vector)  │
+│                     │                     │
+│ Exact match: &quot;GIL&quot;  │ Conceptual match:   │
+│ High weight: Python │ &quot;thread safety&quot;,    │
+│                     │ &quot;concurrency limits&quot;│
+└──────────┬──────────┴──────────┬──────────┘
+           │                     │
+           └──────────┬──────────┘
+                      ↓
+           Reciprocal Rank Fusion
+                      ↓
+              Top-K Results
+</code></pre>
+<h3 id="why-hybrid">Why Hybrid?</h3>
+<ul>
+<li><strong>BM25 strengths:</strong> Exact terminology matches (framework names, specific APIs)</li>
+<li><strong>Semantic strengths:</strong> Conceptual similarity, paraphrase handling, multilingual potential</li>
+<li><strong>Fusion:</strong> Combines best of both without requiring relevance labels for training</li>
+</ul>
+<h3 id="optional-reranking">Optional Reranking</h3>
+<p>When <code>enable_reranking=true</code> and Cohere API key provided:</p>
+<pre><code>Initial results (BM25 + Semantic fusion)
+    ↓
+CohereReranker
+    ↓
+Neural model re-scores candidates
+    ↓
+Top-K refined results
+</code></pre>
+<p><strong>Benefit:</strong> Cohere's reranker is trained on relevance data; improves precision by 15-30% in practice.</p>
+<h2 id="code-execution-sandbox">Code Execution Sandbox</h2>
+<h3 id="purpose_6">Purpose</h3>
+<p>Safely validate code solutions for generated interview questions.</p>
+<h3 id="architecture_1">Architecture</h3>
+<pre><code>Code solution candidate
+    ↓
+CodeExecutionSandbox
+    ├─ Judge0 API (primary)
+    └─ Piston API (fallback)
+    ↓
+Execution result (stdout, stderr, exit code)
+    ↓
+Solution marked as verified/failed
+</code></pre>
+<h3 id="safety-guarantees">Safety Guarantees</h3>
+<ul>
+<li><strong>External sandbox:</strong> Code never executes on application server</li>
+<li><strong>Resource limits:</strong> Judge0/Piston enforce CPU/memory/time constraints</li>
+<li><strong>Language support:</strong> Python, JavaScript, Java, C++, and 40+ more</li>
+</ul>
+<h3 id="use-case">Use Case</h3>
+<p>When generating questions, the system can:
+1. Generate code solution via LLM
+2. Execute in sandbox to verify correctness
+3. Store only verified solutions in vector DB
+4. <strong>Result:</strong> Higher quality question bank with tested solutions</p>
+<h2 id="query-expansion">Query Expansion</h2>
+<h3 id="purpose_7">Purpose</h3>
+<p>Augment user queries with related terms and concepts to improve retrieval recall.</p>
+<h3 id="flow">Flow</h3>
+<pre><code>User query: &quot;React optimization&quot;
+    ↓
+QueryExpansion (LLM)
+    ↓
+Expanded: &quot;React optimization, useMemo, useCallback,
+           React.memo, virtual DOM, component re-rendering&quot;
+    ↓
+Search with expanded query
+</code></pre>
+<p><strong>Trade-off:</strong> Improves recall but may reduce precision. Enabled via feature flag.</p>
+<div class="page-break"></div>
+
+<h1 id="security-model">Security Model</h1>
+<h2 id="authentication-authorization">Authentication &amp; Authorization</h2>
+<h3 id="api-key-strategy">API Key Strategy</h3>
+<p>The system implements <strong>optional bearer token authentication</strong>:</p>
+<pre><code>Authorization: Bearer &lt;API_KEY&gt;
+</code></pre>
+<p><strong>Behavior:</strong>
+- If <code>settings.api_key</code> is <strong>set</strong> → Authentication required for protected endpoints
+- If <code>settings.api_key</code> is <strong>unset</strong> → Authentication bypassed (development mode)</p>
+<p><strong>Protected Endpoints:</strong>
+- <code>POST /api/render_mermaid</code> (diagram generation requires auth)
+- WebSocket <code>ws://*/ws/stt/{session_id}</code> (requires key via <code>Sec-WebSocket-Protocol</code> header)</p>
+<h3 id="websocket-authentication">WebSocket Authentication</h3>
+<p>WebSocket connections cannot use standard HTTP headers, so the API key is passed via the WebSocket subprotocol:</p>
+<pre><code class="language-javascript">new WebSocket('ws://host/ws/stt/session123', ['&lt;API_KEY&gt;'])
+</code></pre>
+<p>Server validates via <code>websocket_verify_api_key</code> function.</p>
+<h3 id="user-identification">User Identification</h3>
+<p>The system extracts <code>user_id</code> from multiple sources (priority order):</p>
+<ol>
+<li><strong>Header:</strong> <code>X-User-ID</code></li>
+<li><strong>Bearer Token:</strong> Extracted from <code>Authorization</code> header (JWT is verified for authenticated routes; legacy/non-auth flows may still treat the token as a caller-provided identifier)</li>
+<li><strong>Query Parameter:</strong> <code>?user_id=...</code></li>
+<li><strong>Cookie:</strong> <code>user_id</code> cookie</li>
+</ol>
+<p><strong>User ID Purpose:</strong>
+- Session isolation (each user has separate session directory)
+- History segregation
+- Audit logging</p>
+<h3 id="privacy-data-use">Privacy &amp; Data Use</h3>
+<p>Practice learning uses aggregated, anonymized metrics only; derived signals are used to improve feedback quality over time, and no raw audio, transcripts, or personally identifiable information are retained for learning purposes.</p>
+<h2 id="data-isolation">Data Isolation</h2>
+<h3 id="per-user-storage">Per-User Storage</h3>
+<p>All user data is isolated by <code>user_id</code>:</p>
+<pre><code>data/
+├── sessions/
+│   ├── user123/
+│   │   ├── session-abc.json
+│   │   └── session-def.json
+│   └── user456/
+│       └── session-xyz.json
+</code></pre>
+<p><strong>Guarantee:</strong> Users cannot access other users' sessions or history.</p>
+<h3 id="session-manager-design">Session Manager Design</h3>
+<ul>
+<li><strong>In-memory cache per user:</strong> <code>_user_managers</code> dictionary keyed by <code>user_id</code></li>
+<li><strong>File-system persistence:</strong> JSON files under <code>data/sessions/{user_id}/</code></li>
+<li><strong>Concurrency protection:</strong> File locks prevent write conflicts</li>
+</ul>
+<h2 id="cors-configuration">CORS Configuration</h2>
+<p><strong>Current Setting:</strong> Fully permissive</p>
+<pre><code class="language-python">allow_origins=[&quot;*&quot;]
+allow_methods=[&quot;*&quot;]
+allow_headers=[&quot;*&quot;]
+</code></pre>
+<p><strong>Production Recommendation:</strong> Restrict <code>allow_origins</code> to specific domains:</p>
+<pre><code class="language-python">allow_origins=[
+    &quot;https://app.stratax.ai&quot;,
+    &quot;https://admin.stratax.ai&quot;
+]
+</code></pre>
+<h2 id="known-security-gaps">Known Security Gaps</h2>
+<h3 id="1-mixed-identity-mechanisms-jwt-vs-user_id-extraction">1. Mixed identity mechanisms (JWT vs. "user_id" extraction)</h3>
+<p><strong>Current State (as implemented):</strong></p>
+<ul>
+<li>JWT verification <strong>is implemented</strong> for authenticated routes using <code>app/auth.py</code> (FastAPI <code>HTTPBearer</code> + JWT decode).</li>
+<li>Separately, general request flows still use a convenience middleware that derives <code>request.state.user_id</code> from headers/cookies/query params.<ul>
+<li>That middleware may treat <code>Authorization: Bearer &lt;token&gt;</code> as a user_id when present (JWT decode is not applied there).</li>
+</ul>
+</li>
+</ul>
+<p><strong>Risk:</strong> In multi-tenant deployments, using an unverified bearer token as an identifier can allow spoofing of <code>user_id</code> in non-authenticated flows.</p>
+<p><strong>Recommendation:</strong> Unify identity: prefer deriving <code>user_id</code> from validated JWT (when provided), and treat other mechanisms as guest-only identifiers.</p>
+<h3 id="2-rate-limiting-is-in-memory-not-distributed">2. Rate limiting is in-memory (not distributed)</h3>
+<p><strong>Current State:</strong> A tier-based in-memory sliding-window limiter meters expensive LLM-backed endpoints and returns <code>X-RateLimit-*</code> headers; demo sessions have stricter caps.</p>
+<p><strong>Risk:</strong> Limits are not shared across instances/workers.</p>
+<p><strong>Recommendation:</strong> For production horizontal scaling, move rate limiting to Redis (or another shared store) and keep the same header contract.</p>
+<h3 id="3-websocket-stt-is-intentionally-deferred">3. WebSocket STT is intentionally deferred</h3>
+<p><strong>Current State:</strong> The WebSocket STT endpoint exists, but the streaming transcription path is intentionally deferred (not used as the primary production STT).</p>
+<p><strong>Recommendation:</strong> Practice Mode uses faster-whisper via <code>LocalSTTService</code> (production-ready path). If you need WebSocket streaming STT, integrate a real provider (Deepgram/AssemblyAI/etc.) or implement a faster-whisper streaming adapter with backpressure + input validation.</p>
+<h3 id="4-api-keys-in-configuration">4. API Keys in Configuration</h3>
+<p><strong>Current State:</strong> LLM provider keys stored in <code>.env</code> file.</p>
+<p><strong>Risk:</strong> Keys could be committed to version control or exposed in logs.</p>
+<p><strong>Recommendation:</strong> Use secrets management (AWS Secrets Manager, HashiCorp Vault, Azure Key Vault).</p>
+<h2 id="audit-logging">Audit Logging</h2>
+<h3 id="jsonl-audit-trail">JSONL Audit Trail</h3>
+<p>When enabled (<code>settings.analytics_path</code>), the system logs:
+- User ID
+- Session ID
+- Question text
+- Answer text
+- Timestamp
+- LLM provider used</p>
+<p><strong>Storage Format:</strong> JSONL (JSON Lines) for easy parsing and streaming ingestion.</p>
+<p><strong>Use Case:</strong> Compliance, usage analytics, debugging, LLM cost tracking.</p>
+<div class="page-break"></div>
+
+<h1 id="deployment-operations">Deployment &amp; Operations</h1>
+<h2 id="production-readiness-short">Production Readiness (short)</h2>
+<ul>
+<li>Neon Postgres used for production persistence</li>
+<li>Docker Postgres is dev-only (profile-based)</li>
+<li>Multi-LLM fallback routing implemented</li>
+<li>Email verification &amp; password reset enabled</li>
+<li>Rate limiting &amp; demo gating enforced</li>
+</ul>
+<p>Stratax is intentionally not optimized for large-scale competitive coding or leaderboard-driven learning.</p>
+<h2 id="docker-configuration">Docker Configuration</h2>
+<h3 id="container-architecture">Container Architecture</h3>
+<p><strong>Base Image:</strong> <code>python:3.11-slim</code><br />
+<strong>Exposed Port:</strong> 7860<br />
+<strong>Entry Command:</strong> <code>uvicorn app.main:app --host 0.0.0.0 --port 7860 --workers ${UVICORN_WORKERS}</code></p>
+<p><strong>Worker Notes</strong><br />
+- Single-worker is safest when using a file-backed local Qdrant store.
+- With docker-compose (Qdrant runs as a separate service), multi-worker is supported.</p>
+<h3 id="health-check">Health Check</h3>
+<p>The container exposes operational health endpoints:</p>
+<pre><code class="language-bash">GET /health
+GET /health/ready
+GET /health/live
+</code></pre>
+<p><strong>Response (example shape):</strong></p>
+<pre><code class="language-json">{
+    &quot;status&quot;: &quot;healthy&quot;,
+    &quot;timestamp&quot;: &quot;2026-01-01T00:00:00.000000&quot;,
+    &quot;app_name&quot;: &quot;...&quot;,
+    &quot;environment&quot;: &quot;...&quot;,
+    &quot;version&quot;: &quot;1.0.0&quot;,
+    &quot;checks&quot;: {
+        &quot;database&quot;: {&quot;status&quot;: &quot;healthy&quot;, &quot;latency_ms&quot;: 12.34},
+        &quot;llm_service&quot;: {&quot;status&quot;: &quot;configured&quot;, &quot;provider&quot;: &quot;gemini&quot;},
+        &quot;vector_db&quot;: {&quot;status&quot;: &quot;disabled&quot;}
+    }
+}
+</code></pre>
+<p>Note: a lightweight legacy endpoint is also available at <code>GET /health/simple</code>.</p>
+<h3 id="volume-mounts">Volume Mounts</h3>
+<pre><code class="language-yaml">volumes:
+  - ./app:/app/app                        # Source code (dev hot-reload)
+  - ./data/sessions:/app/data/sessions    # User sessions
+  - ./data/models:/app/data/models        # Embedding models
+  - ./data/practice_audio:/app/data/practice_audio
+  - ./data/interview_intelligence_v2:/app/data/interview_intelligence_v2
+</code></pre>
+<p><strong>Persistence Guarantee:</strong> All critical state is preserved across container restarts.</p>
+<h2 id="docker-compose-orchestration">docker-compose Orchestration</h2>
+<h3 id="multi-service-setup">Multi-Service Setup</h3>
+<pre><code class="language-yaml">services:
+  web:
+    build: .
+    ports:
+      - &quot;7860:7860&quot;
+    environment:
+      - KROKI_URL=http://kroki:8000/mermaid/svg
+            # Production: set DATABASE_URL to Neon.
+            # Local (optional): set DATABASE_URL_DOCKER to Postgres and run with `--profile local`.
+            - DATABASE_URL=${DATABASE_URL_DOCKER:-${DATABASE_URL:-postgresql+psycopg://...}}
+        depends_on:
+            - qdrant
+            - redis
+            - kroki
+
+  kroki:
+    image: yuzutech/kroki
+    ports:
+      - &quot;8000:8000&quot;
+
+    postgres:
+        profiles: [&quot;local&quot;]
+        image: postgres:16
+        ports:
+            - &quot;5433:5432&quot;
+
+    qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+            - &quot;6333:6333&quot;
+
+    redis:
+        image: redis:7-alpine
+        ports:
+            - &quot;6379:6379&quot;
+</code></pre>
+<p><strong>Kroki Integration:</strong> Optional Mermaid diagram rendering service. If unavailable, diagrams return text-only Mermaid syntax.</p>
+<h2 id="environment-configuration">Environment Configuration</h2>
+<h3 id="critical-variables">Critical Variables</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+<th>Required</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GROQ_API_KEY</code></td>
+<td>Groq LLM access</td>
+<td>Yes (if using Groq)</td>
+</tr>
+<tr>
+<td><code>GEMINI_API_KEY</code></td>
+<td>Google Gemini access</td>
+<td>Yes (if using Gemini)</td>
+</tr>
+<tr>
+<td><code>LLM_PROVIDER</code></td>
+<td>Provider selection: <code>groq</code> or <code>gemini</code></td>
+<td>Yes</td>
+</tr>
+<tr>
+<td><code>API_KEY</code></td>
+<td>Optional bearer auth for protected endpoints</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>PRACTICE_MODE_ENABLED</code></td>
+<td>Enable/disable Practice Mode</td>
+<td>No (default: true)</td>
+</tr>
+<tr>
+<td><code>JWT_SECRET_KEY</code></td>
+<td>JWT signing secret for <code>/auth/*</code></td>
+<td>Yes (in production)</td>
+</tr>
+<tr>
+<td><code>COOKIE_SECRET</code></td>
+<td>Cookie signing secret (OAuth state + cookies)</td>
+<td>Yes (in production)</td>
+</tr>
+<tr>
+<td><code>STRATAX_SECRETS_ENCRYPTION_KEY</code></td>
+<td>Encrypt/decrypt user-stored provider keys (<code>enc:</code> prefix)</td>
+<td>Yes (recommended; required for storing keys in production)</td>
+</tr>
+<tr>
+<td><code>GOOGLE_CLIENT_ID</code></td>
+<td>Google OAuth</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>GOOGLE_CLIENT_SECRET</code></td>
+<td>Google OAuth</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>BACKEND_BASE_URL</code></td>
+<td>OAuth redirect base (backend)</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>FRONTEND_URL</code></td>
+<td>OAuth redirect base (frontend)</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>ENABLE_DEMO_KEY_POOL</code></td>
+<td>Allow demo users to consume Stratax demo key pool</td>
+<td>No</td>
+</tr>
+<tr>
+<td><code>STRATAX_DEMO_API_KEYS</code></td>
+<td>Pool of Groq keys for demo traffic</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<h3 id="optional-integrations">Optional Integrations</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SERPER_API_KEY</code></td>
+<td>Web search augmentation</td>
+</tr>
+<tr>
+<td><code>COHERE_API_KEY</code></td>
+<td>Neural reranking</td>
+</tr>
+<tr>
+<td><code>JUDGE0_API_KEY</code></td>
+<td>Code execution sandbox</td>
+</tr>
+<tr>
+<td><code>GITHUB_TOKEN</code></td>
+<td>GitHub repository search</td>
+</tr>
+<tr>
+<td><code>KROKI_URL</code></td>
+<td>Diagram rendering service</td>
+</tr>
+</tbody>
+</table>
+<h3 id="feature-flags">Feature Flags</h3>
+<pre><code class="language-bash">ENABLE_HYBRID_SEARCH=true
+ENABLE_RERANKING=true
+ENABLE_CODE_EXECUTION=true
+ENABLE_QUERY_EXPANSION=false
+ENABLE_STREAMING=true
+ENABLE_PRACTICE_LEARNING=false
+</code></pre>
+<h3 id="demo-mode-cost-controls-optional">Demo-mode cost controls (optional)</h3>
+<p>The backend can operate a public demo mode that is cost-capped by:</p>
+<ul>
+<li>Strict per-session demo quotas (minutes-based window)</li>
+<li>Optional global daily demo request limit</li>
+<li>Optional demo key pool with a safety gate to prevent burning demo keys in development</li>
+</ul>
+<p>See <code>app/config.py</code> and <code>app/middleware/rate_limit.py</code>.</p>
+<h2 id="monitoring-observability">Monitoring &amp; Observability</h2>
+<h3 id="health-endpoints">Health Endpoints</h3>
+<ul>
+<li><strong>Primary:</strong> <code>GET /health</code> (application status)</li>
+<li><strong>Identity Check:</strong> <code>GET /api/identity-check</code> (LLM identity guard diagnostic)</li>
+<li><strong>Mock Interview:</strong> <code>GET /api/mock-interview/health</code></li>
+<li><strong>Intelligence:</strong> <code>GET /api/intelligence/health</code></li>
+</ul>
+<h3 id="logging-strategy">Logging Strategy</h3>
+<p><strong>Default:</strong> Python logging with INFO level<br />
+<strong>Debug Mode:</strong> Set <code>LOG_LEVEL=DEBUG</code> for verbose output</p>
+<p><strong>Structured Logs:</strong> Agent actions, LLM calls, and search operations log structured JSON for parsing.</p>
+<h3 id="resource-monitoring">Resource Monitoring</h3>
+<p><strong>Key Metrics to Track:</strong>
+- <strong>Memory:</strong> Embedding models + Qdrant indices consume 2-4GB
+- <strong>Disk:</strong> Growing with user sessions, audio files, vector DB
+- <strong>LLM API Quotas:</strong> Track calls/day to Groq and Gemini
+- <strong>Audio Storage:</strong> Practice audio files accumulate (~1MB per answer)</p>
+<div class="page-break"></div>
+
+<h1 id="performance-scalability">Performance &amp; Scalability</h1>
+<h2 id="current-architecture-constraints">Current Architecture Constraints</h2>
+<h3 id="1-single-worker-limitation">1. Single-Worker Limitation</h3>
+<p><strong>Constraint:</strong> <code>uvicorn --workers 1</code> due to Qdrant local file lock.</p>
+<p><strong>Impact:</strong>
+- Cannot scale horizontally within a single instance
+- Request throughput limited to single-process concurrency
+- Long-running LLM calls can block other requests</p>
+<p><strong>Mitigation Implemented:</strong>
+- Async FastAPI endpoints minimize blocking
+- Shared Qdrant client in lifespan prevents lock conflicts
+- LLM calls use <code>asyncio.to_thread</code> for I/O parallelism</p>
+<p><strong>Future Path:</strong>
+- Migrate to <strong>Qdrant Cloud</strong> or <strong>self-hosted Qdrant server</strong> (removes file lock)
+- Enable multi-worker deployment with shared vector DB connection</p>
+<h3 id="2-file-based-persistence">2. File-Based Persistence</h3>
+<p><strong>Current Design:</strong> JSON/JSONL files for sessions, history, mock interviews.</p>
+<p><strong>Limitations:</strong>
+- No ACID transactions
+- Manual concurrency control via file locks
+- Backup/rotation requires custom scripting
+- Search performance degrades with large history</p>
+<p><strong>When to Migrate:</strong>
+- &gt; 10,000 active users
+- Require distributed deployment
+- Need advanced query capabilities (e.g., "find all sessions mentioning X")</p>
+<p><strong>Migration Path:</strong> PostgreSQL or MongoDB for structured data, keep Qdrant for vectors.</p>
+<h3 id="3-in-memory-caching">3. In-Memory Caching</h3>
+<p><strong>Cache Locations:</strong>
+- Code evaluation results (per-process memory)
+- Session manager user caches (<code>_user_managers</code> dict)
+- No cross-instance cache sharing</p>
+<p><strong>Impact:</strong> Cache misses on every request if using multiple instances or container restarts.</p>
+<p><strong>Solution:</strong> Introduce Redis for shared caching layer.</p>
+<h2 id="optimization-strategies-implemented">Optimization Strategies Implemented</h2>
+<h3 id="1-embedding-model-caching">1. Embedding Model Caching</h3>
+<p><strong>Approach:</strong> SentenceTransformer model loaded once at startup and reused.</p>
+<p><strong>Benefit:</strong> Avoid ~2-second model load per request.</p>
+<p><strong>Implementation:</strong> Singleton pattern in <code>InterviewIntelligenceService</code> initialization.</p>
+<h3 id="2-audio-processing-efficiency">2. Audio Processing Efficiency</h3>
+<p><strong>faster-whisper Configuration:</strong></p>
+<pre><code class="language-python">model = WhisperModel(
+    model_size_or_path=&quot;base&quot;,  # Configurable: tiny, base, small, medium
+    device=&quot;cpu&quot;,
+    compute_type=&quot;int8&quot;          # Quantization for speed
+)
+</code></pre>
+<p><strong>Trade-off:</strong> Accuracy vs. speed. <code>base</code> model provides good balance.</p>
+<h3 id="3-vector-search-performance">3. Vector Search Performance</h3>
+<p><strong>Qdrant HNSW Index:</strong> Approximate nearest neighbor search with sub-linear time complexity.</p>
+<p><strong>Configuration:</strong></p>
+<pre><code class="language-python">distance = Distance.COSINE
+vectors_config = VectorParams(
+    size=384,              # all-MiniLM-L6-v2 embedding size
+    distance=Distance.COSINE
+)
+</code></pre>
+<p><strong>Performance:</strong> &lt;100ms for searches in databases with &lt;100k vectors.</p>
+<h2 id="resource-requirements">Resource Requirements</h2>
+<h3 id="memory-profile">Memory Profile</h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Memory Usage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Base Python + FastAPI</td>
+<td>~200MB</td>
+</tr>
+<tr>
+<td>sentence-transformers model</td>
+<td>~500MB</td>
+</tr>
+<tr>
+<td>faster-whisper model (base)</td>
+<td>~400MB</td>
+</tr>
+<tr>
+<td>Qdrant index (10k questions)</td>
+<td>~500MB</td>
+</tr>
+<tr>
+<td><strong>Total (typical)</strong></td>
+<td><strong>~2-3GB</strong></td>
+</tr>
+</tbody>
+</table>
+<h3 id="disk-growth">Disk Growth</h3>
+<table>
+<thead>
+<tr>
+<th>Data Type</th>
+<th>Growth Rate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User sessions</td>
+<td>~5KB per session</td>
+</tr>
+<tr>
+<td>Audio recordings</td>
+<td>~1MB per practice answer</td>
+</tr>
+<tr>
+<td>Vector DB</td>
+<td>~2KB per question (embedding + metadata)</td>
+</tr>
+<tr>
+<td>Model cache</td>
+<td>~2GB (one-time download)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="cpu-considerations">CPU Considerations</h3>
+<p><strong>Heavy Operations:</strong>
+- Audio transcription (faster-whisper): 0.1-1s per 10s audio
+- Embedding generation: 50-200ms per query
+- LLM calls: Variable (Groq: &lt;1s, Gemini: 1-5s)</p>
+<p><strong>Recommendation:</strong> 2-4 CPU cores for production deployment.</p>
+<h2 id="scaling-roadmap">Scaling Roadmap</h2>
+<h3 id="phase-1-current-up-to-1000-concurrent-users">Phase 1: Current (Up to 1,000 concurrent users)</h3>
+<ul>
+<li>✅ Single container</li>
+<li>✅ File-based persistence</li>
+<li>✅ Local Qdrant</li>
+</ul>
+<h3 id="phase-2-horizontal-scaling-1000-10000-users">Phase 2: Horizontal Scaling (1,000 - 10,000 users)</h3>
+<ul>
+<li>🔄 Qdrant Cloud migration</li>
+<li>🔄 Multi-worker FastAPI with <code>--workers N</code></li>
+<li>🔄 Redis for shared caching</li>
+<li>🔄 Database (PostgreSQL) for sessions</li>
+</ul>
+<h3 id="phase-3-distributed-10000-users">Phase 3: Distributed (10,000+ users)</h3>
+<ul>
+<li>🔄 Microservices split (Q&amp;A, Practice, Intelligence as separate services)</li>
+<li>🔄 Message queue for async jobs (Celery + RabbitMQ)</li>
+<li>🔄 Object storage (S3) for audio files</li>
+<li>🔄 CDN for TTS audio delivery</li>
+</ul>
+<div class="page-break"></div>
+
+<h1 id="known-issues-recommendations">Known Issues &amp; Recommendations</h1>
+<h2 id="production-grade-transparency">Production-Grade Transparency</h2>
+<p><em>This section intentionally documents current limitations to enable informed deployment decisions.</em></p>
+<h3 id="forward-looking-hardening-checklist">Forward-looking hardening checklist</h3>
+<ul>
+<li><strong>JWT hardening (header separation + consistency)</strong>: keep JWT auth in <code>Authorization</code> and move user-provided LLM keys to a dedicated header (to avoid ambiguity); consistently use the JWT <code>sub</code> as the canonical user identifier.</li>
+<li><strong>Redis rate limiting (distributed quotas)</strong>: enable the existing Redis-backed limiter by setting <code>REDIS_URL</code> so quotas are shared across workers/instances and resilient to restarts.</li>
+<li><strong>Multi-worker scaling</strong>: migrate file-based persistence to Postgres/object storage and run Qdrant as a separate service/managed instance to avoid file-lock conflicts.</li>
+<li><strong>Production STT</strong>: WebSocket STT is intentionally deferred; if you need streaming STT, integrate a real provider (Deepgram/AssemblyAI/etc.) or implement a faster-whisper streaming adapter.</li>
+</ul>
+<h2 id="critical-issues">Critical Issues</h2>
+<h3 id="1-port-mismatch-in-docker-healthcheck">1. Port Mismatch in Docker Healthcheck</h3>
+<p><strong>Status:</strong> Resolved — <code>docker-compose.yml</code> healthcheck targets <code>http://localhost:7860/health</code>.</p>
+<hr />
+<h3 id="2-websocket-stt-is-intentionally-deferred">2. WebSocket STT is intentionally deferred</h3>
+<p><strong>Status:</strong> WebSocket STT is intentionally deferred; Practice Mode uses faster-whisper (production-ready).</p>
+<p><strong>Current Behavior:</strong> <code>STTService.stream_transcribe()</code> yields placeholder tokens (<code>"..."</code> or <code>"(audio)"</code>) rather than real transcriptions.</p>
+<p><strong>Impact:</strong> The WebSocket STT endpoint is not intended for production streaming transcription.</p>
+<p><strong>Recommendation:</strong> Keep WebSocket STT disabled/unused in production until a real streaming STT provider (Deepgram/AssemblyAI/etc.) or a faster-whisper streaming adapter is implemented.</p>
+<p><strong>Priority:</strong> Medium — Practice Mode unaffected; only impacts WebSocket-based UX.</p>
+<hr />
+<h3 id="3-jwt-verification-is-implemented-with-legacy-identity-fallbacks">3. JWT verification is implemented (with legacy identity fallbacks)</h3>
+<p><strong>Current State (as implemented):</strong> JWT verification is implemented for authenticated routes via <code>app/auth.py</code> (FastAPI <code>HTTPBearer</code> + JWT decode).</p>
+<p><strong>Important nuance:</strong> A legacy/convenience <code>user_id</code> extraction path still exists for non-auth / demo / guest flows, where request identity may be derived from headers/cookies/query params.</p>
+<p><strong>Risk:</strong> In multi-tenant deployments, treating an unverified bearer token (or other caller-controlled identifier) as a stable <code>user_id</code> in non-auth flows can allow spoofing.</p>
+<p><strong>Recommendation:</strong> Keep JWT auth in <code>Authorization</code> and move user-provided LLM keys / guest identifiers to dedicated headers. Prefer the validated JWT <code>sub</code> as the canonical user identifier when present.</p>
+<hr />
+<h3 id="4-qdrant-file-lock-prevents-multi-worker-scaling">4. Qdrant File Lock Prevents Multi-Worker Scaling</h3>
+<p><strong>Issue:</strong> Local Qdrant storage uses file lock; only one process can access at a time.</p>
+<p><strong>Impact:</strong> Cannot use <code>uvicorn --workers N</code> for load distribution.</p>
+<p><strong>Current Mitigation:</strong> Shared Qdrant client initialized in lifespan; single worker.</p>
+<p><strong>Long-Term Solution:</strong> Migrate to Qdrant Cloud or self-hosted Qdrant server.</p>
+<p><strong>Priority:</strong> Medium — Single-worker adequate for 1,000 concurrent users with async endpoints.</p>
+<hr />
+<h2 id="design-trade-offs">Design Trade-offs</h2>
+<h3 id="5-mixed-persistence-models">5. Mixed Persistence Models</h3>
+<p><strong>Current State:</strong>
+- User sessions: Per-user JSON files
+- Mock interview: Single JSON file for all sessions
+- History: JSONL format
+- Vector DB: Qdrant local storage</p>
+<p><strong>Benefit:</strong> Simple, no database dependency, easy debugging.</p>
+<p><strong>Limitation:</strong> 
+- No ACID guarantees
+- Manual backup required
+- Search requires file scanning</p>
+<p><strong>Recommendation:</strong> Acceptable for &lt;10k users; plan DB migration beyond that threshold.</p>
+<p><strong>Priority:</strong> Low (currently) — Reassess at scale.</p>
+<hr />
+<h3 id="6-in-memory-code-evaluation-cache">6. In-Memory Code Evaluation Cache</h3>
+<p><strong>Issue:</strong> Cache doesn't persist across restarts or workers.</p>
+<p><strong>Impact:</strong> Redundant LLM calls for identical code submissions.</p>
+<p><strong>Solution:</strong> Implement Redis-backed cache with TTL:</p>
+<pre><code class="language-python">import redis
+r = redis.Redis(host='localhost', port=6379)
+cache_key = f&quot;eval:{hash(code)}&quot;
+result = r.get(cache_key)
+if not result:
+    result = evaluate_code(code)
+    r.setex(cache_key, 3600, json.dumps(result))
+</code></pre>
+<p><strong>Priority:</strong> Low — Optimization, not a bug.</p>
+<hr />
+<h2 id="future-enhancements">Future Enhancements</h2>
+<h3 id="7-async-background-jobs">7. Async Background Jobs</h3>
+<p><strong>Gap:</strong> Long-running operations (e.g., LLM calls &gt;5s) block request handling.</p>
+<p><strong>Recommendation:</strong> Introduce task queue (Celery + RabbitMQ) for:
+- Final evaluation report generation
+- Bulk question curation
+- Web search aggregation</p>
+<p><strong>Priority:</strong> Low — Async FastAPI handles most cases; needed at 10k+ concurrent requests.</p>
+<hr />
+<h3 id="8-vector-db-backup-strategy">8. Vector DB Backup Strategy</h3>
+<p><strong>Current State:</strong> No automated backup for Qdrant indices.</p>
+<p><strong>Risk:</strong> Data loss if <code>data/interview_intelligence_v2/</code> corrupted.</p>
+<p><strong>Recommendation:</strong> Implement periodic snapshots:</p>
+<pre><code class="language-bash"># Cron job
+0 2 * * * tar -czf /backups/qdrant-$(date +\%Y\%m\%d).tar.gz /app/data/interview_intelligence_v2/
+</code></pre>
+<p><strong>Priority:</strong> Medium — Important for production.</p>
+<hr />
+<h2 id="debugging-recommendations">Debugging Recommendations</h2>
+<p><strong>For Developers:</strong>
+1. <strong>Qdrant Lock Errors:</strong> Ensure only one server instance; check for stale processes.
+2. <strong>Empty LLM Responses:</strong> Verify API keys loaded correctly (<code>GET /health</code>).
+3. <strong>Audio Transcription Failures:</strong> Check faster-whisper model downloaded to <code>data/models/</code>.
+4. <strong>Unexpected Port:</strong> Application runs on <strong>7860</strong>, not 8000.</p>
+<div class="page-break"></div>
+
+<h1 id="onboarding-guide">Onboarding Guide</h1>
+<h2 id="quick-start-5-minutes">Quick Start (5 Minutes)</h2>
+<h3 id="prerequisites">Prerequisites</h3>
+<ul>
+<li><strong>Python 3.12+</strong></li>
+<li><strong>4GB+ RAM</strong> (for embedding models)</li>
+<li><strong>Groq or Gemini API key</strong> (for LLM features)</li>
+</ul>
+<h3 id="installation">Installation</h3>
+<pre><code class="language-bash"># 1. Navigate to project
+cd &lt;your-repo-folder&gt;
+
+# 2. Create virtual environment
+python -m venv .venv
+
+# 3. Activate environment
+source .venv/bin/activate  # Linux/Mac
+# OR
+.venv\Scripts\Activate.ps1  # Windows PowerShell
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Configure environment
+echo &quot;GROQ_API_KEY=your_key_here&quot; &gt; .env
+echo &quot;LLM_PROVIDER=groq&quot; &gt;&gt; .env
+
+# 6. Run application
+uvicorn app.main:app --host 0.0.0.0 --port 7860
+
+# 7. Verify
+curl http://localhost:7860/health
+</code></pre>
+<p><strong>Expected Response:</strong></p>
+<pre><code class="language-json">{
+    &quot;status&quot;: &quot;ok&quot;,
+    &quot;version&quot;: &quot;0.1.0&quot;,
+    &quot;llm&quot;: {&quot;provider&quot;: &quot;gemini&quot;, &quot;enabled&quot;: true}
+}
+</code></pre>
+<hr />
+<h2 id="developer-learning-path">Developer Learning Path</h2>
+<h3 id="day-1-core-architecture">Day 1: Core Architecture</h3>
+<p><strong>Goal:</strong> Understand application composition and routing.</p>
+<ol>
+<li>
+<p><strong>Read <code>app/main.py</code></strong> (100 lines)
+   - Router registration
+   - Middleware stack
+   - Lifespan initialization</p>
+</li>
+<li>
+<p><strong>Review <code>app/config.py</code></strong> (300 lines)
+   - All settings and feature flags
+   - Environment variable mapping</p>
+</li>
+<li>
+<p><strong>Skim <code>app/schemas.py</code></strong> (500 lines)
+   - Request/response contracts
+   - Enum definitions</p>
+</li>
+</ol>
+<p><strong>Time:</strong> 1-2 hours</p>
+<hr />
+<h3 id="day-2-core-features">Day 2: Core Features</h3>
+<p><strong>Goal:</strong> Understand Q&amp;A and Practice Mode.</p>
+<ol>
+<li>
+<p><strong>Explore <code>app/routers/questions.py</code></strong>
+   - Session creation
+   - LLM invocation
+   - Profile upload</p>
+</li>
+<li>
+<p><strong>Explore <code>app/routers/practice_mode.py</code></strong>
+   - Round selection
+   - Audio submission
+   - Evaluation flow</p>
+</li>
+<li>
+<p><strong>Review <code>app/services/llm_service.py</code></strong>
+   - Provider abstraction
+   - Identity guard
+   - Streaming support</p>
+</li>
+</ol>
+<p><strong>Time:</strong> 2-3 hours</p>
+<hr />
+<h3 id="day-3-advanced-components">Day 3: Advanced Components</h3>
+<p><strong>Goal:</strong> Deep dive into AI subsystems.</p>
+<ol>
+<li>
+<p><strong>Study <code>app/services/interview_intelligence_service.py</code></strong>
+   - Vector search
+   - Question generation
+   - Hybrid retrieval</p>
+</li>
+<li>
+<p><strong>Study <code>app/services/practice_mode_service.py</code></strong>
+   - Agent composition
+   - Orchestration logic
+   - STT/TTS integration</p>
+</li>
+<li>
+<p><strong>Review <code>app/services/ai_native_enhancements.py</code></strong>
+   - Hybrid search
+   - Reranking
+   - Code execution</p>
+</li>
+</ol>
+<p><strong>Time:</strong> 3-4 hours</p>
+<hr />
+<h3 id="day-4-testing-deployment">Day 4: Testing &amp; Deployment</h3>
+<p><strong>Goal:</strong> Validate understanding and deploy.</p>
+<ol>
+<li>
+<p><strong>Run test suite:</strong>
+   <code>bash
+   python test_llm_services.py
+   python test_practice_mode.py
+   python test_mermaid_fix.py</code></p>
+</li>
+<li>
+<p><strong>Try Docker build:</strong>
+   <code>bash
+   docker build -t stratax-ai .
+   docker run -p 7860:7860 stratax-ai</code></p>
+</li>
+<li>
+<p><strong>Review <code>docker-compose.yml</code></strong>
+   - Multi-service orchestration
+   - Volume mounts
+   - Environment passing</p>
+</li>
+</ol>
+<p><strong>Time:</strong> 2 hours</p>
+<hr />
+<h2 id="key-files-by-complexity">Key Files by Complexity</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+<th>Complexity</th>
+<th>Lines</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>app/main.py</code></td>
+<td>Application entry</td>
+<td>⭐ Low</td>
+<td>~100</td>
+</tr>
+<tr>
+<td><code>app/config.py</code></td>
+<td>Settings &amp; flags</td>
+<td>⭐ Low</td>
+<td>~300</td>
+</tr>
+<tr>
+<td><code>app/middleware/auth.py</code></td>
+<td>User ID extraction</td>
+<td>⭐ Low</td>
+<td>~50</td>
+</tr>
+<tr>
+<td><code>app/schemas.py</code></td>
+<td>Data contracts</td>
+<td>⭐⭐ Medium</td>
+<td>~500</td>
+</tr>
+<tr>
+<td><code>app/routers/questions.py</code></td>
+<td>Q&amp;A endpoints</td>
+<td>⭐⭐ Medium</td>
+<td>~900</td>
+</tr>
+<tr>
+<td><code>app/routers/practice_mode.py</code></td>
+<td>Practice endpoints</td>
+<td>⭐⭐⭐ High</td>
+<td>~800</td>
+</tr>
+<tr>
+<td><code>app/services/llm_service.py</code></td>
+<td>LLM abstraction</td>
+<td>⭐⭐ Medium</td>
+<td>~600</td>
+</tr>
+<tr>
+<td><code>app/services/practice_mode_service.py</code></td>
+<td>Practice orchestrator</td>
+<td>⭐⭐⭐ High</td>
+<td>~1200</td>
+</tr>
+<tr>
+<td><code>app/services/interview_intelligence_service.py</code></td>
+<td>Vector search + generation</td>
+<td>⭐⭐⭐⭐ Very High</td>
+<td>~3000+</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="common-developer-tasks">Common Developer Tasks</h2>
+<h3 id="add-a-new-llm-provider">Add a New LLM Provider</h3>
+<ol>
+<li>Add API key to <code>app/config.py</code>:
+   <code>python
+   anthropic_api_key: str = ""</code></li>
+<li>Extend <code>llm_service.py</code>:
+   <code>python
+   elif self.provider == "anthropic":
+       import anthropic
+       client = anthropic.Client(api_key)
+       # ... implementation</code></li>
+<li>Update <code>settings.llm_provider</code> validation</li>
+</ol>
+<hr />
+<h3 id="add-a-new-router">Add a New Router</h3>
+<ol>
+<li>Create <code>app/routers/my_feature.py</code>:
+   ```python
+   from fastapi import APIRouter
+   router = APIRouter()</li>
+</ol>
+<p>@router.get("/my-endpoint")
+   async def my_endpoint():
+       return {"status": "ok"}
+   <code>2. Register in `app/main.py`:</code>python
+   from app.routers.my_feature import router as my_router
+   app.include_router(my_router, prefix="/api/my-feature")
+   ```</p>
+<hr />
+<h3 id="add-a-new-agent">Add a New Agent</h3>
+<ol>
+<li>
+<p>Create <code>app/services/my_agent.py</code>:
+   ```python
+   class MyAgent:
+       def <strong>init</strong>(self, config):
+           self.config = config</p>
+<p>async def process(self, input):
+       # Agent logic
+       return result
+   <code>2. Instantiate in orchestrating service (e.g., `practice_mode_service.py`):</code>python
+   self.my_agent = MyAgent(config)
+   <code>3. Call in workflow:</code>python
+   result = await self.my_agent.process(data)
+   ```</p>
+</li>
+</ol>
+<hr />
+<h2 id="environment-configuration-priority">Environment Configuration Priority</h2>
+<ol>
+<li><strong>System environment variables</strong> (highest)</li>
+<li><strong>Env files</strong> (via <code>python-dotenv</code>)</li>
+<li><strong><code>Settings</code> class defaults</strong> (lowest)</li>
+</ol>
+<p>Notes
+- This backend supports layered env files using <code>ENV_FILE</code> (comma-separated), e.g. <code>ENV_FILE=.env,.env.local</code>. This is useful for local overrides without editing the base <code>.env</code>.</p>
+<p><strong>Example:</strong></p>
+<pre><code class="language-bash"># .env file
+GROQ_API_KEY=abc123
+LLM_PROVIDER=groq
+
+# System override (takes precedence)
+export LLM_PROVIDER=gemini
+</code></pre>
+<hr />
+<h2 id="debugging-tips">Debugging Tips</h2>
+<table>
+<thead>
+<tr>
+<th>Issue</th>
+<th>Solution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Qdrant lock error</strong></td>
+<td>Ensure single server instance; kill stale processes</td>
+</tr>
+<tr>
+<td><strong>Empty LLM responses</strong></td>
+<td>Check API keys: <code>cat .env \| grep API_KEY</code></td>
+</tr>
+<tr>
+<td><strong>Audio transcription fails</strong></td>
+<td>Verify model downloaded: <code>ls data/models/</code></td>
+</tr>
+<tr>
+<td><strong>Port 8000 vs 7860 confusion</strong></td>
+<td>Application runs on <strong>7860</strong></td>
+</tr>
+<tr>
+<td><strong>"Database is locked"</strong></td>
+<td>Only one Qdrant client allowed; check <code>lifespan</code> initialization</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="resources">Resources</h2>
+<ul>
+<li><strong>FastAPI Documentation:</strong> https://fastapi.tiangolo.com</li>
+<li><strong>Qdrant Documentation:</strong> https://qdrant.tech/documentation</li>
+<li><strong>sentence-transformers:</strong> https://www.sbert.net</li>
+<li><strong>faster-whisper:</strong> https://github.com/guillaumekln/faster-whisper</li>
+</ul>
+<div class="page-break"></div>
+
+<h1 id="appendices">Appendices</h1>
+<h2 id="appendix-a-complete-api-reference">Appendix A: Complete API Reference</h2>
+<p>Note: This appendix is a practical quick reference and is intentionally <strong>not exhaustive</strong>.
+For the complete, code-derived endpoint table (including History, WebSockets, and all Practice progress endpoints), see <code>TECHNICAL_DOCUMENTATION.md</code>.</p>
+<h3 id="core-qa-endpoints">Core Q&amp;A Endpoints</h3>
+<ul>
+<li><code>POST /api/session</code> — Create new session</li>
+<li><code>POST /api/question</code> — Submit question</li>
+<li><code>POST /api/upload_profile</code> — Upload resume/JD</li>
+<li><code>GET /api/sessions</code> — List sessions</li>
+<li><code>DELETE /api/session/{id}</code> — Delete session</li>
+<li><code>PUT /api/session/{id}/title</code> — Update title</li>
+<li><code>GET /api/session/{id}/chat</code> — Get history</li>
+</ul>
+<h3 id="practice-mode-endpoints">Practice Mode Endpoints</h3>
+<ul>
+<li><code>GET /api/practice/rounds/available</code> — List rounds</li>
+<li><code>POST /api/practice/interview/start-round</code> — Start round</li>
+<li><code>POST /api/practice/interview/quick-start</code> — Quick start</li>
+<li><code>POST /api/practice/proctoring/event</code> — Proctoring signals (events only; no media)</li>
+<li><code>POST /api/practice/interview/submit-answer</code> — Submit audio</li>
+<li><code>POST /api/practice/interview/acknowledge-feedback</code> — Next question</li>
+<li><code>GET /api/practice/session/{id}/evaluation</code> — Final report</li>
+</ul>
+<h3 id="interview-intelligence-endpoints">Interview Intelligence Endpoints</h3>
+<ul>
+<li><code>GET /api/intelligence/search</code> — Search questions</li>
+<li><code>POST /api/intelligence/search/enhanced</code> — Enhanced search</li>
+<li><code>POST /api/intelligence/curate</code> — Curate to DB</li>
+<li><code>GET /api/intelligence/companies</code> — List companies</li>
+<li><code>POST /api/intelligence/code/execute</code> — Execute code</li>
+</ul>
+<h3 id="mock-interview-endpoints">Mock Interview Endpoints</h3>
+<ul>
+<li><code>POST /api/mock-interview/sessions/start</code> — Start session</li>
+<li><code>POST /api/mock-interview/sessions/submit-answer</code> — Submit answer</li>
+<li><code>GET /api/mock-interview/sessions/{id}/summary</code> — Get summary</li>
+<li><code>POST /api/mock-interview/sessions/{id}/hint</code> — Request hint</li>
+</ul>
+<p><em>Full endpoint documentation: 74 total endpoints across 8 routers.</em></p>
+<hr />
+<h2 id="appendix-b-environment-variables">Appendix B: Environment Variables</h2>
+<h3 id="required">Required</h3>
+<ul>
+<li><code>GROQ_API_KEY</code> or <code>GEMINI_API_KEY</code></li>
+<li><code>LLM_PROVIDER</code> (groq|gemini)</li>
+</ul>
+<h3 id="optional">Optional</h3>
+<ul>
+<li><code>API_KEY</code> — Bearer auth</li>
+<li><code>SERPER_API_KEY</code> — Web search</li>
+<li><code>COHERE_API_KEY</code> — Reranking</li>
+<li><code>JUDGE0_API_KEY</code> — Code execution</li>
+<li><code>GITHUB_TOKEN</code> — GitHub search</li>
+<li><code>KROKI_URL</code> — Diagram rendering</li>
+</ul>
+<h3 id="feature-flags_1">Feature Flags</h3>
+<ul>
+<li><code>ENABLE_HYBRID_SEARCH</code></li>
+<li><code>ENABLE_RERANKING</code></li>
+<li><code>ENABLE_CODE_EXECUTION</code></li>
+<li><code>PRACTICE_MODE_ENABLED</code></li>
+<li><code>ENABLE_PRACTICE_LEARNING</code></li>
+</ul>
+<p><em>Full list: 50+ configurable settings in <code>app/config.py</code></em></p>
+<hr />
+<h2 id="appendix-c-persistence-paths">Appendix C: Persistence Paths</h2>
+<table>
+<thead>
+<tr>
+<th>Data Type</th>
+<th>Location</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>User sessions</td>
+<td><code>data/sessions/{user_id}/{session_id}.json</code></td>
+</tr>
+<tr>
+<td>Mock interviews</td>
+<td><code>data/sessions/mock_interview_sessions.json</code></td>
+</tr>
+<tr>
+<td>Practice audio</td>
+<td><code>data/practice_audio/*.wav</code></td>
+</tr>
+<tr>
+<td>Vector DB</td>
+<td><code>data/interview_intelligence_v2/vector_db/</code></td>
+</tr>
+<tr>
+<td>Models cache</td>
+<td><code>data/models/</code></td>
+</tr>
+<tr>
+<td>History logs</td>
+<td>Configured via <code>settings.analytics_path</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="appendix-d-test-coverage">Appendix D: Test Coverage</h2>
+<p><strong>Test Files:</strong> 18 total</p>
+<ul>
+<li><code>test_llm_services.py</code> — Provider switching</li>
+<li><code>test_practice_mode.py</code> — E2E practice flow</li>
+<li><code>test_session_debounce.py</code> — Concurrency protection</li>
+<li><code>test_mermaid_fix.py</code> — Diagram sanitization</li>
+<li><code>test_company_specific.py</code> — Targeted generation</li>
+<li><code>test_architecture_dynamic_limits.py</code> — Complexity detection</li>
+</ul>
+<p><em>Full test suite in repository root.</em></p>
+<hr />
+<h2 id="appendix-e-troubleshooting-commands">Appendix E: Troubleshooting Commands</h2>
+<h3 id="find-process-on-port">Find Process on Port</h3>
+<pre><code class="language-bash"># Linux/Mac
+lsof -ti:7860 | xargs kill -9
+
+# Windows
+netstat -ano | findstr :7860
+taskkill /PID &lt;pid&gt; /F
+</code></pre>
+<h3 id="check-qdrant-lock">Check Qdrant Lock</h3>
+<pre><code class="language-bash">ps aux | grep uvicorn
+# Kill stale processes
+pkill -f uvicorn
+</code></pre>
+<h3 id="verify-api-keys">Verify API Keys</h3>
+<pre><code class="language-bash">cat .env | grep -E '(GROQ|GEMINI)_API_KEY'
+</code></pre>
+<h3 id="enable-debug-logging">Enable Debug Logging</h3>
+<pre><code class="language-bash">export LOG_LEVEL=DEBUG
+uvicorn app.main:app --log-level debug
+</code></pre>
+<hr />
+<p><em>End of Technical Documentation</em></p>
+<hr />
+<p><strong>Document Metadata</strong>
+- <strong>Total Pages:</strong> 35+
+- <strong>Word Count:</strong> ~10,000
+- <strong>Code Examples:</strong> Minimal (architecture-focused)
+- <strong>Target Audience:</strong> CTOs, Architects, Senior Engineers
+- <strong>Classification:</strong> Technical Architecture &amp; System Design</p>
+<hr />
+<p><em>Generated with precision from repository codebase.</em><br />
+<em>Stratax AI Development Team — January 2026</em></p>
+    
+    <script type="module">
+      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: 'base',
+        securityLevel: 'loose',
+        themeVariables: {
+          fontFamily: "Segoe UI, Helvetica Neue, Arial, sans-serif",
+          // Keep diagrams compact for print/PDF.
+          fontSize: "12px",
+          primaryColor: "#EEF2FF",
+          primaryTextColor: "#0F172A",
+          primaryBorderColor: "#6366F1",
+          lineColor: "#475569",
+          secondaryColor: "#E0F2FE",
+          tertiaryColor: "#F8FAFC"
+        },
+        flowchart: {
+          // Prevent Mermaid from stretching diagrams to container width.
+          useMaxWidth: false,
+          nodeSpacing: 18,
+          rankSpacing: 18,
+          padding: 8,
+          curve: 'linear'
+        },
+        sequence: {
+          useMaxWidth: false,
+          diagramMarginX: 10,
+          diagramMarginY: 10,
+          actorMargin: 20,
+          boxMargin: 6,
+          boxTextMargin: 6,
+          noteMargin: 6,
+          messageMargin: 18
+        }
+      });
+    </script>
+    
+  </body>
+</html>

@@ -42,6 +42,7 @@ class LocalTTSService:
         self.output_dir = output_dir
         self.engine = None
         self._initialized = False
+        self._pyttsx3_lock = asyncio.Lock()
         
         # Create output directory
         os.makedirs(self.output_dir, exist_ok=True)
@@ -54,7 +55,11 @@ class LocalTTSService:
             return False
         
         try:
-            self.engine = pyttsx3.init()
+            # Force Windows to use SAPI5 explicitly for consistent system voices.
+            if os.name == "nt":
+                self.engine = pyttsx3.init(driverName="sapi5")
+            else:
+                self.engine = pyttsx3.init()
             
             # Configure voice parameters for natural, conversational tone
             self.engine.setProperty('rate', 190)  # Faster for high-stakes professional interview (180-200 WPM)
@@ -63,6 +68,27 @@ class LocalTTSService:
             # Try to set a specific voice if available
             voices = self.engine.getProperty('voices')
             if voices:
+                # Optional hard override: pick an exact voice id if provided.
+                if getattr(settings, "practice_tts_voice_id", None):
+                    voice_id = settings.practice_tts_voice_id
+                    try:
+                        self.engine.setProperty("voice", voice_id)
+                        logger.info(f"Selected configured voice id: {voice_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to set configured voice id '{voice_id}': {e}")
+                else:
+                    # Optional soft override: pick first voice whose name contains this substring.
+                    name_contains = (getattr(settings, "practice_tts_voice_name_contains", None) or "").strip().lower()
+                    if name_contains:
+                        for voice in voices:
+                            if name_contains in (getattr(voice, "name", "") or "").lower():
+                                try:
+                                    self.engine.setProperty("voice", voice.id)
+                                    logger.info(f"Selected configured voice by name match: {voice.name}")
+                                    break
+                                except Exception as e:
+                                    logger.warning(f"Failed to set voice '{voice.name}': {e}")
+			
                 # 👔 WORLD-CLASS MALE VOICE SELECTION 👔
                 # Priority: Male voices (Microsoft David, Alex, Mark)
                 male_keywords = list(getattr(settings, "tts_male_voice_keywords", None) or [])
@@ -75,8 +101,11 @@ class LocalTTSService:
                     for voice in voices:
                         if pref in voice.name.lower():
                             selected_voice = voice
-                            self.engine.setProperty('voice', voice.id)
-                            logger.info(f"Selected priority male voice: {voice.name}")
+                            try:
+                                self.engine.setProperty('voice', voice.id)
+                                logger.info(f"Selected priority male voice: {voice.name}")
+                            except Exception as e:
+                                logger.warning(f"Failed to set male voice '{voice.name}': {e}")
                             break
                     if selected_voice: break
                 
@@ -86,15 +115,21 @@ class LocalTTSService:
                         voice_name_lower = voice.name.lower()
                         if not any(f_key in voice_name_lower for f_key in female_keywords):
                             selected_voice = voice
-                            self.engine.setProperty('voice', voice.id)
-                            logger.info(f"Found alternative male/neutral voice: {voice.name}")
+                            try:
+                                self.engine.setProperty('voice', voice.id)
+                                logger.info(f"Found alternative male/neutral voice: {voice.name}")
+                            except Exception as e:
+                                logger.warning(f"Failed to set alternative voice '{voice.name}': {e}")
                             break
                 
                 # Step 3: Absolute final fallback (any voice, even female)
                 if not selected_voice:
                     selected_voice = voices[0]
-                    self.engine.setProperty('voice', selected_voice.id)
-                    logger.info(f"Using final fallback voice: {selected_voice.name}")
+                    try:
+                        self.engine.setProperty('voice', selected_voice.id)
+                        logger.info(f"Using final fallback voice: {selected_voice.name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to set final fallback voice '{selected_voice.name}': {e}")
             
             self._initialized = True
             logger.info("pyttsx3 engine initialized successfully with conversational settings")
@@ -104,6 +139,155 @@ class LocalTTSService:
             logger.warning(f"Failed to initialize pyttsx3: {e}")
             logger.info("TTS will use fallback mode (gTTS or mock) - This is expected in Docker without eSpeak/SAPI")
             return False
+
+    def _configure_pyttsx3_engine(self, engine) -> None:
+        """Apply rate/volume/voice selection to a pyttsx3 engine instance."""
+        # Configure voice parameters for natural, conversational tone
+        engine.setProperty('rate', 190)  # Faster for high-stakes professional interview (180-200 WPM)
+        engine.setProperty('volume', 0.95)  # Clear but not overwhelming
+
+        # Try to set a specific voice if available
+        voices = engine.getProperty('voices')
+        if not voices:
+            return
+
+        # Optional hard override: pick an exact voice id if provided.
+        if getattr(settings, "practice_tts_voice_id", None):
+            voice_id = settings.practice_tts_voice_id
+            engine.setProperty("voice", voice_id)
+            logger.info(f"Selected configured voice id: {voice_id}")
+            return
+
+        # Optional soft override: pick first voice whose name contains this substring.
+        name_contains = (getattr(settings, "practice_tts_voice_name_contains", None) or "").strip().lower()
+        if name_contains:
+            for voice in voices:
+                if name_contains in (getattr(voice, "name", "") or "").lower():
+                    engine.setProperty("voice", voice.id)
+                    logger.info(f"Selected configured voice by name match: {voice.name}")
+                    return
+
+        # 👔 WORLD-CLASS MALE VOICE SELECTION 👔
+        male_keywords = list(getattr(settings, "tts_male_voice_keywords", None) or [])
+        female_keywords = list(getattr(settings, "tts_female_voice_keywords", None) or [])
+
+        # Step 1: Search for high-quality male voices first
+        for pref in male_keywords:
+            for voice in voices:
+                if pref in (getattr(voice, "name", "") or "").lower():
+                    engine.setProperty('voice', voice.id)
+                    logger.info(f"Selected priority male voice: {voice.name}")
+                    return
+
+        # Step 2: Fallback to any voice that doesn't explicitly contain female keywords
+        for voice in voices:
+            voice_name_lower = (getattr(voice, "name", "") or "").lower()
+            if not any(f_key in voice_name_lower for f_key in female_keywords):
+                engine.setProperty('voice', voice.id)
+                logger.info(f"Found alternative male/neutral voice: {voice.name}")
+                return
+
+        # Step 3: Absolute final fallback (any voice)
+        engine.setProperty('voice', voices[0].id)
+        logger.info(f"Using final fallback voice: {voices[0].name}")
+
+    def _pick_windows_sapi_voice_token(self, sp_voice):
+        """Pick a Windows SAPI voice token matching configured preferences (best-effort)."""
+        try:
+            voices = list(sp_voice.GetVoices())
+        except Exception:
+            voices = []
+
+        if not voices:
+            return None
+
+        # Optional hard override: voice id token (rarely used); we treat it as substring match.
+        name_contains = (getattr(settings, "practice_tts_voice_name_contains", None) or "").strip().lower()
+        if name_contains:
+            for token in voices:
+                try:
+                    name = (token.GetDescription() or "").lower()
+                except Exception:
+                    name = ""
+                if name_contains in name:
+                    return token
+
+        male_keywords = list(getattr(settings, "tts_male_voice_keywords", None) or [])
+        female_keywords = list(getattr(settings, "tts_female_voice_keywords", None) or [])
+
+        # Prefer male keywords
+        for pref in male_keywords:
+            for token in voices:
+                try:
+                    name = (token.GetDescription() or "").lower()
+                except Exception:
+                    name = ""
+                if pref in name:
+                    return token
+
+        # Avoid explicitly female keywords
+        for token in voices:
+            try:
+                name = (token.GetDescription() or "").lower()
+            except Exception:
+                name = ""
+            if not any(f in name for f in female_keywords):
+                return token
+
+        return voices[0]
+
+    async def _synthesize_windows_sapi(self, text: str, output_path: Path) -> Optional[str]:
+        """Synthesize speech to WAV using Windows SAPI directly (more reliable than pyttsx3)."""
+        if os.name != "nt":
+            return None
+
+        # Import inside method so non-Windows environments don’t require pywin32.
+        try:
+            import win32com.client  # type: ignore
+        except Exception:
+            return None
+
+        timeout_seconds = float(getattr(self.config, "max_generation_time", None) or 30.0)
+        wav_path = output_path.with_suffix(".wav")
+
+        def _generate() -> Optional[str]:
+            try:
+                voice = win32com.client.Dispatch("SAPI.SpVoice")
+                token = self._pick_windows_sapi_voice_token(voice)
+                if token is not None:
+                    try:
+                        voice.Voice = token
+                        logger.info(f"Selected Windows SAPI voice: {token.GetDescription()}")
+                    except Exception:
+                        pass
+
+                stream = win32com.client.Dispatch("SAPI.SpFileStream")
+                # 3 == SSFMCreateForWrite
+                stream.Open(str(wav_path), 3)
+                voice.AudioOutputStream = stream
+                voice.Speak(text)
+                stream.Close()
+                return str(wav_path) if wav_path.exists() else None
+            except Exception as e:
+                logger.error(f"Windows SAPI generation error: {e}")
+                try:
+                    stream.Close()
+                except Exception:
+                    pass
+                return None
+
+        async with self._pyttsx3_lock:
+            try:
+                loop = asyncio.get_running_loop()
+                result = await asyncio.wait_for(loop.run_in_executor(None, _generate), timeout=timeout_seconds)
+                if result and Path(result).exists():
+                    return result
+            except asyncio.TimeoutError:
+                logger.warning(f"Windows SAPI synthesis timed out after {timeout_seconds:.1f}s")
+            except Exception as e:
+                logger.warning(f"Windows SAPI synthesis failed: {e}")
+
+        return None
     
     def cleanup(self):
         """Cleanup TTS resources and stop any running threads."""
@@ -329,6 +513,12 @@ class LocalTTSService:
                     return audio_path
             except Exception as e:
                 logger.warning(f"pyttsx3 synthesis failed: {e}")
+
+        # If you want a consistent device voice, you can hard-disable gTTS fallback.
+        if getattr(settings, "practice_tts_disable_gtts_fallback", False):
+            raise RuntimeError(
+                "pyttsx3 TTS failed and gTTS fallback is disabled (practice_tts_disable_gtts_fallback=true)."
+            )
         
         # Fallback to gTTS (requires internet)
         if GTTS_AVAILABLE:
@@ -362,36 +552,67 @@ class LocalTTSService:
     
     async def _synthesize_pyttsx3(self, text: str, output_path: Path) -> Optional[str]:
         """Synthesize using pyttsx3 (offline)."""
-        if not self._initialized:
-            if not self._init_pyttsx3():
-                return None
-        
-        def _generate():
+        # On Windows, prefer direct SAPI output to avoid pyttsx3 second-call hangs.
+        if os.name == "nt":
             try:
-                # pyttsx3 saves to file directly
-                self.engine.save_to_file(text, str(output_path))
-                self.engine.runAndWait()
-                return str(output_path)
+                sapi_path = await self._synthesize_windows_sapi(text, output_path)
+                if sapi_path:
+                    logger.info(f"Windows SAPI synthesis complete: {sapi_path}")
+                    return sapi_path
+            except Exception:
+                # Fall back to pyttsx3 below.
+                pass
+
+        if not PYTTSX3_AVAILABLE:
+            return None
+
+        timeout_seconds = float(getattr(self.config, "max_generation_time", None) or 15.0)
+
+        def _generate() -> Optional[str]:
+            # Create a fresh engine per synthesis.
+            # This avoids pyttsx3 engine state issues that commonly hang on the 2nd+ run.
+            try:
+                if os.name == "nt":
+                    engine = pyttsx3.init(driverName="sapi5")
+                else:
+                    engine = pyttsx3.init()
+
+                try:
+                    self._configure_pyttsx3_engine(engine)
+                except Exception as e:
+                    logger.warning(f"Failed to configure pyttsx3 voice settings: {e}")
+
+                engine.save_to_file(text, str(output_path))
+                engine.runAndWait()
+                try:
+                    engine.stop()
+                except Exception:
+                    pass
+
+                return str(output_path) if output_path.exists() else None
             except Exception as e:
                 logger.error(f"pyttsx3 generation error: {e}")
                 return None
         
-        # Run in executor with shorter timeout to avoid blocking
-        try:
-            loop = asyncio.get_running_loop()
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, _generate),
-                timeout=5.0  # 5 second timeout (reduced from 10s)
-            )
-            
-            if result and output_path.exists():
-                logger.info(f"pyttsx3 synthesis complete: {output_path}")
-                return str(output_path)
-        except asyncio.TimeoutError:
-            logger.warning(f"pyttsx3 synthesis timed out after 5s - falling back to gTTS")
-            # Don't raise, just return None to trigger gTTS fallback
-        except Exception as e:
-            logger.warning(f"pyttsx3 synthesis failed: {e} - falling back to gTTS")
+        # pyttsx3 isn't thread-safe; serialize calls to avoid deadlocks/timeouts.
+        async with self._pyttsx3_lock:
+            # Run in executor with timeout to avoid blocking the event loop.
+            try:
+                loop = asyncio.get_running_loop()
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, _generate),
+                    timeout=timeout_seconds,
+                )
+
+                if result and output_path.exists():
+                    logger.info(f"pyttsx3 synthesis complete: {output_path}")
+                    return str(output_path)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"pyttsx3 synthesis timed out after {timeout_seconds:.1f}s"
+                )
+            except Exception as e:
+                logger.warning(f"pyttsx3 synthesis failed: {e}")
         
         return None
     

@@ -14,7 +14,7 @@ def get_practice_config() -> PracticeModeConfig:
 			engine=settings.practice_tts_engine,
 			tts_model_name=settings.practice_tts_model,
 			sample_rate=22050,
-			max_generation_time=2.0
+			max_generation_time=settings.practice_tts_timeout_seconds
 		),
 		stt=STTConfig(
 			stt_model_size=settings.practice_stt_model_size,

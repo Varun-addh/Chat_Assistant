@@ -23,10 +23,12 @@ def test_company_context():
     print("=" * 70)
     
     payload = {
+        "screen_shared": True,
+        "camera_enabled": True,
         "round_type": "technical_round_1",
         "domain": "Data Engineering",
         "experience_years": 2,
-        "company_specific": "Amazon"
+        "company_specific": "Amazon",
     }
     
     print(f"\n📤 Request: {json.dumps(payload, indent=2)}")
@@ -96,10 +98,12 @@ def test_different_companies():
         print(f"\n🏢 Testing: {company}")
         
         payload = {
+            "screen_shared": True,
+            "camera_enabled": True,
             "round_type": "hr_screening",
             "domain": "Python",
             "experience_years": 4,
-            "company_specific": company
+            "company_specific": company,
         }
         
         response = requests.post(
@@ -143,9 +147,11 @@ def test_tts_availability():
         print(f"\n🎯 Round: {round_type}")
         
         payload = {
+            "screen_shared": True,
+            "camera_enabled": True,
             "round_type": round_type,
             "domain": "Python",
-            "experience_years": 3
+            "experience_years": 3,
         }
         
         response = requests.post(

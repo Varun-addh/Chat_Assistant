@@ -349,6 +349,44 @@ class PracticeSessionOutcome(Base):
     )
 
 
+class PracticeSessionMedia(Base):
+    """Attach uploaded session recordings to a practice session.
+
+    Backend contract:
+    - Stores file location + minimal metadata.
+    - Does NOT process media.
+    """
+
+    __tablename__ = "practice_session_media"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, nullable=False, index=True)
+
+    # screen | camera | combined
+    media_type = Column(String, nullable=False, index=True)
+
+    # URL or API path that can be fetched by the frontend
+    storage_url = Column(Text, nullable=False)
+
+    duration_seconds = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+
+class PracticeProctoringEvent(Base):
+    """Audit trail of proctoring signals for a practice session."""
+
+    __tablename__ = "practice_proctoring_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, nullable=False, index=True)
+
+    # e.g. SCREEN_STOPPED, CAMERA_STOPPED, TAB_SWITCH, WINDOW_MINIMIZED
+    event_type = Column(String, nullable=False, index=True)
+
+    event_ts = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    extra_data = Column("metadata", JSON, nullable=True)
+
+
 # Tier quotas (requests per day)
 TIER_QUOTAS = {
     UserTier.FREE: {

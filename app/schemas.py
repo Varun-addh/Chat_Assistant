@@ -305,6 +305,50 @@ class ProctoringEventOut(BaseModel):
 	ok: bool = True
 
 
+class PracticeSessionMediaType(str, Enum):
+	"""Media recording type for Practice sessions."""
+	SCREEN = "screen"
+	CAMERA = "camera"
+	COMBINED = "combined"
+
+
+class PracticeProctoringEventType(str, Enum):
+	"""DB-backed proctoring event types (MVP)."""
+	SCREEN_STOPPED = "SCREEN_STOPPED"
+	CAMERA_STOPPED = "CAMERA_STOPPED"
+	TAB_SWITCH = "TAB_SWITCH"
+	WINDOW_MINIMIZED = "WINDOW_MINIMIZED"
+	SESSION_STARTED_WITH_PROCTORING = "SESSION_STARTED_WITH_PROCTORING"
+
+
+class PracticeSessionStartIn(BaseModel):
+	"""Gate that enforces required media permissions before a live practice starts."""
+	screen_shared: bool = Field(..., description="Client confirmed entire screen is being shared")
+	camera_enabled: bool = Field(..., description="Client confirmed camera is enabled")
+
+
+class PracticeSessionStartOut(BaseModel):
+	ok: bool = True
+
+
+class PracticeSessionMediaOut(BaseModel):
+	media_id: int
+	session_id: str
+	media_type: PracticeSessionMediaType
+	storage_url: str
+	duration_seconds: Optional[int] = None
+
+
+class PracticeSessionProctoringEventIn(BaseModel):
+	event_type: PracticeProctoringEventType
+	metadata: Dict[str, Any] = Field(default_factory=dict)
+	client_timestamp: Optional[datetime] = Field(default=None)
+
+
+class PracticeSessionProctoringEventOut(BaseModel):
+	ok: bool = True
+
+
 class RoundConfig(BaseModel):
 	"""Configuration for a specific interview round."""
 	round_type: InterviewRound = Field(..., description="Type of interview round")
@@ -469,6 +513,9 @@ class PracticeSession(BaseModel):
 # API Request/Response Models for Practice Mode
 class StartInterviewRequest(BaseModel):
 	"""Request to start a new practice interview."""
+	# MVP: enforce required proctoring permissions at session start
+	screen_shared: bool = Field(..., description="Client confirmed entire screen is being shared")
+	camera_enabled: bool = Field(..., description="Client confirmed camera is enabled")
 	difficulty: QuestionDifficulty = Field(default=QuestionDifficulty.MEDIUM)
 	category: str = Field(default="behavioral", description="Interview category")
 	question_count: int = Field(default=5, ge=1, le=10, description="Number of questions (1-10, default: 5)")
@@ -480,6 +527,9 @@ class StartInterviewRequest(BaseModel):
 
 class RoundSelectionRequest(BaseModel):
 	"""Request to start a round-based interview."""
+	# MVP: enforce required proctoring permissions at session start
+	screen_shared: bool = Field(..., description="Client confirmed entire screen is being shared")
+	camera_enabled: bool = Field(..., description="Client confirmed camera is enabled")
 	round_type: InterviewRound = Field(..., description="Interview round to practice")
 	domain: str = Field(..., description="Primary domain (REQUIRED): e.g., 'Python', 'Java', 'Data Engineering', 'Machine Learning', 'Frontend', 'DevOps'")
 	experience_years: int = Field(default=2, ge=0, le=30, description="Years of experience in the domain")

@@ -22,6 +22,8 @@ def test_valid_requests():
         {
             "name": "Minimal valid request",
             "payload": {
+                "screen_shared": True,
+                "camera_enabled": True,
                 "round_type": "TECHNICAL_ROUND_1",
                 "domain": "Python",
                 "experience_years": 3
@@ -30,6 +32,8 @@ def test_valid_requests():
         {
             "name": "With company specific",
             "payload": {
+                "screen_shared": True,
+                "camera_enabled": True,
                 "round_type": "SYSTEM_DESIGN",
                 "domain": "Data Engineering",
                 "experience_years": 5,
@@ -39,6 +43,8 @@ def test_valid_requests():
         {
             "name": "Junior developer",
             "payload": {
+                "screen_shared": True,
+                "camera_enabled": True,
                 "round_type": "HR_SCREENING",
                 "domain": "Java",
                 "experience_years": 1
@@ -47,6 +53,8 @@ def test_valid_requests():
         {
             "name": "Senior developer",
             "payload": {
+                "screen_shared": True,
+                "camera_enabled": True,
                 "round_type": "TECHNICAL_ROUND_2",
                 "domain": "Python",
                 "experience_years": 10

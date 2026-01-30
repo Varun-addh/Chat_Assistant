@@ -8,6 +8,8 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Background
 from fastapi.responses import FileResponse
 from pathlib import Path
 from typing import Optional, Any
+from datetime import datetime, timezone
+import uuid
 import aiofiles
 import os
 
@@ -35,6 +37,12 @@ from app.schemas import (
     RoundSelectionResponse,
     ProctoringEventIn,
     ProctoringEventOut,
+    PracticeSessionStartIn,
+    PracticeSessionStartOut,
+    PracticeSessionMediaType,
+    PracticeSessionMediaOut,
+    PracticeSessionProctoringEventIn,
+    PracticeSessionProctoringEventOut,
     CodeTestResult,
     CodeEvaluationFeedback,
     PracticeConfidenceOutcomeIn,
@@ -47,7 +55,7 @@ from app.database import get_db_context
 from app.middleware.auth import get_user_id_from_request
 from app.utils.event_logging import track_event, stable_question_id, stable_hash
 from app.services.practice.learning_loops import compute_practice_insights, merge_focus_areas
-from app.models import PracticeAttemptRecord
+from app.models import PracticeAttemptRecord, PracticeSessionMedia, PracticeProctoringEvent
 from app.services.practice.practice_learning import upsert_practice_session_metrics
 from app.services.practice.practice_learning import upsert_practice_session_outcome_confidence
 from app.services.practice.practice_progress import (
@@ -65,6 +73,109 @@ router = APIRouter(
     prefix="/api/practice",
     tags=["Practice Mode"]
 )
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _media_root_dir() -> Path:
+    # Keep recordings out of code directory; keep it local and simple for MVP.
+    # In production, swap this for S3/HF storage.
+    root = Path("data") / "practice_session_media"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _safe_ext_from_upload(upload: UploadFile) -> str:
+    name = (upload.filename or "").strip()
+    _, ext = os.path.splitext(name)
+    ext = (ext or "").lower()
+    if ext and len(ext) <= 10:
+        return ext
+    # Fallback
+    ctype = (upload.content_type or "").lower()
+    if "webm" in ctype:
+        return ".webm"
+    if "mp4" in ctype:
+        return ".mp4"
+    if "quicktime" in ctype:
+        return ".mov"
+    return ".bin"
+
+
+def _insert_practice_proctoring_event(
+    *,
+    session_id: str,
+    event_type: str,
+    metadata: Optional[dict[str, Any]] = None,
+    event_ts: Optional[datetime] = None,
+) -> None:
+    """Insert a proctoring event row (best-effort, never raises)."""
+    try:
+        with get_db_context() as db:
+            row = PracticeProctoringEvent(
+                session_id=session_id,
+                event_type=event_type,
+                event_ts=event_ts or _utcnow(),
+                extra_data=metadata or {},
+            )
+            db.add(row)
+            db.commit()
+    except Exception:
+        pass
+
+
+def _get_media_and_proctoring_summary(session_id: str) -> dict[str, Any]:
+    """Aggregate media URLs + proctoring summary for final report."""
+    media: dict[str, Optional[str]] = {
+        "screen_recording_url": None,
+        "camera_recording_url": None,
+    }
+    proctoring_summary: dict[str, Any] = {
+        "violation_count": 0,
+        "events": [],
+    }
+
+    violation_types = {
+        "SCREEN_STOPPED",
+        "CAMERA_STOPPED",
+        "TAB_SWITCH",
+        "WINDOW_MINIMIZED",
+    }
+
+    with get_db_context() as db:
+        rows = (
+            db.query(PracticeSessionMedia)
+            .filter(PracticeSessionMedia.session_id == session_id)
+            .order_by(PracticeSessionMedia.created_at.desc())
+            .all()
+        )
+        # Prefer explicit screen/camera; fall back to combined for screen.
+        screen_row = next((r for r in rows if r.media_type == "screen"), None)
+        camera_row = next((r for r in rows if r.media_type == "camera"), None)
+        combined_row = next((r for r in rows if r.media_type == "combined"), None)
+
+        if screen_row:
+            media["screen_recording_url"] = screen_row.storage_url
+        elif combined_row:
+            media["screen_recording_url"] = combined_row.storage_url
+
+        if camera_row:
+            media["camera_recording_url"] = camera_row.storage_url
+
+        events = (
+            db.query(PracticeProctoringEvent)
+            .filter(PracticeProctoringEvent.session_id == session_id)
+            .order_by(PracticeProctoringEvent.event_ts.asc())
+            .all()
+        )
+
+    violation_events = [e.event_type for e in events if e.event_type in violation_types]
+    proctoring_summary["violation_count"] = int(len(violation_events))
+    proctoring_summary["events"] = sorted(set(violation_events))
+
+    return {"media": media, "proctoring_summary": proctoring_summary}
 
 
 @router.post("/session/{session_id}/outcome/confidence", response_model=PracticeConfidenceOutcomeOut)
@@ -157,6 +268,166 @@ async def ingest_proctoring_event(payload: ProctoringEventIn, http_request: Requ
     )
 
     return ProctoringEventOut(ok=True)
+
+
+@router.post("/session/{session_id}/start", response_model=PracticeSessionStartOut)
+async def start_session_with_proctoring_gate(
+    session_id: str,
+    payload: PracticeSessionStartIn,
+    http_request: Request,
+) -> PracticeSessionStartOut:
+    """Enforce required proctoring permissions before a live practice session proceeds."""
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+
+    if not practice_service:
+        raise HTTPException(status_code=503, detail="Practice Mode is not initialized")
+
+    sess = practice_service.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Practice session not found")
+
+    if (not payload.screen_shared) or (not payload.camera_enabled):
+        _insert_practice_proctoring_event(
+            session_id=session_id,
+            event_type="SESSION_STARTED_WITHOUT_PROCTORING",
+            metadata={"screen_shared": bool(payload.screen_shared), "camera_enabled": bool(payload.camera_enabled)},
+        )
+        raise HTTPException(status_code=403, detail="Screen share + camera are required to start")
+
+    _insert_practice_proctoring_event(
+        session_id=session_id,
+        event_type="SESSION_STARTED_WITH_PROCTORING",
+        metadata={"screen_shared": True, "camera_enabled": True},
+    )
+    _track_practice_event(
+        user_id=user_id,
+        session_id=session_id,
+        event_type="practice_session_started_with_proctoring",
+        extra={"screen_shared": True, "camera_enabled": True},
+    )
+
+    return PracticeSessionStartOut(ok=True)
+
+
+@router.post("/session/{session_id}/media", response_model=PracticeSessionMediaOut)
+async def upload_practice_session_media(
+    session_id: str,
+    file: UploadFile = File(..., description="Recording file"),
+    media_type: PracticeSessionMediaType = Form(...),
+    duration_seconds: Optional[int] = Form(default=None),
+):
+    """Upload a practice session recording and store a DB row.
+
+    This endpoint stores the file only; it does not process video.
+    """
+    if not practice_service:
+        raise HTTPException(status_code=503, detail="Practice Mode is not initialized")
+
+    sess = practice_service.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Practice session not found")
+
+    ext = _safe_ext_from_upload(file)
+    media_dir = _media_root_dir() / session_id
+    media_dir.mkdir(parents=True, exist_ok=True)
+    file_id = str(uuid.uuid4())
+    temp_disk_path = media_dir / f"tmp_{file_id}{ext}"
+
+    async with aiofiles.open(temp_disk_path, "wb") as f:
+        content = await file.read()
+        await f.write(content)
+
+    duration_int: Optional[int] = int(duration_seconds) if duration_seconds is not None else None
+
+    row_id: int
+    storage_url: str
+
+    with get_db_context() as db:
+        row = PracticeSessionMedia(
+            session_id=session_id,
+            media_type=media_type.value,
+            storage_url="",
+            duration_seconds=duration_int,
+        )
+        db.add(row)
+        db.flush()  # assign id
+        row_id = int(row.id)
+        storage_url = f"/api/practice/session/{session_id}/media/{row_id}"
+        row.storage_url = storage_url
+        db.commit()
+
+    # Rename to include the DB id so the GET endpoint can locate the exact file.
+    final_disk_path = media_dir / f"{row_id}_{file_id}{ext}"
+    try:
+        os.replace(str(temp_disk_path), str(final_disk_path))
+    except Exception:
+        # Best-effort: keep temp file; GET may still fail but DB row exists.
+        pass
+
+    return PracticeSessionMediaOut(
+        media_id=row_id,
+        session_id=session_id,
+        media_type=media_type,
+        storage_url=storage_url,
+        duration_seconds=duration_int,
+    )
+
+
+@router.get("/session/{session_id}/media/{media_id}")
+async def fetch_practice_session_media(session_id: str, media_id: int):
+    """Serve a previously uploaded recording file."""
+    with get_db_context() as db:
+        row = (
+            db.query(PracticeSessionMedia)
+            .filter(PracticeSessionMedia.id == int(media_id))
+            .filter(PracticeSessionMedia.session_id == session_id)
+            .first()
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    media_dir = _media_root_dir() / session_id
+    if not media_dir.exists():
+        raise HTTPException(status_code=404, detail="Media file not found")
+
+    candidates = sorted(media_dir.glob(f"{int(media_id)}_*"))
+    if not candidates:
+        raise HTTPException(status_code=404, detail="Media file not found")
+
+    return FileResponse(path=str(candidates[0]), media_type="application/octet-stream")
+
+
+@router.post("/session/{session_id}/proctoring/event", response_model=PracticeSessionProctoringEventOut)
+async def ingest_session_proctoring_event(
+    session_id: str,
+    payload: PracticeSessionProctoringEventIn,
+    http_request: Request,
+) -> PracticeSessionProctoringEventOut:
+    """Insert a DB-backed proctoring event for audit + reporting."""
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+
+    if not practice_service:
+        raise HTTPException(status_code=503, detail="Practice Mode is not initialized")
+
+    sess = practice_service.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Practice session not found")
+
+    _insert_practice_proctoring_event(
+        session_id=session_id,
+        event_type=payload.event_type.value,
+        metadata={
+            "metadata": payload.metadata,
+            "client_timestamp": payload.client_timestamp.isoformat() if payload.client_timestamp else None,
+        },
+    )
+    _track_practice_event(
+        user_id=user_id,
+        session_id=session_id,
+        event_type=f"practice_proctoring_{payload.event_type.value.lower()}",
+        extra={"metadata": payload.metadata},
+    )
+    return PracticeSessionProctoringEventOut(ok=True)
 
 # Service instance (will be initialized in main.py)
 practice_service: Optional[PracticeModeService] = None
@@ -457,6 +728,9 @@ async def start_round_based_interview(
     try:
         logger.info(f"📥 Received request: round_type={payload.round_type}, domain={payload.domain}, exp={payload.experience_years}")
 
+        if (not payload.screen_shared) or (not payload.camera_enabled):
+            raise HTTPException(status_code=403, detail="Screen share + camera are required to start")
+
         user_id = get_user_id_from_request(http_request) or "guest_unknown"
         
         if not practice_service:
@@ -528,6 +802,12 @@ async def start_round_based_interview(
         
         tts_audio_url = f"/api/practice/audio/{audio_filename}" if audio_filename else ""
 
+        _insert_practice_proctoring_event(
+            session_id=session_id,
+            event_type="SESSION_STARTED_WITH_PROCTORING",
+            metadata={"screen_shared": True, "camera_enabled": True, "flow": "round_based"},
+        )
+
         _track_practice_event(
             user_id=user_id,
             session_id=session_id,
@@ -570,6 +850,8 @@ async def start_round_based_interview(
             progress=f"1/{total_questions}"
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error starting round-based interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -668,6 +950,9 @@ async def start_interview(
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
+
+        if (not payload.screen_shared) or (not payload.camera_enabled):
+            raise HTTPException(status_code=403, detail="Screen share + camera are required to start")
         
         logger.info(f"Starting interview with difficulty: {payload.difficulty}")
 
@@ -710,6 +995,12 @@ async def start_interview(
         # Build audio URL
         tts_audio_url = f"/api/practice/audio/{audio_filename}" if audio_filename else ""
 
+        _insert_practice_proctoring_event(
+            session_id=session_id,
+            event_type="SESSION_STARTED_WITH_PROCTORING",
+            metadata={"screen_shared": True, "camera_enabled": True, "flow": "standard"},
+        )
+
         _track_practice_event(
             user_id=user_id,
             session_id=session_id,
@@ -749,6 +1040,8 @@ async def start_interview(
             progress=f"1/{total_questions}"
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error starting interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1251,11 +1544,17 @@ async def get_audio(filename: str):
         # Check if file exists
         if not audio_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found")
+
+        suffix = audio_path.suffix.lower()
+        if suffix == ".mp3":
+            media_type = "audio/mpeg"
+        else:
+            media_type = "audio/wav"
         
         # Serve file
         return FileResponse(
             path=audio_path,
-            media_type="audio/wav",
+            media_type=media_type,
             filename=filename
         )
         
@@ -1445,6 +1744,7 @@ async def get_session_score(
         session = practice_service.get_session(session_id)
         if session:
             score = score_session(session=session)
+            agg = _get_media_and_proctoring_summary(session_id)
             return {
                 "status": "success",
                 "source": "runtime",
@@ -1456,6 +1756,7 @@ async def get_session_score(
                 "improvement_plan": score.improvement_plan,
                 "next_session_plan": score.next_session_plan,
                 "evaluation_report": evaluation_report_to_json(getattr(session, "evaluation_report", None)),
+                **agg,
             }
 
         # Fall back to persisted attempt (useful after refresh or session cleanup).
@@ -1484,6 +1785,7 @@ async def get_session_score(
             "started_at": rec.started_at,
             "completed_at": rec.completed_at,
             "created_at": rec.created_at,
+            **_get_media_and_proctoring_summary(session_id),
         }
 
     except HTTPException:

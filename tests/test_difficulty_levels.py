@@ -38,6 +38,8 @@ def test_difficulty_levels():
     print("=" * 80)
     
     easy_request = {
+        "screen_shared": True,
+        "camera_enabled": True,
         "difficulty": "easy",
         "question_count": 5,
         "user_profile": test_profile
@@ -69,6 +71,8 @@ def test_difficulty_levels():
     print("=" * 80)
     
     medium_request = {
+        "screen_shared": True,
+        "camera_enabled": True,
         "difficulty": "medium",
         "question_count": 5,
         "user_profile": test_profile
@@ -101,6 +105,8 @@ def test_difficulty_levels():
     print("=" * 80)
     
     hard_request = {
+        "screen_shared": True,
+        "camera_enabled": True,
         "difficulty": "hard",
         "question_count": 5,
         "user_profile": test_profile

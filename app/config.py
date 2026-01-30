@@ -361,6 +361,13 @@ class Settings(BaseSettings):
 	# Practice Mode Configuration
 	practice_mode_enabled: bool = True
 	practice_tts_engine: str = "pyttsx3"  # options: pyttsx3 (offline), gtts (online) - pyttsx3 for better male voice & speed control
+	# TTS tuning for consistent device voice (Windows SAPI via pyttsx3)
+	# If pyttsx3 times out, LocalTTSService may fall back to gTTS unless disabled.
+	practice_tts_timeout_seconds: float = 30.0
+	practice_tts_disable_gtts_fallback: bool = False
+	# Optional hard overrides for voice selection. If set, these win over keyword matching.
+	practice_tts_voice_id: str | None = None
+	practice_tts_voice_name_contains: str | None = None
 	practice_tts_model: str = "default"  # Not used for pyttsx3/gtts
 	practice_stt_model_size: str = "base"  # options: tiny, base, small, medium, large
 	practice_stt_device: str = "cpu"  # options: cpu, cuda
