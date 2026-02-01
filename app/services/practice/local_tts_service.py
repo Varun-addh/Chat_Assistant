@@ -41,6 +41,35 @@ def _voice_keyword_match(text: str, keyword: str) -> bool:
     return key in text_l
 
 
+def _voice_prefers_english(name: str = "", voice_id: str = "", languages: object = None) -> bool:
+    """Best-effort check for an English voice.
+
+    We prefer English when running an English interview flow. This prevents the
+    "male/neutral" fallback from selecting unrelated language voices like Afrikaans.
+    """
+    parts: list[str] = []
+    if name:
+        parts.append(str(name))
+    if voice_id:
+        parts.append(str(voice_id))
+
+    if isinstance(languages, (list, tuple)):
+        for item in languages:
+            try:
+                if isinstance(item, (bytes, bytearray)):
+                    parts.append(item.decode(errors="ignore"))
+                else:
+                    parts.append(str(item))
+            except Exception:
+                continue
+
+    combined = " ".join(parts).lower()
+    if "english" in combined:
+        return True
+    # Matches "en", "en-us", "en_gb", etc.
+    return re.search(r"\ben([_-][a-z]{2})?\b", combined) is not None
+
+
 class LocalTTSService:
     """
     Local Text-to-Speech service using pyttsx3 (offline) with gTTS fallback.
@@ -126,16 +155,37 @@ class LocalTTSService:
                 
                 # Step 2: Fallback to any voice that doesn't explicitly contain female keywords
                 if not selected_voice:
+                    non_female = []
                     for voice in voices:
-                        voice_name_lower = voice.name.lower()
-                        if not any(_voice_keyword_match(voice_name_lower, f_key) for f_key in female_keywords):
+                        voice_name_lower = (getattr(voice, "name", "") or "").lower()
+                        if any(_voice_keyword_match(voice_name_lower, f_key) for f_key in female_keywords):
+                            continue
+                        non_female.append(voice)
+
+                    # Prefer English voices first.
+                    for voice in non_female:
+                        if _voice_prefers_english(
+                            name=getattr(voice, "name", "") or "",
+                            voice_id=getattr(voice, "id", "") or "",
+                            languages=getattr(voice, "languages", None),
+                        ):
                             selected_voice = voice
                             try:
                                 self.engine.setProperty('voice', voice.id)
-                                logger.info(f"Found alternative male/neutral voice: {voice.name}")
+                                logger.info(f"Found alternative voice (preferred language): {voice.name}")
                             except Exception as e:
                                 logger.warning(f"Failed to set alternative voice '{voice.name}': {e}")
                             break
+
+                    # If no English voice is available, pick the first non-female voice.
+                    if not selected_voice and non_female:
+                        voice = non_female[0]
+                        selected_voice = voice
+                        try:
+                            self.engine.setProperty('voice', voice.id)
+                            logger.info(f"Found alternative male/neutral voice: {voice.name}")
+                        except Exception as e:
+                            logger.warning(f"Failed to set alternative voice '{voice.name}': {e}")
                 
                 # Step 3: Absolute final fallback (any voice, even female)
                 if not selected_voice:
@@ -195,12 +245,27 @@ class LocalTTSService:
                     return
 
         # Step 2: Fallback to any voice that doesn't explicitly contain female keywords
+        non_female = []
         for voice in voices:
             voice_name_lower = (getattr(voice, "name", "") or "").lower()
-            if not any(_voice_keyword_match(voice_name_lower, f_key) for f_key in female_keywords):
+            if any(_voice_keyword_match(voice_name_lower, f_key) for f_key in female_keywords):
+                continue
+            non_female.append(voice)
+
+        for voice in non_female:
+            if _voice_prefers_english(
+                name=getattr(voice, "name", "") or "",
+                voice_id=getattr(voice, "id", "") or "",
+                languages=getattr(voice, "languages", None),
+            ):
                 engine.setProperty('voice', voice.id)
-                logger.info(f"Found alternative male/neutral voice: {voice.name}")
+                logger.info(f"Found alternative voice (preferred language): {voice.name}")
                 return
+
+        if non_female:
+            engine.setProperty('voice', non_female[0].id)
+            logger.info(f"Found alternative male/neutral voice: {non_female[0].name}")
+            return
 
         # Step 3: Absolute final fallback (any voice)
         engine.setProperty('voice', voices[0].id)
@@ -241,13 +306,23 @@ class LocalTTSService:
                     return token
 
         # Avoid explicitly female keywords
+        non_female_tokens = []
         for token in voices:
             try:
-                name = (token.GetDescription() or "").lower()
+                name = (token.GetDescription() or "")
             except Exception:
                 name = ""
-            if not any(_voice_keyword_match(name, f) for f in female_keywords):
+            name_l = name.lower()
+            if any(_voice_keyword_match(name_l, f) for f in female_keywords):
+                continue
+            non_female_tokens.append((token, name))
+
+        for token, name in non_female_tokens:
+            if _voice_prefers_english(name=name):
                 return token
+
+        if non_female_tokens:
+            return non_female_tokens[0][0]
 
         return voices[0]
 
