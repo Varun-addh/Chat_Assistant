@@ -903,25 +903,47 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
                     return []
         
         try:
+            # JSON mode sometimes returns a wrapper object like {"questions": [...]}
+            if isinstance(data, dict):
+                for key in ("questions", "items", "data"):
+                    if isinstance(data.get(key), list):
+                        data = data[key]
+                        break
+
             if not isinstance(data, list):
                 logger.warning("Response is not a list")
                 return []
             
             questions = []
             for idx, item in enumerate(data):
+                # Some providers may return a list of strings. Accept it.
+                if isinstance(item, str):
+                    item = {"text": item}
+
                 if not isinstance(item, dict):
                     continue
                 
                 # Extract fields with defaults
-                question_text = item.get("text", "").strip()
+                question_text = (
+                    item.get("text")
+                    or item.get("question")
+                    or item.get("question_text")
+                    or item.get("prompt")
+                    or ""
+                )
+                question_text = str(question_text).strip()
                 if not question_text:
                     continue
                 
-                category = item.get("category", "technical")
-                time_limit = int(item.get("time_limit", 90))
+                category = str(item.get("category", "technical") or "technical")
+                # Be tolerant of strings like "90".
+                try:
+                    time_limit = int(item.get("time_limit", 90))
+                except Exception:
+                    time_limit = 90
                 
                 # NEW: Extract question type and coding-specific fields
-                question_type_str = item.get("question_type", "voice").lower()
+                question_type_str = str(item.get("question_type", "voice") or "voice").lower()
                 programming_language = item.get("programming_language", None)
                 
                 # Map string to enum
@@ -947,13 +969,24 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
                 
                 # Extract key points and expected answer for evaluation
                 key_points = item.get("key_points", [])
-                expected_answer = item.get("expected_answer_template", "")
+                if isinstance(key_points, str):
+                    # Common failure mode: a comma-separated string.
+                    key_points = [p.strip() for p in key_points.split(",") if p.strip()]
+                if isinstance(key_points, list):
+                    key_points = [str(x).strip() for x in key_points if str(x).strip()][:5]
+                else:
+                    key_points = []
+
+                expected_answer = item.get("expected_answer_template")
+                if not expected_answer:
+                    expected_answer = item.get("expected")
+                expected_answer = str(expected_answer or "")
                 
                 questions.append(PracticeInterviewQuestion(
                     id=idx + 1,
                     text=question_text,
                     difficulty=question_difficulty,
-                    time_limit=time_limit,
+                    time_limit=max(30, time_limit),
                     category=category,
                     question_type=question_type,  # NEW - determines UI (voice/coding/system_design)
                     programming_language=programming_language,  # NEW - for coding questions

@@ -371,6 +371,7 @@ class Settings(BaseSettings):
 	practice_tts_model: str = "default"  # Not used for pyttsx3/gtts
 	practice_stt_model_size: str = "base"  # options: tiny, base, small, medium, large
 	practice_stt_device: str = "cpu"  # options: cpu, cuda
+	practice_stt_max_transcription_time_seconds: float = 3.0  # env: PRACTICE_STT_MAX_TRANSCRIPTION_TIME_SECONDS
 	practice_audio_storage: str = "data/practice_audio"
 	practice_max_sessions: int = 100
 	practice_session_timeout: int = 30  # minutes

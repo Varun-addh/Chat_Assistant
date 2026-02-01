@@ -101,6 +101,9 @@ class LocalSTTService:
             transcript = " ".join(transcript_parts)
             
             transcription_time = time.time() - start_time
+
+            audio_duration = float(getattr(info, "duration", 0.0) or 0.0)
+            rtf = transcription_time / max(audio_duration, 1e-6)
             
             # Calculate VAD removed duration (approximate)
             # Total audio duration - actual speech segments duration
@@ -112,6 +115,7 @@ class LocalSTTService:
                 "language_probability": info.language_probability,
                 "duration": info.duration,
                 "transcription_time": transcription_time,
+                "rtf": round(rtf, 3),  # Real-time factor: seconds compute / seconds audio
                 "model_size": self.config.stt_model_size,
                 "vad_removed_duration": round(vad_removed, 2)  # NEW: Silence removed by VAD
             }
@@ -122,10 +126,16 @@ class LocalSTTService:
             )
             
             # Performance check
-            if transcription_time > self.config.max_transcription_time:
+            # Interpret max_transcription_time as the target for ~60 seconds of audio (default: 3s).
+            # Scale linearly for longer audio to avoid false alarms on long clips.
+            target_rtf = float(self.config.max_transcription_time) / 60.0
+            target_time = max(float(self.config.max_transcription_time), audio_duration * target_rtf)
+
+            if transcription_time > target_time:
                 logger.warning(
                     f"Transcription took {transcription_time:.2f}s, "
-                    f"exceeds target {self.config.max_transcription_time}s"
+                    f"exceeds target {target_time:.2f}s "
+                    f"(audio={audio_duration:.1f}s, rtf={rtf:.3f}, target_rtf={target_rtf:.3f})"
                 )
             
             return transcript, metadata

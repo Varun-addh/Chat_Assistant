@@ -780,6 +780,7 @@ CRITICAL RULES:
 
         # Always initialize so we never hit UnboundLocalError on malformed output.
         data: Optional[Dict] = None
+        decode_error: Optional[json.JSONDecodeError] = None
         
         # Try parsing the repaired JSON (strict/loose)
         data = _try_parse_jsonish(response)
@@ -790,13 +791,17 @@ CRITICAL RULES:
             try:
                 json.loads(response)
             except json.JSONDecodeError as e:
+                decode_error = e
                 logger.warning(f"JSON parse failed after repair: {e}")
                 logger.debug(f"Problematic JSON (first 1000 chars): {response[:1000]}")
             
             # FALLBACK 1: Try to fix the specific error location
             try:
+                if decode_error is None:
+                    raise ValueError("No JSON decode error available")
+
                 # Extract the error position
-                error_pos = e.pos if hasattr(e, 'pos') else None
+                error_pos = decode_error.pos if hasattr(decode_error, 'pos') else None
                 if error_pos is None:
                     raise ValueError("No JSON error position available")
 
@@ -811,14 +816,14 @@ CRITICAL RULES:
                     char_at_error = response[error_pos] if error_pos < len(response) else 'EOF'
                     
                     # Fix unterminated string
-                    if 'Unterminated string' in str(e):
+                    if 'Unterminated string' in str(decode_error):
                         # Find the last quote before error and add closing quote
                         last_quote = response.rfind('"', 0, error_pos)
                         if last_quote != -1:
                             response = response[:error_pos] + '"' + response[error_pos:]
                     
                     # Fix expecting delimiter
-                    elif 'Expecting' in str(e) and 'delimiter' in str(e):
+                    elif 'Expecting' in str(decode_error) and 'delimiter' in str(decode_error):
                         # Missing comma or colon
                         if char_at_error in ['"', '{', '[']:
                             response = response[:error_pos] + ',' + response[error_pos:]
@@ -827,7 +832,8 @@ CRITICAL RULES:
                     
                     # Try parsing again
                     data = _try_parse_jsonish(response)
-                    logger.info("Successfully recovered from JSON error with targeted fix")
+                    if isinstance(data, dict) and data:
+                        logger.info("Successfully recovered from JSON error with targeted fix")
                     
             except Exception:
                 # FALLBACK 2: Use regex to extract key fields
