@@ -26,6 +26,21 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _voice_keyword_match(text: str, keyword: str) -> bool:
+    """Case-insensitive match for voice selection keywords.
+
+    Important: gender terms must be whole-word matches to avoid false positives
+    such as "Manipuri" matching the keyword "man".
+    """
+    text_l = (text or "").lower()
+    key = (keyword or "").strip().lower()
+    if not key:
+        return False
+    if key in {"male", "female", "man", "woman"}:
+        return re.search(rf"\b{re.escape(key)}\b", text_l) is not None
+    return key in text_l
+
+
 class LocalTTSService:
     """
     Local Text-to-Speech service using pyttsx3 (offline) with gTTS fallback.
@@ -99,11 +114,11 @@ class LocalTTSService:
                 # Step 1: Search for high-quality male voices first
                 for pref in male_keywords:
                     for voice in voices:
-                        if pref in voice.name.lower():
+                        if _voice_keyword_match(getattr(voice, "name", "") or "", pref):
                             selected_voice = voice
                             try:
                                 self.engine.setProperty('voice', voice.id)
-                                logger.info(f"Selected priority male voice: {voice.name}")
+                                logger.info(f"Selected priority voice (keyword='{pref}'): {voice.name}")
                             except Exception as e:
                                 logger.warning(f"Failed to set male voice '{voice.name}': {e}")
                             break
@@ -113,7 +128,7 @@ class LocalTTSService:
                 if not selected_voice:
                     for voice in voices:
                         voice_name_lower = voice.name.lower()
-                        if not any(f_key in voice_name_lower for f_key in female_keywords):
+                        if not any(_voice_keyword_match(voice_name_lower, f_key) for f_key in female_keywords):
                             selected_voice = voice
                             try:
                                 self.engine.setProperty('voice', voice.id)
@@ -174,15 +189,15 @@ class LocalTTSService:
         # Step 1: Search for high-quality male voices first
         for pref in male_keywords:
             for voice in voices:
-                if pref in (getattr(voice, "name", "") or "").lower():
+                if _voice_keyword_match(getattr(voice, "name", "") or "", pref):
                     engine.setProperty('voice', voice.id)
-                    logger.info(f"Selected priority male voice: {voice.name}")
+                    logger.info(f"Selected priority voice (keyword='{pref}'): {voice.name}")
                     return
 
         # Step 2: Fallback to any voice that doesn't explicitly contain female keywords
         for voice in voices:
             voice_name_lower = (getattr(voice, "name", "") or "").lower()
-            if not any(f_key in voice_name_lower for f_key in female_keywords):
+            if not any(_voice_keyword_match(voice_name_lower, f_key) for f_key in female_keywords):
                 engine.setProperty('voice', voice.id)
                 logger.info(f"Found alternative male/neutral voice: {voice.name}")
                 return
@@ -222,7 +237,7 @@ class LocalTTSService:
                     name = (token.GetDescription() or "").lower()
                 except Exception:
                     name = ""
-                if pref in name:
+                if _voice_keyword_match(name, pref):
                     return token
 
         # Avoid explicitly female keywords
@@ -231,7 +246,7 @@ class LocalTTSService:
                 name = (token.GetDescription() or "").lower()
             except Exception:
                 name = ""
-            if not any(f in name for f in female_keywords):
+            if not any(_voice_keyword_match(name, f) for f in female_keywords):
                 return token
 
         return voices[0]

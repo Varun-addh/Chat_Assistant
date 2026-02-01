@@ -282,7 +282,9 @@ class Settings(BaseSettings):
 	document_cover_letter_keywords: List[str] = ["dear", "sincerely", "i am writing", "i am interested", "cover letter", "application for"]
 
 	# Local TTS voice selection heuristics
-	tts_male_voice_keywords: List[str] = ["david", "mark", "alex", "james", "george", "male", "man"]
+	# NOTE: Avoid overly-broad keywords like "man" which can false-match language names
+	# (e.g., "Manipuri") and cause surprising voice selection.
+	tts_male_voice_keywords: List[str] = ["david", "mark", "alex", "james", "george", "male"]
 	tts_female_voice_keywords: List[str] = ["zira", "hazel", "female", "woman", "samantha", "victoria"]
 
 	# Architecture view selection heuristics
