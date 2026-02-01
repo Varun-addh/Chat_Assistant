@@ -42,10 +42,11 @@ def _voice_keyword_match(text: str, keyword: str) -> bool:
 
 
 def _voice_prefers_english(name: str = "", voice_id: str = "", languages: object = None) -> bool:
-    """Best-effort check for an English voice.
+    """Best-effort check for a US/UK English voice.
 
-    We prefer English when running an English interview flow. This prevents the
-    "male/neutral" fallback from selecting unrelated language voices like Afrikaans.
+    We intentionally restrict this to American/British English variants to avoid
+    surprising selections like "English (Caribbean)" when the user wants a
+    standard interview voice.
     """
     parts: list[str] = []
     if name:
@@ -64,15 +65,22 @@ def _voice_prefers_english(name: str = "", voice_id: str = "", languages: object
                 continue
 
     combined = " ".join(parts).lower()
-    # Prefer explicit locale markers when available.
-    # Matches "en-us", "en_gb", etc. (but not bare "en" which can collide with words).
-    if re.search(r"\ben[_-][a-z]{2}\b", combined) is not None:
+    # Explicit locale markers (preferred): en-US / en-GB
+    if re.search(r"\ben[_-]us\b", combined) is not None:
+        return True
+    if re.search(r"\ben[_-]gb\b", combined) is not None:
         return True
 
-    # Many Windows SAPI voices include "English (United States)" style descriptors.
-    # Require whole-word "english" followed by an opening parenthesis to avoid false
-    # positives like "latin as English".
-    if re.search(r"\benglish\s*\(", combined) is not None:
+    # Common name patterns (Windows SAPI + some engines)
+    if re.search(r"\benglish\s*\(\s*united\s+states\s*\)", combined) is not None:
+        return True
+    if re.search(r"\benglish\s*\(\s*united\s+kingdom\s*\)", combined) is not None:
+        return True
+
+    # Espeak-style variants
+    if "english-us" in combined or "english (us" in combined:
+        return True
+    if "english-uk" in combined or "english (uk" in combined:
         return True
 
     return False
@@ -170,7 +178,7 @@ class LocalTTSService:
                             continue
                         non_female.append(voice)
 
-                    # Prefer English voices first.
+                    # Prefer US/UK English voices first.
                     for voice in non_female:
                         if _voice_prefers_english(
                             name=getattr(voice, "name", "") or "",
@@ -185,13 +193,17 @@ class LocalTTSService:
                                 logger.warning(f"Failed to set alternative voice '{voice.name}': {e}")
                             break
 
-                    # If no English voice is available, pick the first non-female voice.
+                    # If no preferred US/UK English voice is available, pick the first non-female voice,
+                    # but be explicit in logs so it's easy to diagnose missing voice packs.
                     if not selected_voice and non_female:
                         voice = non_female[0]
                         selected_voice = voice
                         try:
                             self.engine.setProperty('voice', voice.id)
-                            logger.info(f"Found alternative male/neutral voice: {voice.name}")
+                            logger.warning(
+                                "No preferred US/UK English voice found; using fallback voice: %s",
+                                getattr(voice, "name", ""),
+                            )
                         except Exception as e:
                             logger.warning(f"Failed to set alternative voice '{voice.name}': {e}")
                 
@@ -272,7 +284,7 @@ class LocalTTSService:
 
         if non_female:
             engine.setProperty('voice', non_female[0].id)
-            logger.info(f"Found alternative male/neutral voice: {non_female[0].name}")
+            logger.warning(f"No preferred US/UK English voice found; using fallback voice: {non_female[0].name}")
             return
 
         # Step 3: Absolute final fallback (any voice)
