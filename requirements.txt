@@ -56,7 +56,6 @@ huggingface_hub==0.17.3
 # LangChain minimal
 langchain-community==0.2.6
 langchain-text-splitters==0.2.2
-langchain-huggingface==0.0.3
 
 
 # Vector DB
