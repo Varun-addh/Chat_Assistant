@@ -591,7 +591,14 @@ class LocalTTSService:
 
                 return str(output_path) if output_path.exists() else None
             except Exception as e:
-                logger.error(f"pyttsx3 generation error: {e}")
+                # IMPORTANT: this can fail for many reasons (missing espeak on Linux,
+                # missing voices/COM issues on Windows, engine state issues, etc.).
+                hint = ""
+                if os.name == "nt":
+                    hint = " (Windows: ensure SAPI voices are installed and accessible)"
+                else:
+                    hint = " (Linux: ensure 'espeak-ng' is installed in the image)"
+                logger.error(f"pyttsx3 generation error{hint}: {type(e).__name__}: {e}")
                 return None
         
         # pyttsx3 isn't thread-safe; serialize calls to avoid deadlocks/timeouts.

@@ -30,6 +30,7 @@ services:
     depends_on:
       - qdrant
       - redis
+      - postgres
     volumes:
       - ./app:/app/app
       - ./data/history:/app/data/history
@@ -55,7 +56,6 @@ services:
     image: postgres:16
     container_name: interview_ast_postgres
     restart: unless-stopped
-    profiles: ["local"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-stratax}
       - POSTGRES_USER=${POSTGRES_USER:-stratax}
