@@ -64,10 +64,18 @@ def _voice_prefers_english(name: str = "", voice_id: str = "", languages: object
                 continue
 
     combined = " ".join(parts).lower()
-    if "english" in combined:
+    # Prefer explicit locale markers when available.
+    # Matches "en-us", "en_gb", etc. (but not bare "en" which can collide with words).
+    if re.search(r"\ben[_-][a-z]{2}\b", combined) is not None:
         return True
-    # Matches "en", "en-us", "en_gb", etc.
-    return re.search(r"\ben([_-][a-z]{2})?\b", combined) is not None
+
+    # Many Windows SAPI voices include "English (United States)" style descriptors.
+    # Require whole-word "english" followed by an opening parenthesis to avoid false
+    # positives like "latin as English".
+    if re.search(r"\benglish\s*\(", combined) is not None:
+        return True
+
+    return False
 
 
 class LocalTTSService:

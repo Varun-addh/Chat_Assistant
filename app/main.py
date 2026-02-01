@@ -1,3 +1,15 @@
+import warnings
+
+# Keep startup logs clean from known third-party deprecation noise.
+warnings.filterwarnings(
+    "ignore",
+    message=r"torch\.utils\._pytree\._register_pytree_node is deprecated\..*",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Deprecated call to `pkg_resources\.declare_namespace\('google'\)`\..*",
+)
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
