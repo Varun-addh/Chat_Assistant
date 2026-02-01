@@ -1,15 +1,4 @@
 import warnings
-
-# Keep startup logs clean from known third-party deprecation noise.
-warnings.filterwarnings(
-    "ignore",
-    message=r"torch\.utils\._pytree\._register_pytree_node is deprecated\..*",
-)
-warnings.filterwarnings(
-    "ignore",
-    message=r"Deprecated call to `pkg_resources\.declare_namespace\('google'\)`\..*",
-)
-
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +17,24 @@ from app.routers.health import router as health_router
 from app.utils.audit import auditor
 from app.services.chat.llm_service import llm_service
 import logging
+
+# Keep startup logs clean from known third-party deprecation noise.
+warnings.filterwarnings(
+    "ignore",
+    message=r"torch\.utils\._pytree\._register_pytree_node is deprecated\..*",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Deprecated call to `pkg_resources\.declare_namespace\('google'\)`\..*",
+)
+
+# LangChain deprecation noise (we intentionally use the community embedding class
+# to avoid dependency conflicts in constrained build environments).
+warnings.filterwarnings(
+    "ignore",
+    message=r"(?s).*The class `HuggingFaceEmbeddings` was deprecated.*langchain-huggingface.*",
+)
+
 
 logger = logging.getLogger(__name__)
 

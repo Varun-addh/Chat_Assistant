@@ -17,10 +17,12 @@ def _import_google_generativeai() -> Optional[Any]:
 	"""
 	try:
 		with warnings.catch_warnings():
+			# The package emits a FutureWarning about deprecation at import-time.
+			# Filter by message text (more reliable than module filtering).
 			warnings.filterwarnings(
 				"ignore",
 				category=FutureWarning,
-				module=r"google\\.generativeai",
+				message=r"(?s).*support for the `google\.generativeai` package has ended.*",
 			)
 			import google.generativeai as _genai  # type: ignore
 		return _genai
