@@ -1766,7 +1766,10 @@ class LLMService:
 		This eliminates code duplication between generate_answer() and stream_answer()
 		"""
 		if system_prompt is not None:
-			prompt = system_prompt
+			# If an external system_prompt is provided, append our example presentation
+			# policy so formatting rules (Answer/Follow-up/Feedback, code fences, bullets)
+			# are still enforced even when callers override the system prompt.
+			prompt = system_prompt + "\n\n" + EXAMPLE_PRESENTATION.text
 		else:
 			app_name, developer, attribution = self._get_app_identity()
 			plan = self._build_response_plan(question, depth=depth)

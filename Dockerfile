@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     curl \
     ffmpeg \
+    espeak-ng \
     libsndfile1 \
     pkg-config \
     libxml2-dev \

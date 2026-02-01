@@ -20,6 +20,7 @@ def _to_ascii(text: str) -> str:
         "⇒": "=>",
         "⇐": "<=",
         "↔": "<->",
+        # Normalize the bullet glyph into an ASCII dash so bullets aren't lost.
         "•": "-",
         "–": "-",
         "—": "-",
@@ -67,15 +68,17 @@ def _normalize_bullets(lines: Iterable[str]) -> List[str]:
         if not line:
             continue
         # Normalize common bullet symbols
-        line = re.sub(r"^[\u2022\-\*]\s+", "- ", line)
-        line = line.replace("•", "- ")
+        # Normalize different bullet markers into a single '• ' marker
+        line = re.sub(r"^[\u2022\-\*]\s+", "• ", line)
+        line = line.replace("+ ", "• ")
+        line = line.replace("•", "• ")
         # If it looks like 'Point 1: ...', drop the prefix
         line = re.sub(r"^(-\s+)?(point\s*\d+\s*:\s*)", "- ", line, flags=re.IGNORECASE)
         if line.startswith("-") and not line.startswith("- "):
             line = "- " + line.lstrip("-").lstrip()
 
-        # Drop empty bullets like "-" or "- " that often come from a lone "•" line.
-        if line.strip() in {"-", "- "}:
+        # Drop empty bullets like "-" or "- " that often come from a lone bullet glyph line.
+        if line.strip() in {"•", "• ", "-", "- "}:
             continue
         out.append(line)
     return out
@@ -148,7 +151,7 @@ def _extract_layer_content(content_lines: List[str], fallback_text: str) -> List
             logger.warning("Missing 'Key tradeoffs' section - this is critical for FAANG-level depth")
             out_lines.append("")
             out_lines.append("Key tradeoffs:")
-            out_lines.append("- Design involves tradeoffs between performance, cost, and complexity")
+            out_lines.append("• Design involves tradeoffs between performance, cost, and complexity")
         return [ln for ln in out_lines if ln.strip()]
     
     # Try observability format
@@ -169,7 +172,7 @@ def _extract_layer_content(content_lines: List[str], fallback_text: str) -> List
             logger.warning("Missing 'Measurable impact' section - observability needs quantified results")
             out_lines.append("")
             out_lines.append("Measurable impact:")
-            out_lines.append("- Improves system observability and reduces time to resolution")
+            out_lines.append("• Improves system observability and reduces time to resolution")
         return [ln for ln in out_lines if ln.strip()]
     
     # Fall back to old format
@@ -197,7 +200,7 @@ def _extract_layer_content(content_lines: List[str], fallback_text: str) -> List
             out_lines.extend(why_bullets)
         else:
             out_lines.append("Why it exists:")
-            out_lines.append("- Architectural purpose defined")
+            out_lines.append("• Architectural purpose defined")
         return out_lines
     
     # Absolute fallback
@@ -211,7 +214,8 @@ def _extract_layer_what_why(content_lines: List[str], fallback_text: str) -> Tup
     Tries to respect explicit prefixes if the model provided them; otherwise uses
     generic bullets/sentences as material. Always returns non-empty bullets.
     """
-    payloads_raw = [b[2:].strip() for b in _normalize_bullets(content_lines) if b.startswith("- ")]
+    # Accept either '- ' or '• ' bullets
+    payloads_raw = [b[2:].strip() for b in _normalize_bullets(content_lines) if b.startswith("- ") or b.startswith("• ")]
     payloads_raw = [p for p in payloads_raw if p.strip()]
 
     payloads = [_strip_redundant_prefixes(p) for p in payloads_raw if p.strip()]
@@ -262,8 +266,8 @@ def _extract_layer_what_why(content_lines: List[str], fallback_text: str) -> Tup
     if len(why_cand) == 0:
         why_cand = ["Preserve correctness and reliability under load."]
 
-    what = [f"- {w}" for w in what_cand[:2]]
-    why = [f"- {w}" for w in why_cand[:1]]
+    what = [f"• {w}" for w in what_cand[:2]]
+    why = [f"• {w}" for w in why_cand[:1]]
     return what, why
 
 
@@ -275,6 +279,99 @@ def _first_sentences(text: str, n: int) -> List[str]:
     return [p.strip() for p in parts if p.strip()][:n]
 
 
+def _format_numbered_qa(text: str) -> str:
+    """Detect numbered Q&A sections (1., 2., ...) and reformat each into a
+    consistent template. Returns original text if not a multi-item numbered list.
+    """
+    items = list(re.finditer(r"(?m)^\s*(\d+)\.\s*(.+)$", text))
+    if len(items) < 2:
+        return text
+
+    allowed_langs = {
+        "python",
+        "py",
+        "sql",
+        "bash",
+        "sh",
+        "json",
+        "yaml",
+        "yml",
+        "js",
+        "javascript",
+        "html",
+        "css",
+        "go",
+        "java",
+        "c",
+        "cpp",
+        "rust",
+        "ruby",
+    }
+
+    out_sections: List[str] = []
+    for idx, m in enumerate(items):
+        start = m.end()
+        end = items[idx + 1].start() if idx + 1 < len(items) else len(text)
+        title = m.group(2).strip()
+        body = text[start:end].strip()
+
+        # Remove common QA prefixes inside the body
+        body = re.sub(r"(?im)^\s*(answer|example|why interviewers ask this|why this is asked|real[- ]world usage|real world usage)\s*:\s*", "", body)
+
+        # Extract first fenced code block
+        code_block = None
+        code_match = re.search(r"```([^\n]*)\n(.*?)\n```", body, flags=re.DOTALL | re.IGNORECASE)
+        if code_match:
+            lang = (code_match.group(1) or "").strip().lower()
+            code = code_match.group(2).strip()
+            if lang and lang in allowed_langs:
+                code_block = f"```{lang}\n{code}\n```"
+            else:
+                code_block = f"```\n{code}\n```"
+            body = (body[: code_match.start()] + body[code_match.end() :]).strip()
+
+        expl_sents = _first_sentences(body, 2)
+        explanation = expl_sents[0] if expl_sents else ""
+
+        why = ""
+        why_m = re.search(r"(?is)why[\w\s]*[:\-]\s*(.*?)(?=real[- ]world|example|$)", body)
+        if why_m:
+            why = _first_sentences(why_m.group(1).strip(), 1)[0] if _first_sentences(why_m.group(1).strip(), 1) else ""
+
+        rw = ""
+        rw_m = re.search(r"(?is)real[- ]world[\s]*usage[:\-]\s*(.*)$", body)
+        if rw_m:
+            rw = _first_sentences(rw_m.group(1).strip(), 1)[0] if _first_sentences(rw_m.group(1).strip(), 1) else ""
+        elif len(expl_sents) > 1:
+            rw = expl_sents[1]
+
+        sec_lines: List[str] = [f"{m.group(1)}. {title}", "- Explanation:"]
+        if explanation:
+            sec_lines.append(f"• {explanation}")
+
+        if code_block:
+            sec_lines.append("- Example:")
+            sec_lines.append(code_block)
+        else:
+            ex_m = re.search(r"(?is)example[:\-]\s*(.*?)(?=why|real[- ]world|$)", body)
+            if ex_m:
+                ex_sent = _first_sentences(ex_m.group(1).strip(), 2)
+                for s in ex_sent:
+                    sec_lines.append(f"• {s}")
+
+        if why:
+            sec_lines.append("- Why interviewers ask this:")
+            sec_lines.append(f"• {why}")
+
+        if rw:
+            sec_lines.append("- Real-world usage:")
+            sec_lines.append(f"• {rw}")
+
+        out_sections.append("\n".join(sec_lines))
+
+    return "\n\n".join(out_sections)
+
+
 def enforce_story_contract(view_name: str, system_description: str, explanation: str) -> str:
     """Clamp the explanation to the strict, story-driven UX format.
 
@@ -284,6 +381,57 @@ def enforce_story_contract(view_name: str, system_description: str, explanation:
     view = (view_name or "").upper().strip()
     system_description = (system_description or "").strip()
     text = _to_ascii(explanation or "").strip()
+
+    # Strip noisy code-fence language labels that some models inject (e.g. "```TEXT CODE").
+    # Preserve common single-token language identifiers (python, sql, bash, etc.)
+    def _strip_code_fence_langs(s: str) -> str:
+        def _repl(m: re.Match) -> str:
+            lang = (m.group(1) or "").strip()
+            if not lang:
+                return "```\n"
+            lang_norm = lang.lower().strip()
+            allowed = {
+                "python",
+                "py",
+                "sql",
+                "bash",
+                "sh",
+                "json",
+                "yaml",
+                "yml",
+                "js",
+                "javascript",
+                "html",
+                "css",
+                "go",
+                "java",
+                "c",
+                "cpp",
+                "rust",
+                "ruby",
+            }
+            # If the language token is a single, allowed identifier, keep it (normalized);
+            # otherwise strip the label so the UI won't render noisy subtitles like "TEXT CODE".
+            if " " not in lang_norm and lang_norm in allowed:
+                return f"```{lang_norm}\n"
+            return "```\n"
+
+        return re.sub(r"```([^\n]*)\n", _repl, s)
+
+    text = _strip_code_fence_langs(text)
+
+    # Remove common Q&A-style subheadings that models insert (e.g. "Answer:", "Example:").
+    # We strip only the prefix so the actual content remains.
+    qa_prefix_pattern = r"(?im)^\s*(answer)\s*:\s*"
+    text = re.sub(qa_prefix_pattern, "", text)
+
+    # If the model produced a numbered Q&A list (1., 2., ...), reformat it
+    # into the neat interview template automatically.
+    if re.search(r"(?m)^\s*\d+\.\s+", text):
+        formatted = _format_numbered_qa(text)
+        # If formatting produced multiple sections, trust it and return.
+        if formatted and formatted.strip():
+            return _to_ascii(formatted).strip()
 
     # Remove common "encyclopedia" sections and UI artifacts
     # NOTE: SINGLE mode intentionally includes executive summary, capacity planning,
@@ -374,7 +522,7 @@ def enforce_story_contract(view_name: str, system_description: str, explanation:
             blob = "\n".join([ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith("#")])
             sentences = _first_sentences(blob, 30)
             # Distribute conservatively.
-            sections["### Executive Summary"] = [f"- {s}" for s in sentences[:5]]
+            sections["### Executive Summary"] = [f"• {s}" for s in sentences[:5]]
             sections["### Requirements"] = sentences[5:14]
             sections["### Architecture"] = sentences[14:22]
             sections["### Data & Storage"] = sentences[22:26]
@@ -384,9 +532,9 @@ def enforce_story_contract(view_name: str, system_description: str, explanation:
 
         def _as_bullets(raw_lines: List[str], n: int) -> List[str]:
             bullets = _normalize_bullets(raw_lines)
-            bullets = [b for b in bullets if b.startswith("- ")]
+            bullets = [b for b in bullets if b.startswith("- ") or b.startswith("• ")]
             if len(bullets) < n:
-                derived = [f"- {s}" for s in _first_sentences(" ".join(raw_lines), n)]
+                derived = [f"• {s}" for s in _first_sentences(" ".join(raw_lines), n)]
                 bullets = (bullets + derived)[:n]
             else:
                 bullets = bullets[:n]
@@ -506,11 +654,11 @@ def enforce_story_contract(view_name: str, system_description: str, explanation:
 
     if view == "SYSTEM_OVERVIEW":
         bullets = _normalize_bullets(text.splitlines())
-        bullets = [b for b in bullets if b.startswith("- ")]
+        bullets = [b for b in bullets if b.startswith("- ") or b.startswith("• ")]
 
         # Take exactly 5 bullets; if fewer, try to derive from sentences
         if len(bullets) < 5:
-            derived = [f"- {s}" for s in _first_sentences(text, 5)]
+            derived = [f"• {s}" for s in _first_sentences(text, 5)]
             bullets = (bullets + derived)[:5]
         else:
             bullets = bullets[:5]

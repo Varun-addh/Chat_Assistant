@@ -215,3 +215,39 @@ ALGO_DIAGRAM = PolicyModule(
         "For algorithm questions: include a small Mermaid flowchart ONLY IF the user explicitly asks for 'diagram', 'flowchart', or 'visualize'. Otherwise skip."
     ),
 )
+
+
+# Backfill minimal policy modules expected elsewhere in the codebase.
+# These are concise, intentionally non-opinionated definitions used for
+# prompt composition and for cases where a caller appends presentation hints.
+
+
+COPILOT_SYSTEM = PolicyModule(
+    name="copilot_system",
+    text=(
+        "System instructions (infrastructure):\n"
+        "- Be helpful, safe, and follow included policy modules.\n"
+        "- Prefer deterministic and parsable outputs for programmatic consumers."
+    ),
+)
+
+
+RESPONSE_TEMPLATE = PolicyModule(
+    name="response_template",
+    text=(
+        "Response template (format hint):\n"
+        "- Summary first, then details/bullets.\n"
+        "- For behavioral answers, use STAR when first-person is requested."
+    ),
+)
+
+
+OUTPUT_GUARDS = PolicyModule(
+    name="output_guards",
+    text=(
+        "Output guards (safety & format):\n"
+        "- Avoid disallowed content and hallucinated facts.\n"
+        "- If JSON mode requested, keep outputs parsable."
+    ),
+)
+

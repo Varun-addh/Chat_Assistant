@@ -1088,11 +1088,23 @@ CRITICAL RULES:
             questions = []
             for idx, result in enumerate(results):
                 # CRITICAL FIX: Filter out coding questions from technical interviews
-                is_coding_question = (
-                    result.get("is_coding_question", False) or
-                    result.get("question_type") == "coding" or
-                    result.get("code_solution") is not None
-                )
+                is_coding_flag = result.get("is_coding_question", False)
+                is_coding_flag_bool = False
+                if isinstance(is_coding_flag, bool):
+                    is_coding_flag_bool = is_coding_flag
+                elif isinstance(is_coding_flag, str):
+                    is_coding_flag_bool = is_coding_flag.strip().lower() in {"true", "1", "yes"}
+
+                question_type = (result.get("question_type") or "").strip().lower()
+
+                code_solution = result.get("code_solution")
+                has_real_code_solution = False
+                if isinstance(code_solution, str):
+                    has_real_code_solution = bool(code_solution.strip())
+                elif isinstance(code_solution, (list, tuple, dict)):
+                    has_real_code_solution = len(code_solution) > 0
+
+                is_coding_question = is_coding_flag_bool or question_type == "coding" or has_real_code_solution
                 
                 # Skip coding questions if this is a technical (non-coding) interview
                 if interview_type == InterviewType.TECHNICAL and is_coding_question:

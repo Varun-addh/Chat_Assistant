@@ -15,6 +15,9 @@ from app.prompts.policies import (
     IDENTITY_AND_ATTRIBUTION,
 	OUTPUT_HYGIENE,
 	RESPONSE_CONTRACT,
+    COPILOT_SYSTEM,
+    RESPONSE_TEMPLATE,
+    OUTPUT_GUARDS,
     SYSTEM_DESIGN,
     SYSTEM_DESIGN_DIAGRAM,
     UI_DIAGRAM,
@@ -54,6 +57,9 @@ def build_default_system_prompt(
     """
 
     modules: list[PolicyModule] = [
+        COPILOT_SYSTEM,
+        RESPONSE_TEMPLATE,
+        OUTPUT_GUARDS,
         BASE_PERSONA,
         IDENTITY_AND_ATTRIBUTION,
         UX_CONVERSATION,
