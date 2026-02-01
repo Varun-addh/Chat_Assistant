@@ -86,6 +86,11 @@ def _voice_prefers_english(name: str = "", voice_id: str = "", languages: object
     return False
 
 
+def _voice_is_windows_david(name: str = "", voice_id: str = "") -> bool:
+    combined = f"{name or ''} {voice_id or ''}".lower()
+    return "david" in combined
+
+
 class LocalTTSService:
     """
     Local Text-to-Speech service using pyttsx3 (offline) with gTTS fallback.
@@ -148,6 +153,18 @@ class LocalTTSService:
                                     break
                                 except Exception as e:
                                     logger.warning(f"Failed to set voice '{voice.name}': {e}")
+
+                # On Windows, strongly prefer Microsoft David if present.
+                # This is the "standard" interview voice most users expect.
+                if os.name == "nt" and not getattr(settings, "practice_tts_voice_name_contains", None):
+                    for voice in voices:
+                        if _voice_is_windows_david(getattr(voice, "name", "") or "", getattr(voice, "id", "") or ""):
+                            try:
+                                self.engine.setProperty("voice", voice.id)
+                                logger.info(f"Selected Windows preferred voice: {voice.name}")
+                                break
+                            except Exception as e:
+                                logger.warning(f"Failed to set Windows preferred voice '{voice.name}': {e}")
 			
                 # 👔 WORLD-CLASS MALE VOICE SELECTION 👔
                 # Priority: Male voices (Microsoft David, Alex, Mark)
@@ -252,6 +269,14 @@ class LocalTTSService:
                     logger.info(f"Selected configured voice by name match: {voice.name}")
                     return
 
+        # On Windows, strongly prefer Microsoft David if present.
+        if os.name == "nt":
+            for voice in voices:
+                if _voice_is_windows_david(getattr(voice, "name", "") or "", getattr(voice, "id", "") or ""):
+                    engine.setProperty("voice", voice.id)
+                    logger.info(f"Selected Windows preferred voice: {voice.name}")
+                    return
+
         # 👔 WORLD-CLASS MALE VOICE SELECTION 👔
         male_keywords = list(getattr(settings, "tts_male_voice_keywords", None) or [])
         female_keywords = list(getattr(settings, "tts_female_voice_keywords", None) or [])
@@ -311,6 +336,16 @@ class LocalTTSService:
                     name = ""
                 if name_contains in name:
                     return token
+
+        # Strong preference: Microsoft David (Windows SAPI). If the host does not have it,
+        # we'll fall back to the keyword heuristics below.
+        for token in voices:
+            try:
+                name = (token.GetDescription() or "")
+            except Exception:
+                name = ""
+            if "david" in name.lower():
+                return token
 
         male_keywords = list(getattr(settings, "tts_male_voice_keywords", None) or [])
         female_keywords = list(getattr(settings, "tts_female_voice_keywords", None) or [])
