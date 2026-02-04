@@ -126,12 +126,16 @@ class LocalSTTService:
             )
             
             # Performance check
-            # Interpret max_transcription_time as the target for ~60 seconds of audio (default: 3s).
-            # Scale linearly for longer audio to avoid false alarms on long clips.
-            target_rtf = float(self.config.max_transcription_time) / 60.0
+            # Performance check
+            # - `max_transcription_time` is a hard ceiling for short clips.
+            # - `target_rtf` captures the more meaningful metric for longer clips.
+            configured_target_rtf = float(getattr(self.config, "target_rtf", None) or 0.0) or None
+            derived_target_rtf = float(self.config.max_transcription_time) / 60.0
+            target_rtf = configured_target_rtf if configured_target_rtf is not None else derived_target_rtf
             target_time = max(float(self.config.max_transcription_time), audio_duration * target_rtf)
 
-            if transcription_time > target_time:
+            # Only warn when we're both slower than the target-time and the RTF goal.
+            if transcription_time > target_time and rtf > target_rtf:
                 logger.warning(
                     f"Transcription took {transcription_time:.2f}s, "
                     f"exceeds target {target_time:.2f}s "

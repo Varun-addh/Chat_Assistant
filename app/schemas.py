@@ -813,6 +813,9 @@ class STTConfig(BaseModel):
 	device: str = Field(default="cpu", description="Device: 'cpu' or 'cuda'")
 	compute_type: str = Field(default="int8", description="Compute type for faster-whisper")
 	max_transcription_time: float = Field(default=3.0, description="Max STT time in seconds")
+	# Real-time factor (seconds compute / seconds audio). Lower is faster.
+	# Default is realistic for CPU 'base' models; tune via env if needed.
+	target_rtf: float = Field(default=0.35, description="Warn if transcription is slower than this real-time factor")
 
 
 class SpeechAnalyticsConfig(BaseModel):
