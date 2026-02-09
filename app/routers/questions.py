@@ -28,6 +28,7 @@ from app.services.chat.mirror_compare import (
 )
 from app.utils.audit import auditor
 from app.config import settings
+from app.utils.demo_mode import extract_user_provided_api_key
 from app.middleware.auth import get_user_id_from_request
 from fastapi import Request
 import asyncio
@@ -256,6 +257,30 @@ async def submit_question(
 	groq_key = _clean(x_api_key)
 	gemini_key = _clean(x_gemini_key)
 
+	# Strict BYOK enforcement (recommended for university rollouts).
+	# Accept any non-empty bridge header key as "provided" (don't over-validate
+	# key shapes here; tests and future providers may not match known prefixes).
+	provided_key = gemini_key or groq_key
+
+	# Authorization is tricky (it may be JWT), so we only accept it as an LLM key
+	# via the strict extractor.
+	auth_key = extract_user_provided_api_key(
+		request,
+		x_api_key=None,
+		x_gemini_key=None,
+		authorization=authorization,
+	)
+	user_key = provided_key or auth_key
+
+	if settings.require_user_api_key and not user_key:
+		raise HTTPException(
+			status_code=401,
+			detail=(
+				"No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue. "
+				"(Server key fallback is disabled.)"
+			),
+		)
+
 	# IMPORTANT:
 	# - If the request is authenticated, Authorization is assumed to be JWT (not an LLM key).
 	# - If unauthenticated, accept Authorization only when it looks like a real LLM key.
@@ -282,13 +307,12 @@ async def submit_question(
 	# (Registered users keep the normal model selection.)
 	demo_groq_model = settings.groq_demo_model or settings.groq_model
 
-	# 3. Select key to use.
-	# If the user provided a Gemini key in Bridge Settings, we prefer it (higher quality).
-	# Otherwise, use Groq key if provided.
-	api_key = gemini_key or groq_key
+	# 3. Select key to use (validated user key wins).
+	api_key = user_key or gemini_key or groq_key
 	
 	# 4. Fallback to server/env keys ONLY if user provided NO keys in Bridge Settings
 	if not api_key:
+		# In strict BYOK mode, we already raised above.
 		if is_demo:
 			# DEMO PATH: prefer Stratax demo keys (explicit list or single key),
 			# then the demo key pool (if enabled), and finally the developer GROQ key.

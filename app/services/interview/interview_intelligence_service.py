@@ -1,4 +1,5 @@
 import asyncio
+import weakref
 import json
 import re
 import textwrap
@@ -37,6 +38,30 @@ from app.services.chat.ai_native_enhancements import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Optional burst protection: limit concurrent heavy to_thread work per event loop.
+# pytest may use multiple event loops, so keep semaphores loop-scoped.
+_HEAVY_OP_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[int, asyncio.Semaphore]]" = weakref.WeakKeyDictionary()
+
+
+def _get_heavy_op_semaphore() -> asyncio.Semaphore | None:
+    limit = settings.embedding_concurrency_limit
+    if limit is None:
+        return None
+    try:
+        limit_int = int(limit)
+    except Exception:
+        return None
+    if limit_int <= 0:
+        return None
+
+    loop = asyncio.get_running_loop()
+    entry = _HEAVY_OP_SEMAPHORES.get(loop)
+    if entry is None or entry[0] != limit_int:
+        sem = asyncio.Semaphore(limit_int)
+        _HEAVY_OP_SEMAPHORES[loop] = (limit_int, sem)
+        return sem
+    return entry[1]
 
 # Create aliases for backward compatibility
 UnifiedSourceManager = type('UnifiedSourceManager', (), {
@@ -247,6 +272,18 @@ class ModernInterviewIntelligenceService:
         if not self.embed_model:
             raise RuntimeError("Embedding model not initialized")
         return self.embed_model.encode(text, convert_to_tensor=False).tolist()
+
+    async def _embed_text_async(self, text: str) -> List[float]:
+        """Async wrapper for embedding generation.
+
+        SentenceTransformer.encode is CPU-bound and will block the event loop if
+        called directly inside async request handlers.
+        """
+        sem = _get_heavy_op_semaphore()
+        if sem is None:
+            return await asyncio.to_thread(self._embed_text, text)
+        async with sem:
+            return await asyncio.to_thread(self._embed_text, text)
 
     def _fix_json_escapes(self, text: str) -> str:
         """Normalize JSON escape sequences to improve parse success"""
@@ -1407,7 +1444,7 @@ CRITICAL FORMAT RULES:
         
         try:
             # Create query embedding
-            query_vector = self._embed_text(query)
+            query_vector = await self._embed_text_async(query)
             
             # Build filters
             filters = None
@@ -1421,14 +1458,22 @@ CRITICAL FORMAT RULES:
                     ]
                 )
             
-            # Search
-            results = self.vector_client.search(
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                limit=limit * 2,  # Get more for filtering
-                query_filter=filters,
-                score_threshold=0.5  # Minimum similarity
-            )
+            # Qdrant client is synchronous; offload to a thread.
+            def _search():
+                return self.vector_client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    limit=limit * 2,  # Get more for filtering
+                    query_filter=filters,
+                    score_threshold=0.5,  # Minimum similarity
+                )
+
+            sem = _get_heavy_op_semaphore()
+            if sem is None:
+                results = await asyncio.to_thread(_search)
+            else:
+                async with sem:
+                    results = await asyncio.to_thread(_search)
             
             # Convert to InterviewQuestion objects
             questions = []
@@ -1701,19 +1746,41 @@ CRITICAL FORMAT RULES:
             return [q for _, q in scored_questions]
         
         # Full ranking with embeddings (enhanced search mode)
-        query_embedding = self._embed_text(query)
+        if not self.embed_model:
+            # Shouldn't happen when intelligence is initialized, but degrade safely.
+            return questions
+
+        # Batch embeddings in one encode() call (much faster than per-question)
+        # and offload to a thread to avoid blocking the event loop.
+        q_texts = [f"{q.question} {' '.join(q.key_concepts)}" for q in questions]
+
+        def _encode_batch():
+            return self.embed_model.encode([query] + q_texts, convert_to_tensor=False)
+
+        sem = _get_heavy_op_semaphore()
+        if sem is None:
+            embeddings = await asyncio.to_thread(_encode_batch)
+        else:
+            async with sem:
+                embeddings = await asyncio.to_thread(_encode_batch)
+
+        try:
+            query_embedding = embeddings[0].tolist()
+            q_embeddings = [embeddings[i + 1].tolist() for i in range(len(questions))]
+        except Exception:
+            # Fallback if the embedding output isn't indexable as expected.
+            query_embedding = await self._embed_text_async(query)
+            q_embeddings = [await self._embed_text_async(t) for t in q_texts]
         
         scored_questions = []
-        for q in questions:
+        for idx, q in enumerate(questions):
             score = 0.0
             
             # Base confidence score
             score += q.confidence_score * 0.3
             
             # Semantic similarity
-            q_text = f"{q.question} {' '.join(q.key_concepts)}"
-            q_embedding = self._embed_text(q_text)
-            similarity = self._cosine_similarity(query_embedding, q_embedding)
+            similarity = self._cosine_similarity(query_embedding, q_embeddings[idx])
             score += similarity * 0.4
             
             # Keyword matching

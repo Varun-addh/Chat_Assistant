@@ -902,6 +902,7 @@ async def get_topics():
 
 @router.get("/questions/{topic}", response_model=InterviewQuestionsResponse)
 async def get_questions_by_topic(
+    request: Request,
     topic: str,
     limit: int = Query(default=50, ge=1, le=100),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
@@ -909,17 +910,42 @@ async def get_questions_by_topic(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """Get interview questions for a specific topic."""
-    # API Key selection (Bridge Settings)
-    groq_key = x_api_key
-    gemini_key = x_gemini_key
-    if not groq_key and authorization and authorization.startswith("Bearer "):
-        groq_key = authorization.split(" ")[1]
-        
-    api_key = gemini_key if gemini_key else groq_key
-    
-    # Fallback to dev keys
+    # API key selection (Bridge Settings / BYOK)
+    # Accept any non-empty bridge header key as "provided" (don't over-validate
+    # key shapes here; tests and future providers may not match known prefixes).
+    def _clean(v: Optional[str]) -> Optional[str]:
+        t = (v or "").strip()
+        if not t:
+            return None
+        if t.lower() in {"null", "undefined", "none"}:
+            return None
+        return t
+
+    x_api_key = _clean(x_api_key)
+    x_gemini_key = _clean(x_gemini_key)
+    provided_key = x_gemini_key or x_api_key
+    # Authorization may be a JWT; only accept it as a provider key via strict parsing.
+    auth_key = extract_user_provided_api_key(
+        request,
+        x_api_key=None,
+        x_gemini_key=None,
+        authorization=authorization,
+    )
+    user_key = provided_key or auth_key
+    if settings.require_user_api_key and not user_key:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "API key required for Interview Intelligence. "
+                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
+                "or Authorization: Bearer <key>."
+            ),
+        )
+
+    api_key = user_key
+
+    # Fallback to server keys only when BYOK is not required.
     if not api_key:
-        from app.config import settings
         api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
@@ -1032,21 +1058,29 @@ async def search_questions(
             detail="Search query cannot be empty"
         )
     
-    # API Key selection (Bridge Settings)
-    groq_key = x_api_key
-    gemini_key = x_gemini_key
-    if not groq_key and authorization and authorization.startswith("Bearer "):
-        groq_key = authorization.split(" ")[1]
+    # API Key selection (Bridge Settings / BYOK)
+    # Treat any non-empty bridge header key as "provided".
+    def _clean(v: Optional[str]) -> Optional[str]:
+        t = (v or "").strip()
+        if not t:
+            return None
+        if t.lower() in {"null", "undefined", "none"}:
+            return None
+        return t
 
-    api_key = gemini_key if gemini_key else groq_key
-
-    # Demo-mode detection: no auth + no user-provided key.
-    user_key = extract_user_provided_api_key(
+    x_api_key = _clean(x_api_key)
+    x_gemini_key = _clean(x_gemini_key)
+    provided_key = x_gemini_key or x_api_key
+    # Authorization may be a JWT; only accept it as a provider key via strict parsing.
+    auth_key = extract_user_provided_api_key(
         request,
-        x_api_key=x_api_key,
-        x_gemini_key=x_gemini_key,
+        x_api_key=None,
+        x_gemini_key=None,
         authorization=authorization,
     )
+    user_key = provided_key or auth_key
+
+    api_key = user_key
     is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
 
     # If the server is configured to require user API keys, do NOT fall back to server keys.
@@ -1061,7 +1095,7 @@ async def search_questions(
             ),
         )
 
-    # Prefer the validated user-provided key when present.
+    # Prefer the user-provided key when present.
     api_key = user_key or api_key
 
     # Fallback to server keys only when user provided no keys.
@@ -1131,21 +1165,27 @@ async def search_questions_post(
     refresh = bool(payload.refresh)
     save_to_history = payload.save_to_history if payload.save_to_history is not None else True
 
-    # API Key selection (Bridge Settings)
-    groq_key = x_api_key
-    gemini_key = x_gemini_key
-    if not groq_key and authorization and authorization.startswith("Bearer "):
-        groq_key = authorization.split(" ")[1]
+    # API Key selection (Bridge Settings / BYOK)
+    def _clean(v: Optional[str]) -> Optional[str]:
+        t = (v or "").strip()
+        if not t:
+            return None
+        if t.lower() in {"null", "undefined", "none"}:
+            return None
+        return t
 
-    api_key = gemini_key if gemini_key else groq_key
-
-    # Demo-mode detection: no auth + no user-provided key.
-    user_key = extract_user_provided_api_key(
+    x_api_key = _clean(x_api_key)
+    x_gemini_key = _clean(x_gemini_key)
+    provided_key = x_gemini_key or x_api_key
+    auth_key = extract_user_provided_api_key(
         request,
-        x_api_key=x_api_key,
-        x_gemini_key=x_gemini_key,
+        x_api_key=None,
+        x_gemini_key=None,
         authorization=authorization,
     )
+    user_key = provided_key or auth_key
+
+    api_key = user_key
     is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
 
     # If the server is configured to require user API keys, do NOT fall back to server keys.
@@ -1160,7 +1200,7 @@ async def search_questions_post(
             ),
         )
 
-    # Prefer the validated user-provided key when present.
+    # Prefer the user-provided key when present.
     api_key = user_key or api_key
 
     # Fallback to server keys only when user provided no keys.

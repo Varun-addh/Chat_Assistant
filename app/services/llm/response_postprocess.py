@@ -35,6 +35,156 @@ def _process_thinking_tags(self, text: str) -> str:
 	return text
 
 
+def _wrap_loose_sql_blocks(self, text: str) -> str:
+	"""Wrap standalone SQL snippets into fenced code blocks.
+
+	This repairs a frequent provider formatting glitch where the model emits:
+	  sql-- comment
+	  INSERT INTO ...
+	  VALUES (...);
+
+	without surrounding ```sql fences, which makes the frontend render it as prose.
+
+	Conservative rules:
+	- Never touches existing fenced code blocks.
+	- Only wraps runs that look strongly like SQL (keywords / semicolons / sql-- prefix).
+	"""
+	if not text:
+		return text
+
+	text = text.replace("\r\n", "\n").replace("\r", "\n")
+	lines = text.split("\n")
+	out: list[str] = []
+	in_code = False
+
+	sql_start_re = re.compile(r"^\s*(?:sql--\s*|--\s*|SELECT\b|WITH\b|INSERT\b|UPDATE\b|DELETE\b|CREATE\b|DROP\b|ALTER\b)", re.IGNORECASE)
+	sql_kw_re = re.compile(r"\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|FROM|WHERE|VALUES|JOIN|GROUP\s+BY|ORDER\s+BY)\b", re.IGNORECASE)
+
+	def _looks_like_sql_run(run_lines: list[str]) -> bool:
+		if not run_lines:
+			return False
+		joined = "\n".join(run_lines)
+		score = 0
+		# Strong signals
+		if re.search(r"^\s*sql--\s*", run_lines[0], re.IGNORECASE):
+			score += 3
+		if re.search(r"^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b", run_lines[0], re.IGNORECASE):
+			score += 3
+		# General SQL-ish traits
+		score += 2 * len(sql_kw_re.findall(joined))
+		if ";" in joined:
+			score += 2
+		# Require at least 2 lines unless it's an extremely strong single-liner.
+		if len(run_lines) >= 2 and score >= 5:
+			return True
+		if len(run_lines) == 1 and score >= 9:
+			return True
+		return False
+
+	i = 0
+	while i < len(lines):
+		line = lines[i]
+		stripped = line.strip()
+
+		if stripped.startswith("```"):
+			in_code = not in_code
+			out.append(line)
+			i += 1
+			continue
+
+		if in_code:
+			out.append(line)
+			i += 1
+			continue
+
+		# Candidate start of a loose SQL run.
+		if stripped and sql_start_re.search(stripped):
+			j = i
+			run: list[str] = []
+			while j < len(lines):
+				s = lines[j].strip()
+				if not s:
+					break
+				# Stop before headings/lists/new fences.
+				if s.startswith(("```", "#", "- ", "* ", "+ ")):
+					break
+				run.append(lines[j])
+				j += 1
+
+			if _looks_like_sql_run(run):
+				# Normalize the common 'sql--' prefix to a real SQL comment.
+				norm_run = [re.sub(r"^\s*sql--\s*", "-- ", l, flags=re.IGNORECASE) for l in run]
+				out.append("```sql")
+				out.extend([l.rstrip() for l in norm_run])
+				out.append("```")
+				i = j
+				continue
+
+		out.append(line)
+		i += 1
+
+	return "\n".join(out)
+
+
+def _drop_empty_example_code_blocks(self, text: str) -> str:
+	"""Remove fenced code blocks that contain only 'Example:' (or are empty).
+
+	Some provider outputs accidentally emit empty code fences like:
+	```\nExample:\n```
+	which the frontend renders as an empty CODE card.
+
+	Never touches non-empty code blocks.
+	"""
+	if not text:
+		return text
+
+	text = text.replace("\r\n", "\n").replace("\r", "\n")
+	lines = text.split("\n")
+	out: list[str] = []
+	i = 0
+	while i < len(lines):
+		line = lines[i]
+		stripped = line.strip()
+		if not stripped.startswith("```"):
+			out.append(line)
+			i += 1
+			continue
+
+		# Capture a fenced block
+		fence_open = line
+		block: list[str] = []
+		i += 1
+		found_close = False
+		while i < len(lines):
+			l = lines[i]
+			if l.strip().startswith("```"):
+				found_close = True
+				break
+			block.append(l)
+			i += 1
+
+		# If no closing fence, treat as plain text.
+		if not found_close:
+			out.append(fence_open)
+			out.extend(block)
+			break
+
+		fence_close = lines[i]
+		content = "\n".join(block).strip()
+		content_lower = content.lower()
+		if content_lower in ("", "example:", "example"):
+			# Drop the whole fenced block.
+			i += 1
+			continue
+
+		out.append(fence_open)
+		out.extend(block)
+		out.append(fence_close)
+		i += 1
+
+	return "\n".join(out)
+
+
 def _fix_markdown_syntax(self, text: str) -> str:
 	"""Fix common broken markdown syntax artifacts"""
 	import re
@@ -288,6 +438,9 @@ def _format_response(self, text: str) -> str:
 
 	# Clean up the text first
 	text = text.strip()
+	# Repair common provider formatting glitches before normalization.
+	text = self._wrap_loose_sql_blocks(text)
+	text = self._drop_empty_example_code_blocks(text)
 
 	# Process thinking tags first to ensure they wrap correctly
 	text = self._process_thinking_tags(text)

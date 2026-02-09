@@ -49,6 +49,7 @@ from app.schemas import (
     PracticeConfidenceOutcomeOut,
 )
 from app.services.practice.practice_mode_service import PracticeModeService
+from app.services.practice.practice_mode_graph import PracticeModeGraph
 
 from app.config import settings
 from app.database import get_db_context
@@ -431,6 +432,7 @@ async def ingest_session_proctoring_event(
 
 # Service instance (will be initialized in main.py)
 practice_service: Optional[PracticeModeService] = None
+practice_graph: Optional[PracticeModeGraph] = None
 
 
 def _copy_user_profile(profile: UserProfile, update: dict[str, Any]) -> UserProfile:
@@ -540,7 +542,7 @@ def init_practice_mode(
         gemini_model: Gemini model name
         config: Optional custom configuration
     """
-    global practice_service
+    global practice_service, practice_graph
     
     if config is None:
         config = PracticeModeConfig()
@@ -550,6 +552,20 @@ def init_practice_mode(
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model
     )
+
+    # Optional: LangGraph orchestration layer (soft dependency).
+    practice_graph = None
+    if bool(getattr(settings, "enable_practice_mode_langgraph", False)):
+        try:
+            g = PracticeModeGraph(practice_service)
+            practice_graph = g if g.available else None
+            if practice_graph:
+                logger.info("Practice Mode LangGraph enabled")
+            else:
+                logger.info("Practice Mode LangGraph requested but unavailable; falling back")
+        except Exception as e:
+            practice_graph = None
+            logger.warning(f"Practice Mode LangGraph init failed; falling back: {e}")
     
     logger.info("Practice Mode initialized")
 
@@ -559,7 +575,7 @@ def cleanup_practice_mode():
     Cleanup practice mode resources on shutdown.
     Call this from main.py lifespan shutdown.
     """
-    global practice_service
+    global practice_service, practice_graph
     
     try:
         if practice_service:
@@ -567,6 +583,7 @@ def cleanup_practice_mode():
             if hasattr(practice_service, 'tts_service'):
                 practice_service.tts_service.cleanup()
             logger.info("Practice Mode cleaned up successfully")
+        practice_graph = None
     except Exception as e:
         logger.error(f"Error cleaning up Practice Mode: {e}")
 
@@ -785,6 +802,11 @@ async def start_round_based_interview(
         # Fallback to dev keys in local mode if headers are empty
         if not api_key:
             from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
             api_key = settings.gemini_api_key or settings.groq_api_key
  
         # Start interview with EXPERIENCE-BASED difficulty (not round's default)
@@ -916,6 +938,11 @@ async def quick_start_interview(
         # Fallback to dev keys
         if not api_key:
             from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
             api_key = settings.gemini_api_key or settings.groq_api_key
 
         # Use AI to build profile from conversational input
@@ -969,6 +996,11 @@ async def start_interview(
         # Fallback to dev keys respecting provider preference
         if not api_key:
             from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
             if settings.llm_provider == "gemini":
                 api_key = settings.gemini_api_key or settings.groq_api_key
             else:
@@ -981,12 +1013,21 @@ async def start_interview(
         )
 
         # Start interview with user profile
-        session_id, first_question, audio_filename = await practice_service.start_interview(
+        runner = practice_graph if (practice_graph and practice_graph.available) else None
+        if runner:
+            session_id, first_question, audio_filename = await runner.start_interview(
+                difficulty=payload.difficulty,
+                user_profile=enriched_profile,
+                question_count=payload.question_count,
+                api_key=api_key,
+            )
+        else:
+            session_id, first_question, audio_filename = await practice_service.start_interview(
             difficulty=payload.difficulty,
             user_profile=enriched_profile,
             question_count=payload.question_count,
             api_key=api_key
-        )
+            )
         
         # Get session to retrieve total questions count
         session = practice_service.get_session(session_id)
@@ -1080,6 +1121,11 @@ async def submit_answer(
         # Fallback to dev keys respecting provider preference
         if not api_key:
             from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
             if settings.llm_provider == "gemini":
                 api_key = settings.gemini_api_key or settings.groq_api_key
             else:
@@ -1109,12 +1155,21 @@ async def submit_answer(
         )
 
         # Process answer
-        result = await practice_service.submit_answer(
-            session_id=session_id,
-            question_id=question_id,
-            audio_file_path=str(temp_audio_path),
-            api_key=api_key
-        )
+        runner = practice_graph if (practice_graph and practice_graph.available) else None
+        if runner:
+            result = await runner.submit_answer(
+                session_id=session_id,
+                question_id=question_id,
+                audio_file_path=str(temp_audio_path),
+                api_key=api_key,
+            )
+        else:
+            result = await practice_service.submit_answer(
+                session_id=session_id,
+                question_id=question_id,
+                audio_file_path=str(temp_audio_path),
+                api_key=api_key
+            )
         
         # Clean up temp file
         background_tasks.add_task(temp_audio_path.unlink, missing_ok=True)
@@ -1357,14 +1412,27 @@ async def acknowledge_feedback(
         # Fallback to dev keys
         if not api_key:
             from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
             api_key = settings.gemini_api_key or settings.groq_api_key
 
         # Get next question after acknowledgment
-        result = await practice_service.get_next_question_after_acknowledgment(
-            session_id=payload.session_id,
-            question_id=payload.question_id,
-            api_key=api_key
-        )
+        runner = practice_graph if (practice_graph and practice_graph.available) else None
+        if runner:
+            result = await runner.get_next_question_after_acknowledgment(
+                session_id=payload.session_id,
+                question_id=payload.question_id,
+                api_key=api_key,
+            )
+        else:
+            result = await practice_service.get_next_question_after_acknowledgment(
+                session_id=payload.session_id,
+                question_id=payload.question_id,
+                api_key=api_key
+            )
 
         _track_practice_event(
             user_id=user_id,
@@ -1509,6 +1577,11 @@ async def get_conversational_response(
         # Fallback to dev keys
         if not api_key:
             from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
             api_key = settings.gemini_api_key or settings.groq_api_key
 
         result = await practice_service.get_conversational_response(
@@ -1693,6 +1766,11 @@ async def get_evaluation(
                 # Fallback to dev keys
                 if not api_key:
                     from app.config import settings
+                    if settings.require_user_api_key:
+                        raise HTTPException(
+                            status_code=401,
+                            detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                        )
                     api_key = settings.gemini_api_key or settings.groq_api_key
 
                 evaluation_report = await practice_service.evaluation_agent.evaluate_interview(

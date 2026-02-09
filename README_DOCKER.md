@@ -132,6 +132,12 @@ Qdrant + multi-worker
 - If you run multiple Uvicorn workers, set `QDRANT_URL` so all workers share the same Qdrant service.
 - `docker-compose.yml` defaults `QDRANT_URL` to `http://qdrant:6333` for the `web` container.
 
+Hugging Face Spaces notes
+
+- Spaces usually runs as a single container instance (no horizontal autoscaling). If you need more throughput, the main lever is reducing per-request CPU and avoiding event-loop blocking, then cautiously increasing `UVICORN_WORKERS`.
+- If you increase `UVICORN_WORKERS`, set `QDRANT_URL` (external Qdrant) and `REDIS_URL` (shared rate limiting) first; otherwise each worker behaves like an isolated island.
+- On CPU Basic (2 vCPU / 16 GB), `UVICORN_WORKERS=1` is a sensible starting point.
+
 Persistent data
 - If you need to persist data (vector DB, session files, embeddings cache), mount the `data/` directory as a volume in production.
 

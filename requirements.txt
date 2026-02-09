@@ -7,6 +7,9 @@ langchain==0.2.17
 langsmith==0.1.147
 google-genai==1.58.0
 
+# Optional: graph-based agent orchestration (Practice Mode)
+langgraph
+
 
 # FastAPI + core deps
 fastapi

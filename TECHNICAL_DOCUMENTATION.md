@@ -265,6 +265,9 @@ Notable settings (non-exhaustive; see file for full list):
 - External features: `serper_api_key`, `cohere_api_key`, `judge0_api_key`
 - Feature flags: `enable_hybrid_search`, `enable_reranking`, `enable_code_execution`, `enable_query_expansion`, `enable_streaming`
 - API key policy: `require_user_api_key`
+- Performance safety valve: `embedding_concurrency_limit`
+  - When set (e.g. `2` or `4`), caps concurrent CPU/IO-heavy Interview Intelligence operations (embedding generation + vector search offloads) **per worker**.
+  - When `None` (default), behavior is unlimited (no cap).
 
 See also (crypto helper used by auth + demo-mode key resolution): `app/utils/secret_crypto.py`.
 - Telemetry (EventRecord stream): `analytics_hmac_key`, `analytics_store_raw_text`, `analytics_text_preview_len`, `enable_event_logging`
@@ -444,6 +447,11 @@ Interview Intelligence is **optional at startup** (disabled if `qdrant_client` i
 - Supports LLM-based question generation with JSON parsing/repair and optional “backfill” of code solutions.
 - Enforces API key policy:
   - When `REQUIRE_USER_API_KEY=true`, Interview Intelligence search endpoints return **401** unless the client provides a key via `X-API-Key`, `X-Gemini-Key`, or `Authorization: Bearer <key>`.
+  - Implementation note: non-empty `X-API-Key` / `X-Gemini-Key` values are treated as “user provided” keys; `Authorization: Bearer ...` is only accepted as a provider key when it matches known provider key formats (to avoid confusion with JWTs).
+- Performance/scalability (single-worker):
+  - CPU-bound embeddings (`SentenceTransformer.encode`) and synchronous Qdrant searches are offloaded via `asyncio.to_thread(...)` to keep the event loop responsive.
+  - Question ranking uses a single batched `encode([query] + questions)` call rather than per-question embedding calls.
+  - Optional burst protection: `EMBEDDING_CONCURRENCY_LIMIT` can cap concurrent offloaded work per worker.
 - History behavior (important for UI correctness):
   - Standard search (`GET/POST /api/intelligence/search`) accepts `save_to_history`, but the backend intentionally **does not auto-save** standard search results to History to avoid duplicates.
   - The frontend should save exactly once via `POST /api/history/`.
@@ -512,7 +520,10 @@ See: `app/models.py`, `app/utils/event_logging.py`, `app/services/learning_loops
 ### 5.1 Q&A flow (`POST /api/question`)
 
 1. Client sends question payload (`QuestionIn`) to `POST /api/question`.
-2. Router selects an API key (prefers `X-Gemini-Key`, else `X-API-Key`, else `Authorization`).
+2. Router selects an API key from client-provided headers.
+  - Prefers `X-Gemini-Key`, else `X-API-Key`.
+  - `Authorization: Bearer ...` is treated carefully because it is often JWT; it is only used as a provider key when it matches a provider key shape.
+  - When `REQUIRE_USER_API_KEY=true`, the endpoint returns **401** unless the client provides a key (server key fallback disabled).
 3. Router determines `user_id` from `request.state.user_id` (middleware) and uses `SessionManager` for that user.
 4. Router calls `llm_service` to generate an answer and updates the session with Q&A.
 5. Response is returned (and may be streamed depending on implementation; the router imports `StreamingResponse`).
@@ -607,6 +618,7 @@ See: `app/config.py`.
 - `SERPER_API_KEY`, `COHERE_API_KEY`, `JUDGE0_API_KEY`.
 - Feature flags: `ENABLE_HYBRID_SEARCH`, `ENABLE_RERANKING`, `ENABLE_CODE_EXECUTION`, `ENABLE_QUERY_EXPANSION`, `ENABLE_STREAMING`.
 - `REQUIRE_USER_API_KEY` — when true, user requests must include their own key (enforced in Interview Intelligence service codepaths).
+- `EMBEDDING_CONCURRENCY_LIMIT` — optional per-worker cap for concurrent Interview Intelligence embedding/vector-search offloads (default unlimited).
 - Telemetry / event logging:
   - `ANALYTICS_HMAC_KEY` — enables HMAC-SHA256 stable IDs for event logging
   - `ANALYTICS_STORE_RAW_TEXT` — if true, event payloads may include text previews (default false)
@@ -694,6 +706,7 @@ See: `app/main.py`, `app/utils/audit.py`.
 - **JWT hardening (header separation + consistency)**: keep JWT auth in `Authorization` and move user-provided LLM keys to a dedicated header (to avoid ambiguity); ensure all request identity flows consistently use the JWT `sub` as the canonical `user_id`.
 - **Redis rate limiting (distributed quotas)**: enable the existing Redis limiter by setting `REDIS_URL` so quotas survive restarts and scale across workers/instances.
 - **Multi-worker scaling**: move file-backed session/history storage to a shared DB/object store and run Qdrant as a separate service (or managed Qdrant) to avoid local file locks.
+- **Burst protection**: optionally set `EMBEDDING_CONCURRENCY_LIMIT` to avoid unbounded thread queueing under sudden high concurrency (per worker).
 - **Production STT**: WebSocket STT is intentionally deferred; keep it disabled/unused in production unless you integrate a real streaming STT provider (or a faster-whisper streaming adapter) with backpressure + input validation.
 
 1. **WebSocket STT is intentionally deferred**

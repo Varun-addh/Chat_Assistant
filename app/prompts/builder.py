@@ -16,6 +16,8 @@ from app.prompts.policies import (
 	OUTPUT_HYGIENE,
 	RESPONSE_CONTRACT,
     COPILOT_SYSTEM,
+    PROMPT_INJECTION_RESISTANCE,
+    COPILOT_INTERVIEW_MODE,
     RESPONSE_TEMPLATE,
     OUTPUT_GUARDS,
     SYSTEM_DESIGN,
@@ -58,6 +60,8 @@ def build_default_system_prompt(
 
     modules: list[PolicyModule] = [
         COPILOT_SYSTEM,
+        PROMPT_INJECTION_RESISTANCE,
+        COPILOT_INTERVIEW_MODE,
         RESPONSE_TEMPLATE,
         OUTPUT_GUARDS,
         BASE_PERSONA,

@@ -80,3 +80,30 @@ def test_format_response_removes_unbalanced_bold_markers():
 
     out = svc._format_response(raw)
     assert "**" not in out
+
+
+@pytest.mark.fast
+def test_format_response_wraps_loose_sql_and_drops_empty_example_code_blocks():
+    svc = LLMService()
+
+    raw = (
+        "sql-- Insert a new employee into the \"employees\" table\n"
+        "INSERT INTO employees (id, name, age, department)\n"
+        "VALUES (4, 'Alice Johnson', 35, 'HR');\n\n"
+        "```\n"
+        "Example:\n"
+        "```\n\n"
+        "sql-- Update the age of an employee\n"
+        "UPDATE employees\n"
+        "SET age = 31\n"
+        "WHERE id = 1;\n"
+    )
+
+    out = svc._format_response(raw)
+
+    # Empty example block should be removed.
+    assert "```\nExample:\n```" not in out
+    # SQL should be wrapped in proper fenced blocks for UI rendering.
+    assert "```sql" in out
+    assert "INSERT INTO employees" in out
+    assert "UPDATE employees" in out

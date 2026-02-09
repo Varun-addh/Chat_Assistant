@@ -1033,6 +1033,7 @@ services:
 | `GEMINI_API_KEY` | Google Gemini access | Yes (if using Gemini) |
 | `LLM_PROVIDER` | Provider selection: `groq` or `gemini` | Yes |
 | `API_KEY` | Optional bearer auth for protected endpoints | No |
+| `REQUIRE_USER_API_KEY` | Strict BYOK: require client-provided provider keys (no server-key fallback) | No (recommended for large rollouts) |
 | `PRACTICE_MODE_ENABLED` | Enable/disable Practice Mode | No (default: true) |
 | `JWT_SECRET_KEY` | JWT signing secret for `/auth/*` | Yes (in production) |
 | `COOKIE_SECRET` | Cookie signing secret (OAuth state + cookies) | Yes (in production) |
@@ -1043,6 +1044,7 @@ services:
 | `FRONTEND_URL` | OAuth redirect base (frontend) | No |
 | `ENABLE_DEMO_KEY_POOL` | Allow demo users to consume Stratax demo key pool | No |
 | `STRATAX_DEMO_API_KEYS` | Pool of Groq keys for demo traffic | No |
+| `EMBEDDING_CONCURRENCY_LIMIT` | Optional per-worker cap for concurrent embedding/vector-search offloads | No |
 
 ### Optional Integrations
 
@@ -1053,6 +1055,8 @@ services:
 | `JUDGE0_API_KEY` | Code execution sandbox |
 | `GITHUB_TOKEN` | GitHub repository search |
 | `KROKI_URL` | Diagram rendering service |
+| `QDRANT_URL` | Qdrant as a service (required for multi-worker scaling) |
+| `REDIS_URL` | Distributed rate limiting / cross-worker coordination |
 
 ### Feature Flags
 
@@ -1117,11 +1121,20 @@ See `app/config.py` and `app/middleware/rate_limit.py`.
 **Mitigation Implemented:**
 - Async FastAPI endpoints minimize blocking
 - Shared Qdrant client in lifespan prevents lock conflicts
-- LLM calls use `asyncio.to_thread` for I/O parallelism
+- LLM calls and selected heavy operations use `asyncio.to_thread` to avoid blocking the event loop
+- Interview Intelligence embeddings (`SentenceTransformer.encode`) and synchronous Qdrant vector search are offloaded to threads to keep request handling responsive
+- Ranking uses batched embeddings (single `encode([query] + candidates)` call) to reduce CPU work vs per-item embedding
+- Optional burst protection: `EMBEDDING_CONCURRENCY_LIMIT` can cap concurrent offloaded embedding/search work per worker (default unlimited)
 
 **Future Path:**
 - Migrate to **Qdrant Cloud** or **self-hosted Qdrant server** (removes file lock)
 - Enable multi-worker deployment with shared vector DB connection
+
+## API key policy (BYOK) and operational scaling
+
+- When `REQUIRE_USER_API_KEY=true`, key-consuming endpoints require a client-provided provider key (typically via `X-API-Key` / `X-Gemini-Key`, or in limited cases `Authorization: Bearer <provider-key>`).
+- `Authorization` may contain JWTs; the backend only treats it as a provider key when it matches known provider key shapes to avoid ambiguity.
+- For multi-worker deployments, set `QDRANT_URL` (shared vector DB) and `REDIS_URL` (shared rate limiting). Without these, workers behave like isolated instances.
 
 ### 2. File-Based Persistence
 

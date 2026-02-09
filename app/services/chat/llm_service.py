@@ -15,6 +15,14 @@ import re
 from app.services.chat.demo_key_pool import demo_key_pool
 
 from app.prompts.builder import PromptFlags, build_default_system_prompt
+from app.prompts.policies import (
+	DEPTH_BUDGET,
+	OUTPUT_GUARDS,
+	OUTPUT_HYGIENE,
+	PROMPT_INJECTION_RESISTANCE,
+	RESPONSE_CONTRACT,
+	RESPONSE_TEMPLATE,
+)
 from app.prompts.response_plan import ResponsePlan
 from app.services.chat.mirror_ontology import MirrorOntologyGenerator
 from app.schemas import MirrorReport
@@ -398,7 +406,23 @@ class LLMService:
 		"""Detect UI/UX design questions"""
 		q = (question or "").lower()
 		keywords = list(getattr(self._settings, "llm_ui_design_keywords", None) or [])
-		return any(k in q for k in keywords)
+		defaults = [
+			"ui",
+			"ux",
+			"user interface",
+			"user experience",
+			"layout",
+			"wireframe",
+			"design a screen",
+			"design a page",
+			"settings page",
+			"dashboard",
+			"form",
+			"navigation",
+		]
+		# Always include defaults (misconfig-safe), but keep behavior stable if user added their own list.
+		kw = [k for k in (keywords + defaults) if str(k).strip()]
+		return any(k in q for k in kw)
 
 	def _is_algorithm_question(self, question: str) -> bool:
 		"""Detect algorithm and data structure questions"""
@@ -611,6 +635,12 @@ class LLMService:
 	def _split_runon_plus_bullets(self, text: str) -> str:
 		return response_postprocess._split_runon_plus_bullets(self, text)
 
+	def _wrap_loose_sql_blocks(self, text: str) -> str:
+		return response_postprocess._wrap_loose_sql_blocks(self, text)
+
+	def _drop_empty_example_code_blocks(self, text: str) -> str:
+		return response_postprocess._drop_empty_example_code_blocks(self, text)
+
 	def _is_internal_prompt_leak_line(self, line: str) -> bool:
 		return response_postprocess._is_internal_prompt_leak_line(self, line)
 
@@ -734,7 +764,7 @@ class LLMService:
 		"""
 		q = (question or "").lower()
 		# Explicit deep requests
-		if any(k in q for k in ["in depth", "in-depth", "deep dive", "deep-dive", "comprehensive", "thorough", "detailed", "teach me", "explain deeply", "explain in detail", "explain in detail:"]):
+		if any(k in q for k in ["in depth", "in-depth", "deep dive", "deep-dive", "comprehensive", "thorough", "detailed", "teach me", "explain deeply", "explain in detail", "explain in detail:", "in detail"]):
 			return "deep"
 		# Explicit brevity requests
 		if any(k in q for k in ["brief", "quick", "tl;dr", "tldr", "summary only", "in short", "one-liner", "one liner"]):
@@ -1766,10 +1796,20 @@ class LLMService:
 		This eliminates code duplication between generate_answer() and stream_answer()
 		"""
 		if system_prompt is not None:
-			# If an external system_prompt is provided, append our example presentation
-			# policy so formatting rules (Answer/Follow-up/Feedback, code fences, bullets)
-			# are still enforced even when callers override the system prompt.
-			prompt = system_prompt + "\n\n" + EXAMPLE_PRESENTATION.text
+			# If an external system_prompt is provided, append the product-critical
+			# response contract + hygiene so output structure stays consistent.
+			prompt = (
+				system_prompt
+				+ "\n\n"
+				+ "\n\n".join([
+					PROMPT_INJECTION_RESISTANCE.text,
+					RESPONSE_TEMPLATE.text,
+					OUTPUT_GUARDS.text,
+					RESPONSE_CONTRACT.text,
+					DEPTH_BUDGET.text,
+					OUTPUT_HYGIENE.text,
+				])
+			)
 		else:
 			app_name, developer, attribution = self._get_app_identity()
 			plan = self._build_response_plan(question, depth=depth)
@@ -1819,15 +1859,14 @@ class LLMService:
 		# 1. Build base prompt with profile context
 		base_prompt = self._build_prompt_with_profile(question, system_prompt, profile_text, depth=depth)
 		
-		# 2. Add conversation history if needed (SMART CONTEXT)
-		history_context = ""
+		# 2. Conversation history is handled via message roles (user/assistant) in _build_messages.
+		# Avoid duplicating it inside the system prompt to reduce token bloat and role confusion.
 		if previous_qna and self._needs_conversation_context(question, previous_qna):
-			history_context = self._build_conversation_context(previous_qna)
 			logger.info(f"💬 Including conversation context ({len(previous_qna)} turns available, using last 3)")
 		else:
 			logger.info(f"⚡ Standalone question - skipping conversation history (saving tokens!)")
 		
-		prompt = history_context + base_prompt
+		prompt = base_prompt
 		
 		# 3. Apply auto-overrides if enabled
 		if apply_auto_overrides:
@@ -1879,6 +1918,29 @@ class LLMService:
 		# Current question last
 		messages.append({"role": "user", "content": question})
 		return messages
+
+	def _render_messages_as_text_transcript(self, messages: List[Dict[str, str]]) -> str:
+		"""Render role-based messages into a single text prompt.
+
+		Used for providers that don't accept role-separated chat messages.
+		"""
+		if not messages:
+			return ""
+		parts: list[str] = []
+		for msg in messages:
+			role = (msg.get("role") or "").strip().lower()
+			content = (msg.get("content") or "").strip()
+			if not content:
+				continue
+			if role == "system":
+				parts.append(content)
+			elif role == "user":
+				parts.append(f"User: {content}")
+			elif role == "assistant":
+				parts.append(f"Assistant: {content}")
+			else:
+				parts.append(f"{role.title()}: {content}")
+		return "\n\n".join(parts).strip()
 
 	async def generate_answer(
 		self,
@@ -2040,10 +2102,12 @@ class LLMService:
 						raise
 				raise Exception("All Groq models reached their limits or failed.")
 
-			def _call_gemini(gemini_client) -> tuple[str, bool]:
+			async def _call_gemini(gemini_client) -> tuple[str, bool]:
+				import anyio
 				gmodel = gemini_client.GenerativeModel(self._settings.gemini_model)
-				full_prompt = (prompt + "\n\nUser: " + question).strip()
-				resp = gmodel.generate_content(full_prompt)
+				messages = self._build_messages(question, prompt, previous_qna)
+				full_prompt = self._render_messages_as_text_transcript(messages)
+				resp = await anyio.to_thread.run_sync(gmodel.generate_content, full_prompt)
 				raw_text = getattr(resp, "text", None) or (
 					resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else ""
 				)
@@ -2055,7 +2119,7 @@ class LLMService:
 				if provider == "groq":
 					return await _call_groq(client)
 				if provider == "gemini":
-					return _call_gemini(client)
+					return await _call_gemini(client)
 			except Exception as primary_err:
 				# Some flows (e.g. demo) must not fall back across providers.
 				if not allow_provider_fallback:
@@ -2066,7 +2130,7 @@ class LLMService:
 						gemini_client, _ = self._ensure_client_by_provider("gemini")
 						if gemini_client:
 							logger.info("🔄 Groq failed. Falling back to Gemini...")
-							return _call_gemini(gemini_client)
+							return await _call_gemini(gemini_client)
 					except Exception as gemini_err:
 						logger.error(f"❌ Gemini fallback also failed: {gemini_err}")
 						raise Exception("All LLM providers and models reached their limits or failed.") from primary_err
@@ -2582,9 +2646,20 @@ class LLMService:
 			async def _one_shot():
 				try:
 					gmodel = client.GenerativeModel(self._settings.gemini_model.replace("models/", ""))
-					full_prompt = (prompt + "\n\nUser: " + question).strip()
+					messages = self._build_messages(question, prompt, previous_qna)
+					full_prompt = self._render_messages_as_text_transcript(messages)
 					resp = await anyio.to_thread.run_sync(gmodel.generate_content, full_prompt)
-					return getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+					raw_text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+					formatted = self._format_response((raw_text or "").strip())
+					# Mirror generate_answer post-processing for parity.
+					if self._is_definition_question(question):
+						formatted = self._ensure_three_bullet_summary(formatted, question)
+					formatted = self._strip_side_headings_for_short(formatted)
+					if self._should_auto_append_recommendations(question, formatted):
+						recs = self._auto_recommendations_for_question(question, formatted)
+						if recs:
+							formatted = self._append_recommendations_block(formatted, recs)
+					return formatted
 				except Exception as e:
 					logger.error(f"Gemini fallback error: {e}")
 					return ""

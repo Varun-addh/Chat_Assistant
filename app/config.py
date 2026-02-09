@@ -332,6 +332,9 @@ class Settings(BaseSettings):
 	enable_code_execution: bool = True
 	enable_query_expansion: bool = True
 	enable_streaming: bool = True
+	# If true, Practice Mode runs via a LangGraph workflow (optional dependency).
+	# Defaults to false to keep deployments simple.
+	enable_practice_mode_langgraph: bool = False
 
 	# Qdrant (Vector DB)
 	# If qdrant_url is set, Interview Intelligence will connect to a Qdrant server.
@@ -346,6 +349,10 @@ class Settings(BaseSettings):
 	fast_startup: bool = False
 	# Force-disable Interview Intelligence startup even if optional deps are installed.
 	disable_interview_intelligence: bool = False
+	# Optional safety valve for burst traffic: caps concurrent CPU/IO heavy operations
+	# (embeddings + vector search offloads) per worker.
+	# None = unlimited (current behavior).
+	embedding_concurrency_limit: int | None = None  # env: EMBEDDING_CONCURRENCY_LIMIT
 
 	# Redis (rate limiting + cross-worker caches)
 	# If REDIS_URL is set, rate limiting and selected caches can be backed by Redis,
