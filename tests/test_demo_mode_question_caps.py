@@ -24,6 +24,8 @@ def test_demo_intelligence_search_is_capped_to_two(monkeypatch):
     client = TestClient(app)
 
     monkeypatch.setattr(settings, "require_user_api_key", False, raising=False)
+    # CI runs without secrets; demo endpoints require Groq to be configured.
+    monkeypatch.setattr(settings, "groq_api_key", "gsk_test_dummy", raising=False)
 
     captured: dict[str, int] = {}
 
@@ -88,6 +90,9 @@ def test_demo_mock_interview_start_is_capped_to_one_question(monkeypatch):
     app = FastAPI()
     app.include_router(mock_router, prefix="/api/mock-interview")
     app.dependency_overrides[get_mock_service] = lambda: dummy
+
+    # CI runs without secrets; demo endpoints require Groq to be configured.
+    monkeypatch.setattr(settings, "groq_api_key", "gsk_test_dummy", raising=False)
 
     client = TestClient(app)
 
