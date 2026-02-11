@@ -61,6 +61,8 @@ class SubmitAnswerRequest(BaseModel):
 
 class SubmitAnswerResponse(BaseModel):
     evaluation: dict
+    evaluation_trace: Optional[dict] = None
+    trajectory: Optional[dict] = None
     next_question: Optional[dict] = None
     is_last_question: bool
     progress: dict
@@ -249,6 +251,22 @@ async def submit_answer(
             )
         }
         
+        # Premium (post-hoc only): deterministic trajectory + aggregation trace.
+        evaluation_trace = None
+        trajectory = None
+        try:
+            from app.services.interview.mock_interview_analytics import (
+                build_mock_evaluation_trace,
+                compute_mock_session_trajectory,
+            )
+
+            if session is not None:
+                trajectory = compute_mock_session_trajectory(session=session)
+                evaluation_trace = build_mock_evaluation_trace(session=session)
+        except Exception:
+            evaluation_trace = None
+            trajectory = None
+
         return SubmitAnswerResponse(
             evaluation={
                 "overall_score": evaluation.overall_score,
@@ -297,6 +315,8 @@ async def submit_answer(
                 "recommended_resources": evaluation.recommended_resources,
                 "key_takeaways": evaluation.key_takeaways
             },
+            evaluation_trace=evaluation_trace,
+            trajectory=trajectory,
             next_question=next_question,
             is_last_question=is_last,
             progress=progress

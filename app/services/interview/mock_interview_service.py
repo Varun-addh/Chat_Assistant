@@ -1224,6 +1224,14 @@ CRITICAL RULES:
         best_score = max(individual_scores) if individual_scores else None
         lowest_score = min(individual_scores) if individual_scores else None
         score_range = (best_score - lowest_score) if (best_score is not None and lowest_score is not None) else None
+
+        from app.services.interview.mock_interview_analytics import (
+            build_mock_evaluation_trace,
+            compute_mock_session_trajectory,
+        )
+
+        trajectory = compute_mock_session_trajectory(session=session)
+        evaluation_trace = build_mock_evaluation_trace(session=session)
         
         return {
             "session_id": session.session_id,
@@ -1234,6 +1242,8 @@ CRITICAL RULES:
             "total_questions": session.total_questions,
             "questions_answered": len(session.answers),
             "average_score": session.average_score,
+            "trajectory": trajectory,
+            "evaluation_trace": evaluation_trace,
             "total_time_seconds": total_time,
             "total_hints_used": total_hints,
             "individual_scores": individual_scores,

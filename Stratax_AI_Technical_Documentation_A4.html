@@ -178,7 +178,7 @@
     <div class="cover">
       <div class="title">Stratax AI Technical Documentation</div>
       <div class="subtitle">Exported from Stratax_AI_Technical_Documentation.md</div>
-      <div class="meta">Date: 2026-01-28</div>
+      <div class="meta">Date: 2026-02-09</div>
     </div>
     
     <h1 id="stratax-ai">Stratax AI</h1>
@@ -473,7 +473,7 @@ graph TD
 <h2 id="runtime-framework">Runtime &amp; Framework</h2>
 <h3 id="core-platform">Core Platform</h3>
 <ul>
-<li><strong>Python 3.12</strong> — Modern async/await support, performance improvements</li>
+<li><strong>Python 3.11+</strong> — Modern async/await support; CI runs on Python 3.11 and 3.12</li>
 <li><strong>FastAPI</strong> — High-performance async web framework with automatic OpenAPI documentation</li>
 <li><strong>Starlette</strong> — ASGI toolkit for routing, middleware, and WebSocket support</li>
 <li><strong>Uvicorn</strong> — Lightning-fast ASGI server for production deployment</li>
@@ -521,17 +521,18 @@ graph TD
 <h2 id="storage-persistence">Storage &amp; Persistence</h2>
 <h3 id="primary-storage">Primary Storage</h3>
 <ul>
-<li><strong>File System</strong> — JSON/JSONL for sessions, history, and configuration</li>
-<li><strong>Qdrant (Local Mode)</strong> — Embedded vector database for interview questions</li>
+<li><strong>SQL DB (<code>DATABASE_URL</code>)</strong> — Users/auth/telemetry/usage/rate limits (SQLite for local/dev; Postgres for production)</li>
+<li><strong>File System (optional)</strong> — JSON/JSONL for sessions and history artifacts (dev-friendly)</li>
+<li><strong>Qdrant</strong> — Vector database for interview questions (server via <code>QDRANT_URL</code> or local-path fallback for single-process dev)</li>
 </ul>
 <h3 id="persistence-strategy">Persistence Strategy</h3>
 <ul>
-<li>User sessions: <code>data/sessions/{user_id}/{session_id}.json</code></li>
+<li>User sessions: stored in the SQL DB by default when using Postgres, or in files at <code>data/sessions/{user_id}/{session_id}.json</code> when <code>STRATAX_SESSION_STORE=file</code> (common in SQLite/dev)</li>
 <li>Vector indices: <code>data/interview_intelligence_v2/vector_db/</code></li>
 <li>Audio recordings: <code>data/practice_audio/</code> (WAV format). Audio files are used for session-level processing and user playback only and are not used for learning or analytics.</li>
 <li>Model cache: <code>data/models/</code> (sentence-transformers downloads)</li>
 </ul>
-<p><em>Note: File-based architecture chosen for simplicity; DB migration path available for scaling.</em></p>
+<p><em>Note: The system uses a hybrid approach: structured records live in the SQL DB, while some artifacts remain file-backed for dev simplicity. Remaining file-backed pieces can be migrated to Postgres/object storage for scale.</em></p>
 <h2 id="external-integrations-optional">External Integrations (Optional)</h2>
 <ul>
 <li><strong>Serper API</strong> — Web search for real-time interview question sourcing</li>
@@ -541,8 +542,8 @@ graph TD
 </ul>
 <h2 id="containerization">Containerization</h2>
 <ul>
-<li><strong>Docker</strong> — Single-service container with Python 3.12 slim base</li>
-<li><strong>docker-compose</strong> — Multi-container orchestration (app + Kroki)</li>
+<li><strong>Docker</strong> — Single-service container with Python 3.11 slim base (<code>python:3.11-slim</code>)</li>
+<li><strong>docker-compose</strong> — Multi-container orchestration (app + Postgres + Qdrant + Redis + optional Kroki)</li>
 </ul>
 <div class="page-break"></div>
 
@@ -926,6 +927,9 @@ Search with expanded query
 <h2 id="data-isolation">Data Isolation</h2>
 <h3 id="per-user-storage">Per-User Storage</h3>
 <p>All user data is isolated by <code>user_id</code>:</p>
+<p><em>Session persistence depends on configuration:</em>
+- <strong>DB-backed (default for Postgres):</strong> sessions stored in the SQL DB
+- <strong>File-backed (common in SQLite/dev):</strong> sessions stored under <code>data/sessions/{user_id}/</code></p>
 <pre><code>data/
 ├── sessions/
 │   ├── user123/
@@ -938,7 +942,7 @@ Search with expanded query
 <h3 id="session-manager-design">Session Manager Design</h3>
 <ul>
 <li><strong>In-memory cache per user:</strong> <code>_user_managers</code> dictionary keyed by <code>user_id</code></li>
-<li><strong>File-system persistence:</strong> JSON files under <code>data/sessions/{user_id}/</code></li>
+<li><strong>Persistence:</strong> DB-backed by default for Postgres, or file-backed under <code>data/sessions/{user_id}/</code> when <code>STRATAX_SESSION_STORE=file</code></li>
 <li><strong>Concurrency protection:</strong> File locks prevent write conflicts</li>
 </ul>
 <h2 id="cors-configuration">CORS Configuration</h2>
@@ -1030,11 +1034,11 @@ GET /health/live
 <p>Note: a lightweight legacy endpoint is also available at <code>GET /health/simple</code>.</p>
 <h3 id="volume-mounts">Volume Mounts</h3>
 <pre><code class="language-yaml">volumes:
-  - ./app:/app/app                        # Source code (dev hot-reload)
-  - ./data/sessions:/app/data/sessions    # User sessions
-  - ./data/models:/app/data/models        # Embedding models
-  - ./data/practice_audio:/app/data/practice_audio
-  - ./data/interview_intelligence_v2:/app/data/interview_intelligence_v2
+    - ./app:/app/app                    # Source code (dev hot-reload)
+    - ./data/history:/app/data/history  # History + audit artifacts
+    - ./data/models:/app/data/models    # Embedding models
+    - ./data/curated:/app/data/curated  # Curated question sets
+    - ./data/vector_db:/app/data/vector_db
 </code></pre>
 <p><strong>Persistence Guarantee:</strong> All critical state is preserved across container restarts.</p>
 <h2 id="docker-compose-orchestration">docker-compose Orchestration</h2>
@@ -1044,23 +1048,25 @@ GET /health/live
     build: .
     ports:
       - &quot;7860:7860&quot;
-    environment:
-      - KROKI_URL=http://kroki:8000/mermaid/svg
-            # Production: set DATABASE_URL to Neon.
-            # Local (optional): set DATABASE_URL_DOCKER to Postgres and run with `--profile local`.
-            - DATABASE_URL=${DATABASE_URL_DOCKER:-${DATABASE_URL:-postgresql+psycopg://...}}
+        env_file:
+            - .env
+        environment:
+            - KROKI_URL=http://kroki:8000/mermaid/svg
+            - DATABASE_URL=${DATABASE_URL_DOCKER:-${DATABASE_URL:-postgresql+psycopg://stratax:stratax@postgres:5432/stratax}}
+            - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+            - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+            - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
         depends_on:
             - qdrant
             - redis
-            - kroki
+            - postgres
 
-  kroki:
-    image: yuzutech/kroki
-    ports:
-      - &quot;8000:8000&quot;
+    kroki:
+        image: yuzutech/kroki:latest
+        ports:
+            - &quot;8001:8000&quot;
 
     postgres:
-        profiles: [&quot;local&quot;]
         image: postgres:16
         ports:
             - &quot;5433:5432&quot;
@@ -1075,6 +1081,7 @@ GET /health/live
         ports:
             - &quot;6379:6379&quot;
 </code></pre>
+<p>See <code>docker-compose.yml</code> for the full configuration (volumes, restart policies, healthchecks).</p>
 <p><strong>Kroki Integration:</strong> Optional Mermaid diagram rendering service. If unavailable, diagrams return text-only Mermaid syntax.</p>
 <h2 id="environment-configuration">Environment Configuration</h2>
 <h3 id="critical-variables">Critical Variables</h3>
@@ -1099,13 +1106,18 @@ GET /health/live
 </tr>
 <tr>
 <td><code>LLM_PROVIDER</code></td>
-<td>Provider selection: <code>groq</code> or <code>gemini</code></td>
-<td>Yes</td>
+<td>Provider selection: <code>groq</code> or <code>gemini</code> (default: <code>gemini</code>)</td>
+<td>No</td>
 </tr>
 <tr>
 <td><code>API_KEY</code></td>
 <td>Optional bearer auth for protected endpoints</td>
 <td>No</td>
+</tr>
+<tr>
+<td><code>REQUIRE_USER_API_KEY</code></td>
+<td>Strict BYOK: require client-provided provider keys (no server-key fallback)</td>
+<td>No (recommended for large rollouts)</td>
 </tr>
 <tr>
 <td><code>PRACTICE_MODE_ENABLED</code></td>
@@ -1157,6 +1169,11 @@ GET /health/live
 <td>Pool of Groq keys for demo traffic</td>
 <td>No</td>
 </tr>
+<tr>
+<td><code>EMBEDDING_CONCURRENCY_LIMIT</code></td>
+<td>Optional per-worker cap for concurrent embedding/vector-search offloads</td>
+<td>No</td>
+</tr>
 </tbody>
 </table>
 <h3 id="optional-integrations">Optional Integrations</h3>
@@ -1187,6 +1204,14 @@ GET /health/live
 <tr>
 <td><code>KROKI_URL</code></td>
 <td>Diagram rendering service</td>
+</tr>
+<tr>
+<td><code>QDRANT_URL</code></td>
+<td>Qdrant as a service (required for multi-worker scaling)</td>
+</tr>
+<tr>
+<td><code>REDIS_URL</code></td>
+<td>Distributed rate limiting / cross-worker coordination</td>
 </tr>
 </tbody>
 </table>
@@ -1237,10 +1262,19 @@ ENABLE_PRACTICE_LEARNING=false
 <p><strong>Mitigation Implemented:</strong>
 - Async FastAPI endpoints minimize blocking
 - Shared Qdrant client in lifespan prevents lock conflicts
-- LLM calls use <code>asyncio.to_thread</code> for I/O parallelism</p>
+- LLM calls and selected heavy operations use <code>asyncio.to_thread</code> to avoid blocking the event loop
+- Interview Intelligence embeddings (<code>SentenceTransformer.encode</code>) and synchronous Qdrant vector search are offloaded to threads to keep request handling responsive
+- Ranking uses batched embeddings (single <code>encode([query] + candidates)</code> call) to reduce CPU work vs per-item embedding
+- Optional burst protection: <code>EMBEDDING_CONCURRENCY_LIMIT</code> can cap concurrent offloaded embedding/search work per worker (default unlimited)</p>
 <p><strong>Future Path:</strong>
 - Migrate to <strong>Qdrant Cloud</strong> or <strong>self-hosted Qdrant server</strong> (removes file lock)
 - Enable multi-worker deployment with shared vector DB connection</p>
+<h2 id="api-key-policy-byok-and-operational-scaling">API key policy (BYOK) and operational scaling</h2>
+<ul>
+<li>When <code>REQUIRE_USER_API_KEY=true</code>, key-consuming endpoints require a client-provided provider key (typically via <code>X-API-Key</code> / <code>X-Gemini-Key</code>, or in limited cases <code>Authorization: Bearer &lt;provider-key&gt;</code>).</li>
+<li><code>Authorization</code> may contain JWTs; the backend only treats it as a provider key when it matches known provider key shapes to avoid ambiguity.</li>
+<li>For multi-worker deployments, set <code>QDRANT_URL</code> (shared vector DB) and <code>REDIS_URL</code> (shared rate limiting). Without these, workers behave like isolated instances.</li>
+</ul>
 <h3 id="2-file-based-persistence">2. File-Based Persistence</h3>
 <p><strong>Current Design:</strong> JSON/JSONL files for sessions, history, mock interviews.</p>
 <p><strong>Limitations:</strong>
@@ -1465,7 +1499,7 @@ if not result:
 <h2 id="quick-start-5-minutes">Quick Start (5 Minutes)</h2>
 <h3 id="prerequisites">Prerequisites</h3>
 <ul>
-<li><strong>Python 3.12+</strong></li>
+<li><strong>Python 3.11+</strong></li>
 <li><strong>4GB+ RAM</strong> (for embedding models)</li>
 <li><strong>Groq or Gemini API key</strong> (for LLM features)</li>
 </ul>
@@ -1850,7 +1884,7 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 <tbody>
 <tr>
 <td>User sessions</td>
-<td><code>data/sessions/{user_id}/{session_id}.json</code></td>
+<td>SQL DB (default for Postgres) or <code>data/sessions/{user_id}/{session_id}.json</code> when <code>STRATAX_SESSION_STORE=file</code></td>
 </tr>
 <tr>
 <td>Mock interviews</td>

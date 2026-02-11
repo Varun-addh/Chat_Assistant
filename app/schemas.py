@@ -589,6 +589,19 @@ class SubmitAnswerResponse(BaseModel):
 	tts_audio_url: Optional[str] = None
 	complete: bool = Field(default=False)
 	evaluation_report: Optional[EvaluationReport] = None
+	# Premium analytics (optional, deterministic when present)
+	evaluation_trace: Optional[Dict[str, Any]] = Field(
+		default=None,
+		description="Deterministic, explainable scoring trace for the session so far",
+	)
+	trajectory: Optional[Dict[str, Any]] = Field(
+		default=None,
+		description="Within-session score trajectory (per-answer trend + deltas)",
+	)
+	pressure: Optional[Dict[str, Any]] = Field(
+		default=None,
+		description="Adaptive pressure state (deterministic rules; may influence follow-ups when enabled)",
+	)
 	progress: str = Field(..., description="Progress indicator (e.g., '2/5')")
 	# NEW: UI flow control
 	requires_acknowledgment: bool = Field(default=True, description="User must acknowledge feedback before proceeding")
@@ -662,6 +675,10 @@ class NextQuestionResponse(BaseModel):
 	tts_audio_url: Optional[str] = Field(None, description="Audio URL for next question")
 	complete: bool = Field(default=False, description="True if interview is complete")
 	evaluation_report: Optional[EvaluationReport] = Field(None, description="Final evaluation if complete")
+	pressure: Optional[Dict[str, Any]] = Field(
+		default=None,
+		description="Adaptive pressure state (deterministic rules; may influence follow-ups when enabled)",
+	)
 	progress: str = Field(..., description="Updated progress (e.g., '3/5')")
 
 

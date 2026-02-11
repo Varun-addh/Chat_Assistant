@@ -69,6 +69,187 @@ class PracticeScoreResult:
     next_session_plan: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PracticeAnswerScoreResult:
+    question_id: int
+    overall_score: float
+    dimension_scores: dict[str, float]
+    signals: dict[str, Any]
+    why: list[str]
+
+
+def score_answer(*, answer: AnswerSubmission) -> PracticeAnswerScoreResult:
+    """Compute deterministic per-answer scores.
+
+    This powers within-session trajectory and trace.
+    """
+
+    mf = getattr(answer, "micro_feedback", None)
+    metrics = getattr(answer, "metrics", None)
+    transcript = getattr(answer, "transcript", "") or ""
+
+    # Correctness
+    cs: Optional[float] = None
+    if mf is not None and getattr(mf, "correctness_score", None) is not None:
+        cs = float(getattr(mf, "correctness_score"))
+    if cs is None and mf is not None:
+        cs = _map_technical_accuracy(getattr(mf, "technical_accuracy", None))
+    if cs is None:
+        cs = 60.0
+    correctness = _clamp(float(cs), 0.0, 100.0)
+
+    fillers = int(getattr(metrics, "filler_count", 0) or 0)
+    wpm = float(getattr(metrics, "wpm", 0.0) or 0.0)
+    conf = float(getattr(metrics, "confidence_score", 0.0) or 0.0)
+    overtalked = bool(getattr(metrics, "overtalked", False))
+
+    # Delivery
+    delivery = conf * 10.0
+    delivery -= min(20.0, fillers * 2.5)
+    if overtalked:
+        delivery -= 10.0
+    delivery = _clamp(delivery, 0.0, 100.0)
+
+    # Clarity
+    dist = abs(wpm - 150.0)
+    clarity = 90.0 - (dist * 0.6)
+    clarity -= min(20.0, fillers * 2.0)
+    clarity = _clamp(clarity, 0.0, 100.0)
+
+    # Structure
+    structure = _structure_heuristic(transcript)
+
+    dims = {
+        "correctness": float(correctness),
+        "delivery": float(delivery),
+        "clarity": float(clarity),
+        "structure": float(structure),
+    }
+
+    overall = (
+        dims["correctness"] * 0.45
+        + dims["delivery"] * 0.25
+        + dims["clarity"] * 0.15
+        + dims["structure"] * 0.15
+    )
+    overall = _clamp(float(overall), 0.0, 100.0)
+
+    why = [
+        f"Correctness: {dims['correctness']:.0f}/100",
+        f"Delivery: {dims['delivery']:.0f}/100 (confidence={conf:.1f}/10, fillers={fillers}, overtalked={int(overtalked)})",
+        f"Clarity: {dims['clarity']:.0f}/100 (wpm={wpm:.0f})",
+        f"Structure: {dims['structure']:.0f}/100",
+    ]
+
+    signals = {
+        "confidence_score": conf,
+        "filler_count": fillers,
+        "wpm": wpm,
+        "overtalked": overtalked,
+        "technical_accuracy": getattr(mf, "technical_accuracy", None) if mf is not None else None,
+        "correctness_score": getattr(mf, "correctness_score", None) if mf is not None else None,
+    }
+
+    return PracticeAnswerScoreResult(
+        question_id=int(getattr(answer, "question_id", 0) or 0),
+        overall_score=overall,
+        dimension_scores=dims,
+        signals=signals,
+        why=why,
+    )
+
+
+def compute_session_trajectory(*, session: PracticeSession) -> dict[str, Any]:
+    """Return a deterministic within-session trajectory summary."""
+
+    answers = list(getattr(session, "answers", []) or [])
+    if not answers:
+        return {
+            "points": [],
+            "overall": None,
+            "dimensions": {},
+            "best_improvement_dimension": None,
+            "note": "No answers yet.",
+        }
+
+    points: list[dict[str, Any]] = []
+    per_dim_series: dict[str, list[float]] = {k: [] for k in _DIMENSIONS}
+    overall_series: list[float] = []
+
+    for a in answers:
+        r = score_answer(answer=a)
+        points.append(
+            {
+                "question_id": r.question_id,
+                "overall_score": float(r.overall_score),
+                "dimension_scores": r.dimension_scores,
+            }
+        )
+        overall_series.append(float(r.overall_score))
+        for dim in _DIMENSIONS:
+            per_dim_series[dim].append(float(r.dimension_scores.get(dim, 0.0)))
+
+    def _delta(xs: list[float]) -> Optional[dict[str, float]]:
+        if not xs:
+            return None
+        start = float(xs[0])
+        end = float(xs[-1])
+        return {"start": start, "end": end, "delta": float(end - start)}
+
+    overall_delta = _delta(overall_series)
+    dim_deltas: dict[str, dict[str, float]] = {}
+    for dim, xs in per_dim_series.items():
+        d = _delta(xs)
+        if d is not None:
+            dim_deltas[dim] = d
+
+    best_dim = None
+    if dim_deltas:
+        best_dim = max(dim_deltas.items(), key=lambda kv: kv[1].get("delta", 0.0))[0]
+
+    note = "Stable"
+    if overall_delta is not None:
+        if overall_delta["delta"] >= 5.0:
+            note = "Improving"
+        elif overall_delta["delta"] <= -5.0:
+            note = "Declining"
+
+    return {
+        "points": points,
+        "overall": overall_delta,
+        "dimensions": dim_deltas,
+        "best_improvement_dimension": best_dim,
+        "note": note,
+    }
+
+
+def build_evaluation_trace(*, session: PracticeSession) -> dict[str, Any]:
+    """Build a deterministic, explainable scoring trace for the session."""
+
+    score = score_session(session=session)
+    trajectory = compute_session_trajectory(session=session)
+
+    weights = {"correctness": 0.45, "delivery": 0.25, "clarity": 0.15, "structure": 0.15}
+    dims = score.dimension_scores or {}
+
+    formulas = {
+        "correctness": "correctness_score (0-100) else map(technical_accuracy) else 60",
+        "delivery": "confidence_score*10 - min(20, filler_count*2.5) - (10 if overtalked)",
+        "clarity": "90 - abs(wpm-150)*0.6 - min(20, filler_count*2)",
+        "structure": "clamp(50 + 10*structure_marker_hits, 40, 95)",
+        "overall": "0.45*correctness + 0.25*delivery + 0.15*clarity + 0.15*structure",
+    }
+
+    return {
+        "overall_score": float(score.overall_score),
+        "dimension_scores": {k: float(v) for k, v in (dims or {}).items()},
+        "weights": weights,
+        "formulas": formulas,
+        "why": list(score.why or []),
+        "trajectory": trajectory,
+    }
+
+
 def score_session(*, session: PracticeSession) -> PracticeScoreResult:
     """Compute attempt-level scores from a completed session."""
 

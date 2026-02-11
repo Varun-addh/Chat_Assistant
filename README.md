@@ -47,11 +47,11 @@ An advanced AI-powered interview preparation platform featuring:
 
 ## Technology Stack
 
-- **Backend**: FastAPI (Python 3.12)
+ **Backend**: FastAPI (Python 3.11+)
 - **AI/LLM**: Google Gemini API, Groq API
 - **Vector DB**: Qdrant (for semantic search)
 - **Embeddings**: SentenceTransformers
-- **Architecture**: Microservices with Docker
+ **Architecture**: Monolithic FastAPI service with Docker/docker-compose-managed dependencies (Postgres, Qdrant, Redis, optional Kroki)
 
 ## Configuration
 

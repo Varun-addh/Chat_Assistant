@@ -81,6 +81,13 @@ class Settings(BaseSettings):
 		validation_alias=AliasChoices("ENABLE_PRACTICE_LEARNING", "STRATAX_ENABLE_PRACTICE_LEARNING"),
 	)
 
+	# Premium: deterministic adaptive pressure rules.
+	# When enabled, the practice follow-up generator may adjust difficulty/tone deterministically.
+	enable_adaptive_pressure: bool = Field(
+		default=False,
+		validation_alias=AliasChoices("ENABLE_ADAPTIVE_PRESSURE", "STRATAX_ENABLE_ADAPTIVE_PRESSURE"),
+	)
+
 	# Email (verification + password reset)
 	# If email_enabled is false, the API will still generate tokens and (in dev)
 	# can return URLs for manual testing, but it won't attempt SMTP.

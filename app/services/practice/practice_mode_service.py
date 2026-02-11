@@ -730,6 +730,21 @@ class PracticeModeService:
                 session.current_question_index
             )
 
+            # Premium: deterministic pressure state (may influence follow-up generation)
+            pressure_state = None
+            try:
+                from app.config import settings
+                if bool(getattr(settings, "enable_adaptive_pressure", False)):
+                    from app.services.practice.adaptive_pressure import adjust_difficulty, compute_pressure_state
+
+                    pressure_state = compute_pressure_state(session=session)
+                    effective = adjust_difficulty(base=getattr(session, "difficulty", None), mode=str(pressure_state.get("mode")))
+                else:
+                    effective = getattr(session, "difficulty", None)
+            except Exception:
+                effective = getattr(session, "difficulty", None)
+                pressure_state = None
+
             # 🚀 ALWAYS-ON ADAPTIVE FOLLOW-UP:
             # Replace the upcoming question with a drill-down follow-up framed from
             # the candidate's *last* answer (transcript + micro_feedback). This makes
@@ -750,7 +765,7 @@ class PracticeModeService:
                     if last_answer is not None:
                         follow_up = await self.adaptive_interviewer.generate_follow_up_question(
                             user_profile=session.user_profile,
-                            difficulty=session.difficulty,
+                            difficulty=effective,
                             round_type=getattr(prev_q, "round_type", None) or session.round_type,
                             previous_question=prev_q,
                             transcript=getattr(last_answer, "transcript", "") or "",
@@ -798,6 +813,7 @@ class PracticeModeService:
                 "next_question": next_question,
                 "tts_audio_url": audio_filename,
                 "complete": False,
+                "pressure": pressure_state,
                 "progress": self.interviewer_agent.get_progress_indicator(
                     next_question.id,
                     len(session.questions)

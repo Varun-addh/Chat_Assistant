@@ -324,7 +324,7 @@ graph TD
 ## Runtime & Framework
 
 ### Core Platform
-- **Python 3.12** — Modern async/await support, performance improvements
+- **Python 3.11+** — Modern async/await support; CI runs on Python 3.11 and 3.12
 - **FastAPI** — High-performance async web framework with automatic OpenAPI documentation
 - **Starlette** — ASGI toolkit for routing, middleware, and WebSocket support
 - **Uvicorn** — Lightning-fast ASGI server for production deployment
@@ -370,16 +370,17 @@ The Practice Mode subsystem implements a multi-agent pattern:
 ## Storage & Persistence
 
 ### Primary Storage
-- **File System** — JSON/JSONL for sessions, history, and configuration
-- **Qdrant (Local Mode)** — Embedded vector database for interview questions
+- **SQL DB (`DATABASE_URL`)** — Users/auth/telemetry/usage/rate limits (SQLite for local/dev; Postgres for production)
+- **File System (optional)** — JSON/JSONL for sessions and history artifacts (dev-friendly)
+- **Qdrant** — Vector database for interview questions (server via `QDRANT_URL` or local-path fallback for single-process dev)
 
 ### Persistence Strategy
-- User sessions: `data/sessions/{user_id}/{session_id}.json`
+- User sessions: stored in the SQL DB by default when using Postgres, or in files at `data/sessions/{user_id}/{session_id}.json` when `STRATAX_SESSION_STORE=file` (common in SQLite/dev)
 - Vector indices: `data/interview_intelligence_v2/vector_db/`
 - Audio recordings: `data/practice_audio/` (WAV format). Audio files are used for session-level processing and user playback only and are not used for learning or analytics.
 - Model cache: `data/models/` (sentence-transformers downloads)
 
-*Note: File-based architecture chosen for simplicity; DB migration path available for scaling.*
+*Note: The system uses a hybrid approach: structured records live in the SQL DB, while some artifacts remain file-backed for dev simplicity. Remaining file-backed pieces can be migrated to Postgres/object storage for scale.*
 
 ## External Integrations (Optional)
 
@@ -390,8 +391,8 @@ The Practice Mode subsystem implements a multi-agent pattern:
 
 ## Containerization
 
-- **Docker** — Single-service container with Python 3.12 slim base
-- **docker-compose** — Multi-container orchestration (app + Kroki)
+- **Docker** — Single-service container with Python 3.11 slim base (`python:3.11-slim`)
+- **docker-compose** — Multi-container orchestration (app + Postgres + Qdrant + Redis + optional Kroki)
 
 <div style="page-break-after: always;"></div>
 
@@ -823,6 +824,10 @@ Practice learning uses aggregated, anonymized metrics only; derived signals are 
 
 All user data is isolated by `user_id`:
 
+*Session persistence depends on configuration:*
+- **DB-backed (default for Postgres):** sessions stored in the SQL DB
+- **File-backed (common in SQLite/dev):** sessions stored under `data/sessions/{user_id}/`
+
 ```
 data/
 ├── sessions/
@@ -838,7 +843,7 @@ data/
 ### Session Manager Design
 
 - **In-memory cache per user:** `_user_managers` dictionary keyed by `user_id`
-- **File-system persistence:** JSON files under `data/sessions/{user_id}/`
+- **Persistence:** DB-backed by default for Postgres, or file-backed under `data/sessions/{user_id}/` when `STRATAX_SESSION_STORE=file`
 - **Concurrency protection:** File locks prevent write conflicts
 
 ## CORS Configuration
@@ -970,11 +975,11 @@ Note: a lightweight legacy endpoint is also available at `GET /health/simple`.
 
 ```yaml
 volumes:
-  - ./app:/app/app                        # Source code (dev hot-reload)
-  - ./data/sessions:/app/data/sessions    # User sessions
-  - ./data/models:/app/data/models        # Embedding models
-  - ./data/practice_audio:/app/data/practice_audio
-  - ./data/interview_intelligence_v2:/app/data/interview_intelligence_v2
+    - ./app:/app/app                    # Source code (dev hot-reload)
+    - ./data/history:/app/data/history  # History + audit artifacts
+    - ./data/models:/app/data/models    # Embedding models
+    - ./data/curated:/app/data/curated  # Curated question sets
+    - ./data/vector_db:/app/data/vector_db
 ```
 
 **Persistence Guarantee:** All critical state is preserved across container restarts.
@@ -989,23 +994,25 @@ services:
     build: .
     ports:
       - "7860:7860"
-    environment:
-      - KROKI_URL=http://kroki:8000/mermaid/svg
-            # Production: set DATABASE_URL to Neon.
-            # Local (optional): set DATABASE_URL_DOCKER to Postgres and run with `--profile local`.
-            - DATABASE_URL=${DATABASE_URL_DOCKER:-${DATABASE_URL:-postgresql+psycopg://...}}
+        env_file:
+            - .env
+        environment:
+            - KROKI_URL=http://kroki:8000/mermaid/svg
+            - DATABASE_URL=${DATABASE_URL_DOCKER:-${DATABASE_URL:-postgresql+psycopg://stratax:stratax@postgres:5432/stratax}}
+            - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+            - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+            - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
         depends_on:
             - qdrant
             - redis
-            - kroki
+            - postgres
 
-  kroki:
-    image: yuzutech/kroki
-    ports:
-      - "8000:8000"
+    kroki:
+        image: yuzutech/kroki:latest
+        ports:
+            - "8001:8000"
 
     postgres:
-        profiles: ["local"]
         image: postgres:16
         ports:
             - "5433:5432"
@@ -1021,6 +1028,8 @@ services:
             - "6379:6379"
 ```
 
+See `docker-compose.yml` for the full configuration (volumes, restart policies, healthchecks).
+
 **Kroki Integration:** Optional Mermaid diagram rendering service. If unavailable, diagrams return text-only Mermaid syntax.
 
 ## Environment Configuration
@@ -1031,7 +1040,7 @@ services:
 |----------|---------|----------|
 | `GROQ_API_KEY` | Groq LLM access | Yes (if using Groq) |
 | `GEMINI_API_KEY` | Google Gemini access | Yes (if using Gemini) |
-| `LLM_PROVIDER` | Provider selection: `groq` or `gemini` | Yes |
+| `LLM_PROVIDER` | Provider selection: `groq` or `gemini` (default: `gemini`) | No |
 | `API_KEY` | Optional bearer auth for protected endpoints | No |
 | `REQUIRE_USER_API_KEY` | Strict BYOK: require client-provided provider keys (no server-key fallback) | No (recommended for large rollouts) |
 | `PRACTICE_MODE_ENABLED` | Enable/disable Practice Mode | No (default: true) |
@@ -1404,7 +1413,7 @@ if not result:
 ## Quick Start (5 Minutes)
 
 ### Prerequisites
-- **Python 3.12+**
+- **Python 3.11+**
 - **4GB+ RAM** (for embedding models)
 - **Groq or Gemini API key** (for LLM features)
 
@@ -1725,7 +1734,7 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 
 | Data Type | Location |
 |-----------|----------|
-| User sessions | `data/sessions/{user_id}/{session_id}.json` |
+| User sessions | SQL DB (default for Postgres) or `data/sessions/{user_id}/{session_id}.json` when `STRATAX_SESSION_STORE=file` |
 | Mock interviews | `data/sessions/mock_interview_sessions.json` |
 | Practice audio | `data/practice_audio/*.wav` |
 | Vector DB | `data/interview_intelligence_v2/vector_db/` |

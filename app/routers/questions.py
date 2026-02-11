@@ -272,7 +272,17 @@ async def submit_question(
 	)
 	user_key = provided_key or auth_key
 
-	if settings.require_user_api_key and not user_key:
+	# IMPORTANT:
+	# - If the request is authenticated, Authorization is assumed to be JWT (not an LLM key).
+	# - If unauthenticated, accept Authorization only when it looks like a real LLM key.
+	user = getattr(request.state, "user", None)
+
+	# Demo mode = unauthenticated AND no user-provided LLM key.
+	# Demo traffic can still be allowed even when REQUIRE_USER_API_KEY=true,
+	# because demo uses server-side demo/dev keys (product contract).
+	is_demo = (user is None) and (not groq_key) and (not gemini_key) and (not auth_key)
+
+	if settings.require_user_api_key and not user_key and not is_demo:
 		raise HTTPException(
 			status_code=401,
 			detail=(
@@ -282,9 +292,6 @@ async def submit_question(
 		)
 
 	# IMPORTANT:
-	# - If the request is authenticated, Authorization is assumed to be JWT (not an LLM key).
-	# - If unauthenticated, accept Authorization only when it looks like a real LLM key.
-	user = getattr(request.state, "user", None)
 	if user is None and not groq_key and authorization:
 		auth_val = _clean(authorization)
 		if auth_val:
@@ -298,10 +305,7 @@ async def submit_question(
 
 	# 2. Decide demo vs registered for this endpoint.
 	# Product requirement: demo mode should use Groq (cost-capped), not Gemini.
-	# We treat the request as demo only when:
-	# - not authenticated, AND
-	# - no bridge key headers were supplied.
-	is_demo = (user is None) and (not groq_key) and (not gemini_key)
+	# NOTE: is_demo is computed above (pre-auth enforcement) and stays consistent here.
 
 	# Demo cost control: use a smaller Groq model for demo traffic only.
 	# (Registered users keep the normal model selection.)

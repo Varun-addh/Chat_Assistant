@@ -958,6 +958,8 @@ async def quick_start_interview(
         
         return result
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in Quick Start: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1184,6 +1186,21 @@ async def submit_answer(
             requires_acknowledgment=result.get("requires_acknowledgment", True),
             current_question_id=result.get("current_question_id", question_id)
         )
+
+        # Premium: deterministic trace + trajectory + pressure (best-effort)
+        try:
+            from app.services.practice.practice_scoring import build_evaluation_trace, compute_session_trajectory
+            sess = practice_service.get_session(session_id) if practice_service else None
+            if sess is not None:
+                response.evaluation_trace = build_evaluation_trace(session=sess)
+                response.trajectory = compute_session_trajectory(session=sess)
+                try:
+                    from app.services.practice.adaptive_pressure import compute_pressure_state
+                    response.pressure = compute_pressure_state(session=sess)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Telemetry: processed answer summary (avoid storing transcript by default)
         metrics_obj = result.get("metrics")
@@ -1451,6 +1468,9 @@ async def acknowledge_feedback(
             complete=result["complete"],
             progress=result["progress"]
         )
+
+        if result.get("pressure") is not None:
+            response.pressure = result.get("pressure")
         
         if result["complete"]:
             # Interview finished
@@ -1823,6 +1843,17 @@ async def get_session_score(
         if session:
             score = score_session(session=session)
             agg = _get_media_and_proctoring_summary(session_id)
+
+            trace = None
+            trajectory = None
+            try:
+                from app.services.practice.practice_scoring import build_evaluation_trace, compute_session_trajectory
+
+                trace = build_evaluation_trace(session=session)
+                trajectory = compute_session_trajectory(session=session)
+            except Exception:
+                trace = None
+                trajectory = None
             return {
                 "status": "success",
                 "source": "runtime",
@@ -1833,6 +1864,8 @@ async def get_session_score(
                 "why": score.why,
                 "improvement_plan": score.improvement_plan,
                 "next_session_plan": score.next_session_plan,
+                "evaluation_trace": trace,
+                "trajectory": trajectory,
                 "evaluation_report": evaluation_report_to_json(getattr(session, "evaluation_report", None)),
                 **agg,
             }
