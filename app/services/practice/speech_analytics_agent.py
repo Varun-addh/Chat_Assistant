@@ -66,7 +66,7 @@ class SpeechAnalyticsAgent:
             filler_count, filler_words = self._detect_fillers(transcript)
             wpm = self._calculate_wpm(transcript, duration)
             longest_silence, pause_count = self._detect_silences(audio, sr)
-            confidence_score, pitch_variance = self._calculate_confidence(audio, sr)
+            confidence_score, pitch_variance = self._calculate_confidence(audio, sr, transcript)
             overtalked = self._detect_overtalking(duration, time_limit)
             
             # Get VAD info from STT if available
@@ -327,7 +327,7 @@ class SpeechAnalyticsAgent:
             logger.warning(f"Error detecting silences: {e}")
             return 0.0, 0
     
-    def _calculate_confidence(self, audio: np.ndarray, sr: int) -> Tuple[float, float]:
+    def _calculate_confidence(self, audio: np.ndarray, sr: int, transcript: str = "") -> Tuple[float, float]:
         """
         Calculate confidence score based on pitch variance.
         Lower variance = more stable = more confident.
@@ -335,11 +335,27 @@ class SpeechAnalyticsAgent:
         Args:
             audio: Audio waveform
             sr: Sample rate
+            transcript: Transcribed text (used to detect empty/silent submissions)
             
         Returns:
             Tuple of (confidence_score 0-1, raw pitch_variance)
         """
         try:
+            # GUARD: If the user said nothing (or nearly nothing), confidence is 0.
+            # Pitch analysis on silence/noise produces misleadingly stable (high)
+            # variance values because background hum is monotone.
+            word_count = len(transcript.strip().split()) if transcript and transcript.strip() else 0
+            if word_count < 3:
+                logger.info(f"Empty/near-empty transcript ({word_count} words) — confidence=0.0")
+                return 0.0, 0.0
+
+            # GUARD: If the audio has negligible speech energy, confidence is 0.
+            # RMS below ~0.005 means essentially silence / very faint noise.
+            rms = float(np.sqrt(np.mean(audio ** 2)))
+            if rms < 0.005:
+                logger.info(f"Audio RMS too low ({rms:.4f}) — confidence=0.0")
+                return 0.0, 0.0
+
             # Extract pitch using piptrack
             pitches, magnitudes = librosa.piptrack(
                 y=audio, 

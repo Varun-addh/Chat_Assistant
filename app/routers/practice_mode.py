@@ -505,11 +505,19 @@ def _persist_completed_practice_attempt(*, user_id: str, session_id: str) -> Non
 
     try:
         if not practice_service:
+            logger.warning(f"[persist] practice_service is None, cannot persist attempt for session {session_id}")
             return
 
         sess = practice_service.get_session(session_id)
-        if not sess or not getattr(sess, "is_complete", False):
+        if not sess:
+            logger.warning(f"[persist] Session {session_id} not found in memory, cannot persist")
             return
+        if not getattr(sess, "is_complete", False):
+            logger.warning(f"[persist] Session {session_id} is_complete=False, skipping persist")
+            return
+
+        logger.info(f"[persist] Persisting attempt for user={user_id}, session={session_id}, "
+                     f"questions={len(sess.questions or [])}, answers={len(sess.answers or [])}")
 
         with get_db_context() as db:
             existing = (
@@ -518,13 +526,17 @@ def _persist_completed_practice_attempt(*, user_id: str, session_id: str) -> Non
                 .filter(PracticeAttemptRecord.session_id == session_id)
                 .first()
             )
-            if not existing:
-                save_completed_attempt(db, user_id=user_id, session=sess)
+            if existing:
+                logger.info(f"[persist] Attempt already exists for session {session_id}, skipping")
+            else:
+                attempt_id = save_completed_attempt(db, user_id=user_id, session=sess)
+                logger.info(f"[persist] ✅ Saved attempt id={attempt_id} for session {session_id}")
 
             # Privacy-safe learning: store aggregate metrics only.
             if bool(getattr(settings, "enable_practice_learning", False)):
                 upsert_practice_session_metrics(db, user_id=user_id, session_id=session_id, session=sess)
-    except Exception:
+    except Exception as e:
+        logger.error(f"[persist] ❌ Failed to persist attempt for session {session_id}: {e}", exc_info=True)
         return
 
 
@@ -914,6 +926,7 @@ async def get_difficulty_preview(experience_years: int):
 @router.post("/interview/quick-start", response_model=ConversationalResponse)
 async def quick_start_interview(
     request: QuickStartRequest,
+    http_request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -930,18 +943,37 @@ async def quick_start_interview(
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
         gemini_key = x_gemini_key
+        # Only treat Authorization as an API key if it does NOT look like a JWT.
         if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization.split(" ")[1]
+            bearer_value = authorization.split(" ", 1)[1].strip()
+            if bearer_value.count(".") != 2:  # Not a JWT
+                groq_key = bearer_value
             
         api_key = gemini_key if gemini_key else groq_key
+        
+        # Authenticated users (logged in via JWT) can use server keys even when
+        # REQUIRE_USER_API_KEY is true — the requirement is about *demo/guest* traffic.
+        is_authenticated = getattr(http_request.state, "user", None) is not None
+        
+        logger.info(
+            f"Quick-start auth debug: api_key={'yes' if api_key else 'NO'}, "
+            f"is_authenticated={is_authenticated}, "
+            f"has_auth_header={'yes' if authorization else 'NO'}, "
+            f"has_x_api_key={'yes' if x_api_key else 'NO'}, "
+            f"has_gemini_key={'yes' if x_gemini_key else 'NO'}"
+        )
         
         # Fallback to dev keys
         if not api_key:
             from app.config import settings
-            if settings.require_user_api_key:
+            if settings.require_user_api_key and not is_authenticated:
+                logger.warning(
+                    "Quick-start 401: REQUIRE_USER_API_KEY=true, user not authenticated, "
+                    "no API key provided. Client must either login (JWT) or supply an API key."
+                )
                 raise HTTPException(
                     status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                    detail="No active API key. Please log in or add your Groq/Gemini API key in Bridge Settings.",
                 )
             api_key = settings.gemini_api_key or settings.groq_api_key
 
@@ -1232,7 +1264,8 @@ async def submit_answer(
             response.evaluation_report = result["evaluation_report"]
 
         # Flagship loop: persist completed attempt for progress/trends (best-effort)
-        if bool(result.get("complete")) and bool(result.get("evaluation_report")):
+        # Persist on completion regardless of whether evaluation_report succeeded
+        if bool(result.get("complete")):
             background_tasks.add_task(
                 _persist_completed_practice_attempt,
                 user_id=user_id,
@@ -1395,6 +1428,92 @@ async def submit_code(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Error submitting code: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/interview/end-session")
+async def end_practice_session(
+    session_id: str = Form(..., description="Session ID to end"),
+    background_tasks: BackgroundTasks = None,
+    http_request: Request = None,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    🛑 End a practice interview session early.
+
+    Users can call this at any point to gracefully stop and get results
+    for the questions they've already answered.
+
+    **Response includes:**
+    - `status`: always `"completed"`
+    - `ended_early`: `true` when user ends before answering every question
+    - `questions_answered` / `questions_skipped`: counts
+    - `evaluations[]`: per-question feedback **with `model_answer`** and `user_answer`
+    - `skipped_questions[]`: questions that were not reached
+    - `evaluation_report`: full session evaluation (strengths, improvements, action plan)
+    """
+    try:
+        if not practice_service:
+            raise HTTPException(status_code=503, detail="Practice mode not initialized")
+
+        user_id = get_user_id_from_request(http_request) or "guest_unknown" if http_request else "guest_unknown"
+
+        # API Key selection (Bridge Settings)
+        groq_key = x_api_key
+        gemini_key = x_gemini_key
+        if not groq_key and authorization and authorization.startswith("Bearer "):
+            bearer_value = authorization.split(" ", 1)[1].strip()
+            if bearer_value.count(".") != 2:  # Not a JWT
+                groq_key = bearer_value
+
+        api_key = gemini_key if gemini_key else groq_key
+
+        # Authenticated users can use server keys
+        is_authenticated = getattr(http_request.state, "user", None) is not None if http_request else False
+
+        if not api_key:
+            if settings.require_user_api_key and not is_authenticated:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
+            api_key = settings.gemini_api_key or settings.groq_api_key
+
+        logger.info(f"🛑 End session requested for {session_id} by {user_id}")
+
+        result = await practice_service.end_session(session_id, api_key=api_key)
+
+        # Persist completed attempt (best-effort, background)
+        # Always persist on end-session, even if evaluation_report is absent
+        if background_tasks:
+            background_tasks.add_task(
+                _persist_completed_practice_attempt,
+                user_id=user_id,
+                session_id=session_id,
+            )
+
+        _track_practice_event(
+            user_id=user_id,
+            session_id=session_id,
+            event_type="practice_session_ended_early",
+            question_text=None,
+            extra={
+                "questions_answered": result.get("questions_answered", 0),
+                "questions_skipped": result.get("questions_skipped", 0),
+                "ended_early": result.get("ended_early", False),
+            },
+        )
+
+        return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error ending practice session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

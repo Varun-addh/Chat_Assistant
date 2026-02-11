@@ -828,6 +828,103 @@ class PracticeModeService:
         """Get full path for audio file."""
         return self.audio_dir / filename
     
+    async def end_session(self, session_id: str, api_key: Optional[str] = None) -> dict:
+        """End a practice interview session early and generate evaluation.
+
+        Can be called at any point — even if not all questions have been answered.
+        If the session is already complete, returns the existing evaluation.
+
+        Returns:
+            Dict with session summary, per-question feedback (including model_answer),
+            skipped questions, and evaluation report.
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        # If not already complete, mark as complete and generate evaluation
+        if not session.is_complete:
+            session.is_complete = True
+            session.completed_at = utcnow()
+
+            if session.answers:
+                try:
+                    logger.info(
+                        f"Generating evaluation for early-ended session {session_id} "
+                        f"({len(session.answers)}/{len(session.questions)} answered)"
+                    )
+                    evaluation_report = await self.evaluation_agent.evaluate_interview(
+                        session.answers,
+                        session_id,
+                        api_key=api_key,
+                    )
+                    self._maybe_add_peer_learning_insight(evaluation_report)
+                    session.evaluation_report = evaluation_report
+                    logger.info("✅ Early-end evaluation report generated")
+                except Exception as e:
+                    logger.error(f"❌ Evaluation failed on early end: {e}", exc_info=True)
+
+        # Build per-question feedback list (answered questions only)
+        answered = []
+        for i, ans in enumerate(session.answers):
+            q = session.questions[i] if i < len(session.questions) else None
+            entry: dict = {
+                "question_number": i + 1,
+                "question": q.text if q else f"Question {i + 1}",
+                "category": q.category if q else "unknown",
+                "difficulty": q.difficulty if q else "medium",
+                "user_answer": ans.transcript,
+                "model_answer": (
+                    getattr(ans.micro_feedback, "model_answer", None)
+                    or (q.expected_answer_template if q else None)
+                    or ""
+                ),
+                "correctness_score": getattr(ans.micro_feedback, "correctness_score", None),
+                "technical_accuracy": getattr(ans.micro_feedback, "technical_accuracy", None),
+                "strengths": getattr(ans.micro_feedback, "strengths", None) or [],
+                "improvement_areas": getattr(ans.micro_feedback, "improvement_areas", None) or [],
+                "key_points_covered": getattr(ans.micro_feedback, "key_points_covered", None) or [],
+                "key_points_missed": getattr(ans.micro_feedback, "key_points_missed", None) or [],
+                "speech_metrics": {
+                    "wpm": ans.metrics.wpm,
+                    "filler_count": ans.metrics.filler_count,
+                    "confidence_score": ans.metrics.confidence_score,
+                    "duration": ans.metrics.duration,
+                },
+            }
+            answered.append(entry)
+
+        # Skipped questions list
+        skipped = []
+        for i in range(len(session.answers), len(session.questions)):
+            q = session.questions[i]
+            skipped.append({
+                "question_number": i + 1,
+                "question": q.text,
+                "category": q.category,
+                "difficulty": q.difficulty,
+                "time_limit": q.time_limit,
+            })
+
+        total_q = len(session.questions)
+        answered_count = len(session.answers)
+
+        return {
+            "status": "completed",
+            "session_id": session_id,
+            "started_at": session.started_at.isoformat(),
+            "completed_at": session.completed_at.isoformat() if session.completed_at else None,
+            "total_questions": total_q,
+            "questions_answered": answered_count,
+            "ended_early": answered_count < total_q,
+            "questions_skipped": total_q - answered_count,
+            "round_type": session.round_type,
+            "difficulty": session.difficulty,
+            "evaluations": answered,
+            "skipped_questions": skipped,
+            "evaluation_report": session.evaluation_report,
+        }
+    
     async def cleanup_session(self, session_id: str):
         """Clean up session and audio files."""
         try:

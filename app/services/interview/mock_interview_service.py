@@ -456,25 +456,19 @@ Keep it under 100 words."""
         prompt = self._build_evaluation_prompt(question, answer)
         
         try:
-            # Get LLM evaluation with high token limit for detailed feedback
-            # Override the default token limit to ensure complete response
-            import asyncio
-            
-            # Temporarily increase max tokens for evaluation
-            original_max_tokens = self.llm_service._settings.groq_max_tokens
-            self.llm_service._settings.groq_max_tokens = 4000  # Increased to 4000 for complete detailed feedback with enhanced fields
-            
-            try:
-                response, _ = await self.llm_service.generate_answer(prompt, api_key=api_key)
-            finally:
-                # Restore original setting
-                self.llm_service._settings.groq_max_tokens = original_max_tokens
-            
-            # Parse response
+            # Request STRICT JSON from the provider.
+            # This dramatically reduces malformed JSON that triggers parsing fallbacks.
+            response = await self.llm_service.generate_text(
+                prompt,
+                api_key=api_key,
+                json_mode=True,
+                temperature=0.2,
+                max_tokens=4000,
+            )
+
             evaluation = self._parse_evaluation_response(response, question, answer)
-            
             return evaluation
-        
+
         except Exception as e:
             logger.error(f"LLM evaluation failed: {e}", exc_info=True)
             return self._basic_evaluation(question, answer)
@@ -564,7 +558,7 @@ JSON STRUCTURE - RETURN EXACTLY THIS:
   
   "follow_up_questions": ["How would you calculate exact capacity needs?", "What monitoring tools would you use?"],
   
-  "model_answer": "For a notification system serving 1 million users, I would design as follows:\n\nCAPACITY PLANNING:\nAssuming 10% daily active users = 100K users. Peak load at 8PM = 50% concentrated in 1 hour = 50K notifications. That is 14 notifications/second average, 50/sec peak. Each service instance handles 100 req/sec, so need 1 instance normally, 3 instances for peak with 3x buffer = 6 instances.\n\nARCHITECTURE:\n- Message Queue: Kafka with 3 partitions for parallel processing\n- Worker Pool: 6 auto-scaling instances consuming from Kafka\n- Rate Limiting: Token bucket algorithm, 100 notifications/min per user\n- Database: PostgreSQL for user preferences, Redis for rate limit counters\n\nOBSERVABILITY:\n- Metrics: Prometheus tracking latency p99, throughput, error rate\n- Dashboards: Grafana showing queue depth and worker health\n- Alerts: PagerDuty if error rate > 1% or latency > 500ms\n\nThis ensures 99.9% uptime with proper capacity and monitoring.",
+    "model_answer": "For a notification system serving 1 million users, I would design as follows:\\n\\nCAPACITY PLANNING:\\nAssuming 10% daily active users = 100K users. Peak load at 8PM = 50% concentrated in 1 hour = 50K notifications. That is 14 notifications/second average, 50/sec peak. Each service instance handles 100 req/sec, so need 1 instance normally, 3 instances for peak with 3x buffer = 6 instances.\\n\\nARCHITECTURE:\\n- Message Queue: Kafka with 3 partitions for parallel processing\\n- Worker Pool: 6 auto-scaling instances consuming from Kafka\\n- Rate Limiting: Token bucket algorithm, 100 notifications/min per user\\n- Database: PostgreSQL for user preferences, Redis for rate limit counters\\n\\nOBSERVABILITY:\\n- Metrics: Prometheus tracking latency p99, throughput, error rate\\n- Dashboards: Grafana showing queue depth and worker health\\n- Alerts: PagerDuty if error rate > 1% or latency > 500ms\\n\\nThis ensures 99.9% uptime with proper capacity and monitoring.",
   
   "recommended_resources": ["Back-of-envelope calculations guide", "System Design Interview book", "Microservices observability patterns"],
   
@@ -573,7 +567,7 @@ JSON STRUCTURE - RETURN EXACTLY THIS:
     "Observability is not optional - mention metrics, logs, alerts",
     "Rate limiting prevents system overload",
     "Use concrete examples not generic statements"
-  ]
+    ]
 }}
 
 CRITICAL RULES:
@@ -780,75 +774,53 @@ CRITICAL RULES:
 
         # Always initialize so we never hit UnboundLocalError on malformed output.
         data: Optional[Dict] = None
-        decode_error: Optional[json.JSONDecodeError] = None
         
         # Try parsing the repaired JSON (strict/loose)
         data = _try_parse_jsonish(response)
         if isinstance(data, dict) and data:
             logger.debug("Successfully parsed JSON (strict/loose)")
         else:
-            # Keep the existing targeted fix path for strict JSON decode errors (best-effort)
+            # FALLBACK 1: Targeted fix at the specific JSON error location
             try:
                 json.loads(response)
-            except json.JSONDecodeError as e:
-                decode_error = e
-                logger.warning(f"JSON parse failed after repair: {e}")
+            except json.JSONDecodeError as decode_error:
+                logger.warning(f"JSON parse failed after repair: {decode_error}")
                 logger.debug(f"Problematic JSON (first 1000 chars): {response[:1000]}")
-            
-            # FALLBACK 1: Try to fix the specific error location
-            try:
-                if decode_error is None:
-                    raise ValueError("No JSON decode error available")
-
-                # Extract the error position
-                error_pos = decode_error.pos if hasattr(decode_error, 'pos') else None
-                if error_pos is None:
-                    raise ValueError("No JSON error position available")
-
+                
+                error_pos = getattr(decode_error, 'pos', None)
                 if error_pos is not None:
-                    # Show context around the error
                     start = max(0, error_pos - 100)
                     end = min(len(response), error_pos + 100)
-                    context = response[start:end]
-                    logger.debug(f"Error context: ...{context}...")
+                    logger.debug(f"Error context: ...{response[start:end]}...")
                     
-                    # Try to fix common issues at error position
                     char_at_error = response[error_pos] if error_pos < len(response) else 'EOF'
                     
-                    # Fix unterminated string
                     if 'Unterminated string' in str(decode_error):
-                        # Find the last quote before error and add closing quote
                         last_quote = response.rfind('"', 0, error_pos)
                         if last_quote != -1:
                             response = response[:error_pos] + '"' + response[error_pos:]
-                    
-                    # Fix expecting delimiter
                     elif 'Expecting' in str(decode_error) and 'delimiter' in str(decode_error):
-                        # Missing comma or colon
                         if char_at_error in ['"', '{', '[']:
                             response = response[:error_pos] + ',' + response[error_pos:]
                         elif char_at_error.isalpha():
                             response = response[:error_pos] + ':' + response[error_pos:]
                     
-                    # Try parsing again
                     data = _try_parse_jsonish(response)
                     if isinstance(data, dict) and data:
                         logger.info("Successfully recovered from JSON error with targeted fix")
-                    
             except Exception:
-                # FALLBACK 2: Use regex to extract key fields
+                pass
+            
+            # FALLBACK 2: Always try regex extraction if we still have no data
+            if not isinstance(data, dict) or not data:
                 logger.warning("Attempting regex extraction of key fields")
                 data = self._extract_fields_with_regex(response)
-                
-                if data:
+                if isinstance(data, dict) and data:
                     logger.info("Successfully extracted fields using regex")
-                else:
-                    # FALLBACK 3: Use basic evaluation
-                    logger.error("All parsing attempts failed, using basic evaluation")
-                    return self._basic_evaluation(question, answer)
 
-        # If we couldn't get a usable dict, fall back gracefully.
+        # If we still couldn't get a usable dict, fall back to basic evaluation.
         if not isinstance(data, dict) or not data:
+            logger.error("All parsing attempts failed, using basic evaluation")
             return self._basic_evaluation(question, answer)
         
         # Build EvaluationResult from parsed data
@@ -1241,6 +1213,8 @@ CRITICAL RULES:
             "difficulty": session.difficulty,
             "total_questions": session.total_questions,
             "questions_answered": len(session.answers),
+            "ended_early": len(session.answers) < session.total_questions,
+            "questions_skipped": session.total_questions - len(session.answers),
             "average_score": session.average_score,
             "trajectory": trajectory,
             "evaluation_trace": evaluation_trace,
@@ -1258,10 +1232,12 @@ CRITICAL RULES:
                     "question": session.questions[i].question_text,
                     "question_type": session.questions[i].interview_type,
                     "difficulty": session.questions[i].difficulty,
+                    "user_answer": session.answers[i].answer_text if i < len(session.answers) else "",
                     "score": eval.overall_score,
                     "rating": eval.rating_category,
                     "summary": eval.performance_summary,
                     "detailed_feedback": eval.detailed_feedback,
+                    "model_answer": eval.model_answer or "",
                     "strengths": eval.strengths,
                     "weaknesses": eval.weaknesses,
                     "improvement_suggestions": eval.improvement_suggestions,
@@ -1276,6 +1252,18 @@ CRITICAL RULES:
                     }
                 }
                 for i, eval in enumerate(session.evaluations)
+            ],
+            # Unanswered questions (when session ended early)
+            "skipped_questions": [
+                {
+                    "question_number": i + 1,
+                    "question": q.question_text,
+                    "question_type": q.interview_type,
+                    "difficulty": q.difficulty,
+                    "topic": q.topic,
+                }
+                for i, q in enumerate(session.questions)
+                if i >= len(session.evaluations)
             ],
             "performance_insights": {
                 "strongest_area": self._get_strongest_criterion(session),

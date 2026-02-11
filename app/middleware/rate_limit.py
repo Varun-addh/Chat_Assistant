@@ -417,6 +417,11 @@ async def rate_limit_middleware(request: Request, call_next):
         # Never rate-limit these, especially for demo users.
         "/api/practice/progress",
         "/api/practice/insights",
+        # Practice audio files are static .wav files served from disk.
+        # Rate-limiting these breaks playback UX mid-interview.
+        "/api/practice/audio",
+        # Practice round availability checks are cheap DB reads.
+        "/api/practice/rounds",
     ]
 
     if any(path.startswith(p) for p in skip_paths):

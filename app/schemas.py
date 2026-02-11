@@ -411,6 +411,8 @@ class SpeechMetrics(BaseModel):
 
 class MicroFeedback(BaseModel):
 	"""Micro-feedback provided after each answer with AI-powered correctness evaluation."""
+	model_config = {"protected_namespaces": ()}
+
 	# Delivery Feedback (existing)
 	delivery_tips: List[str] = Field(..., max_length=2, description="1-2 short delivery tips")
 	pace_feedback: str = Field(..., description="Speaking pace feedback")
@@ -426,6 +428,9 @@ class MicroFeedback(BaseModel):
 	improvement_areas: Optional[List[str]] = Field(default=None, max_length=2, description="What could be better")
 	actionable_suggestions: Optional[List[str]] = Field(default=None, max_length=2, description="Specific tips to improve")
 	is_correct: Optional[bool] = Field(default=None, description="Overall correctness (true if score >= 70%)")
+	
+	# Model / ideal answer so the user can compare their answer
+	model_answer: Optional[str] = Field(default=None, description="Ideal/model answer to compare against")
 	
 	# Deprecated field (keep for backward compatibility)
 	content_relevance: Optional[str] = Field(default=None, description="[Deprecated] Use correctness_score instead")

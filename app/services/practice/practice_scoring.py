@@ -418,7 +418,9 @@ def score_session(*, session: PracticeSession) -> PracticeScoreResult:
 def evaluation_report_to_json(report: Optional[EvaluationReport]) -> Optional[dict[str, Any]]:
     if not report:
         return None
-    # Pydantic v1/v2 compatibility
+    # Pydantic v2: mode="json" converts datetime/etc to JSON-safe types (str).
+    # This prevents "Object of type datetime is not JSON serializable" when
+    # psycopg serializes the dict for a JSON column.
     if hasattr(report, "model_dump"):
-        return report.model_dump()  # type: ignore[attr-defined]
+        return report.model_dump(mode="json")  # type: ignore[attr-defined]
     return report.dict()  # type: ignore[call-arg]

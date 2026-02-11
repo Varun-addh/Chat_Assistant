@@ -402,7 +402,20 @@ async def end_session(
     session_id: str,
     service = Depends(get_mock_service)
 ):
-    """End interview session and get final summary"""
+    """
+    End interview session and get final summary.
+
+    Users can call this at any point – even before all questions have been
+    answered – to gracefully terminate the interview early.
+
+    **Response includes:**
+    - `status`: always `"completed"`
+    - `ended_early`: `true` when the user ends before answering every question
+    - `questions_answered` / `questions_skipped`: counts
+    - `evaluations[]`: per-question feedback **with `model_answer`** and `user_answer`
+    - `skipped_questions[]`: questions that were not reached
+    - Full summary statistics (scores, timing, trajectory, etc.)
+    """
     try:
         summary = await service.end_session(session_id)
 

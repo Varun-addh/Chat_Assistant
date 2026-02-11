@@ -21,8 +21,10 @@ def _env_files() -> list[str]:
 	return files or [".env"]
 
 
-# Ensure env files are loaded eagerly (highest priority is OS env vars, then env files).
-for _p in _env_files():
+# Ensure env files are loaded eagerly.
+# Priority order (highest -> lowest): OS env vars > later env files > earlier env files.
+# We achieve this by loading files in reverse order with override=False.
+for _p in reversed(_env_files()):
 	load_dotenv(dotenv_path=_p, override=False)
 
 

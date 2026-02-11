@@ -101,6 +101,7 @@ EVALUATION REQUIREMENTS:
 4. 'key_points_covered' & 'key_points_missed': Arrays of strings.
 5. 'strengths', 'improvement_areas', 'actionable_suggestions': Arrays of strings (max 2 each).
 6. 'detailed_feedback': 1-2 sentences of professional assessment.
+7. 'model_answer': A concise 100-200 word ideal answer showing EXACTLY how a top candidate would answer this question. Include specific technical terms, examples, and structure.
 
 RETURN ONLY VALID JSON. DO NOT INCLUDE MARKDOWN BLOCKS.
 
@@ -113,7 +114,8 @@ RETURN ONLY VALID JSON. DO NOT INCLUDE MARKDOWN BLOCKS.
   "strengths": [],
   "improvement_areas": [],
   "actionable_suggestions": [],
-  "detailed_feedback": ""
+  "detailed_feedback": "",
+  "model_answer": ""
 }}"""
 
             # Use universal LLM service for provider-agnostic generation
@@ -172,7 +174,8 @@ RETURN ONLY VALID JSON. DO NOT INCLUDE MARKDOWN BLOCKS.
                 "improvement_areas": evaluation.get("improvement_areas", [])[:2],
                 "actionable_suggestions": evaluation.get("actionable_suggestions", [])[:2],
                 "is_correct": correctness_score >= 70,
-                "detailed_feedback": evaluation.get("detailed_feedback", "")
+                "detailed_feedback": evaluation.get("detailed_feedback", ""),
+                "model_answer": evaluation.get("model_answer", ""),
             }
             
         except Exception as e:
@@ -258,7 +261,8 @@ RETURN ONLY VALID JSON. DO NOT INCLUDE MARKDOWN BLOCKS.
             "improvement_areas": ["Add more technical details"] if base_score < 70 else [],
             "actionable_suggestions": ["Cover all key concepts"] if missed else ["Good coverage"],
             "is_correct": base_score >= 70,
-            "detailed_feedback": f"Answer score: {base_score}%. " + ("Good job!" if base_score >= 70 else "Needs improvement.")
+            "detailed_feedback": f"Answer score: {base_score}%. " + ("Good job!" if base_score >= 70 else "Needs improvement."),
+            "model_answer": "",
         }
     
     async def analyze_answer_quality(
@@ -1500,6 +1504,7 @@ INTERVIEWER STYLE: Data engineer evaluating data infrastructure knowledge""",
                     improvement_areas=evaluation["improvement_areas"],
                     actionable_suggestions=evaluation["actionable_suggestions"],
                     is_correct=evaluation["is_correct"],
+                    model_answer=evaluation.get("model_answer") or None,
                     # Backward compatibility
                     content_relevance=evaluation["detailed_feedback"]
                 )

@@ -48,11 +48,25 @@ def save_completed_attempt(
 
     Best practice: call this once per completed session.
     """
+    import logging
+    _logger = logging.getLogger(__name__)
 
     if not getattr(session, "is_complete", False):
+        _logger.warning(f"save_completed_attempt: session {session.session_id} is_complete=False, skip")
         return None
 
-    score: PracticeScoreResult = score_session(session=session)
+    try:
+        score: PracticeScoreResult = score_session(session=session)
+    except Exception as e:
+        _logger.error(f"score_session failed for {session.session_id}: {e}", exc_info=True)
+        # Still save a minimal record even if scoring fails completely
+        score = PracticeScoreResult(
+            overall_score=0.0,
+            dimension_scores={},
+            why=[f"Scoring failed: {e}"],
+            improvement_plan=["Retry session"],
+            next_session_plan={"focus": ["retry"], "question_count": 5},
+        )
 
     attempt = PracticeAttemptRecord(
         user_id=user_id,
@@ -85,6 +99,7 @@ def save_completed_attempt(
         )
 
     db.commit()
+    _logger.info(f"✅ Saved practice attempt id={attempt.id} for user={user_id}, session={session.session_id}, score={score.overall_score:.1f}")
     return int(attempt.id)
 
 
