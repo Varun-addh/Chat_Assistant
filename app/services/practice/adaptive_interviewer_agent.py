@@ -7,6 +7,7 @@ import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import asyncio
+import numpy as np
 
 from app.schemas import (
     PracticeInterviewQuestion,
@@ -398,12 +399,67 @@ CONTENT_RELEVANCE: <assessment>"""
             response = await self._call_llm(prompt, api_key)
             questions = self._parse_questions(response, user_profile, difficulty, round_type)
 
+            # ── Post-generation semantic dedup (cross-session + intra-batch) ──
+            dedup_stats: dict = {
+                "requested": count,
+                "generated": len(questions),
+                "history_size": len(previously_asked) if previously_asked else 0,
+                "rejected_vs_past": 0,
+                "rejected_vs_batch": 0,
+                "retry_count": 0,
+                "fallback_count": 0,
+                "final_count": 0,
+            }
+
+            # Always run dedup — even without history we get intra-batch dedup
+            questions, metrics = self._semantic_dedup(questions, previously_asked)
+            dedup_stats["rejected_vs_past"] = metrics["rejected_vs_past"]
+            dedup_stats["rejected_vs_batch"] = metrics["rejected_vs_batch"]
+
+            # If too many were rejected (>40%), retry once with higher temperature
+            if len(questions) < count * 0.6:
+                dedup_stats["retry_count"] = 1
+                logger.info(
+                    f"Only {len(questions)}/{count} survived dedup — regenerating remainder"
+                )
+                shortfall = count - len(questions)
+                already = list(previously_asked or []) + [q.text for q in questions]
+                retry_prompt = self._build_adaptive_prompt(
+                    user_profile, interview_level, shortfall, round_type,
+                    previously_asked=already,
+                )
+                try:
+                    retry_resp = await self._call_llm(retry_prompt, api_key)
+                    retry_qs = self._parse_questions(retry_resp, user_profile, difficulty, round_type)
+                    retry_qs, retry_metrics = self._semantic_dedup(retry_qs, already)
+                    dedup_stats["rejected_vs_past"] += retry_metrics["rejected_vs_past"]
+                    dedup_stats["rejected_vs_batch"] += retry_metrics["rejected_vs_batch"]
+                    questions.extend(retry_qs)
+                except Exception as retry_err:
+                    logger.warning(f"Retry generation failed: {retry_err}")
+            # ─────────────────────────────────────────────────────────────
+
             if len(questions) < count:
-                logger.warning(f"Only generated {len(questions)}/{count} questions, using fallback")
-                # Fill remaining with generic questions
                 remaining = count - len(questions)
+                dedup_stats["fallback_count"] = remaining
+                logger.warning(f"Only generated {len(questions)}/{count} questions, using fallback")
                 generic = await self._generate_generic_questions(difficulty, remaining, round_type)
                 questions.extend(generic[:remaining])
+
+            dedup_stats["final_count"] = len(questions[:count])
+            total_rejected = dedup_stats["rejected_vs_past"] + dedup_stats["rejected_vs_batch"]
+            rejection_pct = (total_rejected / dedup_stats["generated"] * 100) if dedup_stats["generated"] else 0
+            logger.info(
+                f"[DEDUP METRICS] requested={dedup_stats['requested']} "
+                f"generated={dedup_stats['generated']} "
+                f"rejected_past={dedup_stats['rejected_vs_past']} "
+                f"rejected_batch={dedup_stats['rejected_vs_batch']} "
+                f"rejection_pct={rejection_pct:.1f}% "
+                f"retries={dedup_stats['retry_count']} "
+                f"fallbacks={dedup_stats['fallback_count']} "
+                f"final={dedup_stats['final_count']} "
+                f"history={dedup_stats['history_size']}"
+            )
 
             return questions[:count]
 
@@ -685,12 +741,40 @@ Guidance:
     def _format_previously_asked(previously_asked: Optional[List[str]]) -> str:
         """Format previously asked questions for the prompt."""
         if not previously_asked:
-            return "(none — this is the candidate's first session)"
+            return ""  # Caller decides whether to include the block at all
         # Limit to 30 to keep prompt size reasonable
         items = previously_asked[:30]
         lines = [f"  {i+1}. {q}" for i, q in enumerate(items)]
         footer = f"\n  ... and {len(previously_asked) - 30} more" if len(previously_asked) > 30 else ""
         return "\n".join(lines) + footer
+
+    def _build_dedup_variety_block(self, previously_asked: Optional[List[str]], domain: str) -> str:
+        """Build the dedup + variety hint block for the prompt.
+
+        If there are no previously asked questions, emit a lightweight variety
+        hint only.  When history exists, include the full dedup instruction.
+        """
+        ts = datetime.now().isoformat()
+        if previously_asked:
+            formatted = self._format_previously_asked(previously_asked)
+            return (
+                f"**PREVIOUSLY ASKED QUESTIONS (DO NOT REPEAT THESE):**\n"
+                f"{formatted}\n\n"
+                f"**VARIETY HINT (DYNAMISM):**\n"
+                f"Current Session Context: {ts}\n"
+                f"Ensure these questions are COMPLETELY DIFFERENT from the previously asked "
+                f"questions listed above. Focus on different sub-topics, edge cases, or "
+                f"specific architectural tradeoffs within {domain} that haven't been covered "
+                f"yet. Avoid the most common \"textbook\" questions. If the candidate has been "
+                f"asked about topic X before, ask about topic Y instead."
+            )
+        return (
+            f"**VARIETY HINT (DYNAMISM):**\n"
+            f"Current Session Context: {ts}\n"
+            f"Generate fresh, unique questions. Focus on different sub-topics, edge cases, "
+            f"or specific architectural tradeoffs within {domain}. Avoid the most common "
+            f"\"textbook\" questions."
+        )
 
     def _build_adaptive_prompt(
         self,
@@ -786,12 +870,7 @@ Example: "Write the Python code snippet to..." → question_type: "coding", time
 5. Keep strings on single lines - no line breaks within string values
 6. Test your JSON is valid before returning
 
-**PREVIOUSLY ASKED QUESTIONS (DO NOT REPEAT THESE):**
-{self._format_previously_asked(previously_asked)}
-
-**VARIETY HINT (DYNAMISM):** 
-Current Session Context: {datetime.now().isoformat()}
-Ensure these questions are COMPLETELY DIFFERENT from the previously asked questions listed above. Focus on different sub-topics, edge cases, or specific architectural tradeoffs within {profile.domain} that haven't been covered yet. Avoid the most common "textbook" questions. If the candidate has been asked about topic X before, ask about topic Y instead.
+{self._build_dedup_variety_block(previously_asked, profile.domain)}
 
 Format (strict JSON only - include key_points for answer evaluation):
 [
@@ -855,6 +934,123 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
         except Exception as e:
             logger.error(f"Error in LLM question generation: {e}")
             raise
+
+    # ── Post-generation semantic dedup ────────────────────────────────────
+
+    _embed_model = None  # class-level lazy singleton
+
+    @classmethod
+    def _get_embed_model(cls):
+        """Lazy-load SentenceTransformer (reuses the model already on disk)."""
+        if cls._embed_model is not None:
+            return cls._embed_model
+        try:
+            from sentence_transformers import SentenceTransformer
+            from pathlib import Path
+
+            local_dir = str(Path("data/models/all-MiniLM-L6-v2").resolve())
+            try:
+                cls._embed_model = SentenceTransformer(local_dir)
+            except Exception:
+                cls._embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+            return cls._embed_model
+        except Exception as e:
+            logger.debug(f"SentenceTransformer unavailable, semantic dedup disabled: {e}")
+            return None
+
+    @staticmethod
+    def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+        """Cosine similarity between two vectors."""
+        denom = (np.linalg.norm(a) * np.linalg.norm(b))
+        if denom == 0:
+            return 0.0
+        return float(np.dot(a, b) / denom)
+
+    def _semantic_dedup(
+        self,
+        questions: List[PracticeInterviewQuestion],
+        previously_asked: Optional[List[str]],
+        threshold: float = 0.82,
+    ) -> tuple:
+        """Remove questions semantically too similar to past OR to each other.
+
+        Two-pass dedup:
+          1. vs previously_asked  (cross-session)
+          2. vs already-kept batch items  (intra-batch)
+
+        Returns (kept_list, metrics_dict).
+        metrics_dict keys: total, kept, rejected_vs_past, rejected_vs_batch,
+                           rejection_details (list of dicts).
+        """
+        metrics: dict = {
+            "total": len(questions),
+            "kept": len(questions),
+            "rejected_vs_past": 0,
+            "rejected_vs_batch": 0,
+            "rejection_details": [],
+        }
+
+        model = self._get_embed_model()
+        if model is None:
+            return questions, metrics  # graceful degradation
+
+        try:
+            new_texts = [q.text for q in questions]
+            new_embeddings = model.encode(new_texts, convert_to_numpy=True, show_progress_bar=False)
+
+            # --- Pass 1: reject vs previously asked ---
+            past_embeddings = None
+            if previously_asked:
+                past_texts = previously_asked[:50]
+                past_embeddings = model.encode(past_texts, convert_to_numpy=True, show_progress_bar=False)
+
+            after_past: List[tuple] = []  # (question, embedding)
+            for i, q in enumerate(questions):
+                if past_embeddings is not None:
+                    sims = [self._cosine_sim(new_embeddings[i], pe) for pe in past_embeddings]
+                    max_sim = max(sims) if sims else 0.0
+                    if max_sim >= threshold:
+                        metrics["rejected_vs_past"] += 1
+                        metrics["rejection_details"].append({
+                            "text": q.text[:80], "reason": "vs_past", "sim": round(max_sim, 3),
+                        })
+                        logger.info(
+                            f"Semantic dedup: rejected vs past (sim={max_sim:.3f}): {q.text[:80]}..."
+                        )
+                        continue
+                after_past.append((q, new_embeddings[i]))
+
+            # --- Pass 2: intra-batch pairwise dedup ---
+            kept: List[PracticeInterviewQuestion] = []
+            kept_embeddings: list = []
+            for q, emb in after_past:
+                if kept_embeddings:
+                    batch_sims = [self._cosine_sim(emb, ke) for ke in kept_embeddings]
+                    max_batch_sim = max(batch_sims)
+                    if max_batch_sim >= threshold:
+                        metrics["rejected_vs_batch"] += 1
+                        metrics["rejection_details"].append({
+                            "text": q.text[:80], "reason": "vs_batch", "sim": round(max_batch_sim, 3),
+                        })
+                        logger.info(
+                            f"Semantic dedup: rejected intra-batch (sim={max_batch_sim:.3f}): {q.text[:80]}..."
+                        )
+                        continue
+                kept.append(q)
+                kept_embeddings.append(emb)
+
+            metrics["kept"] = len(kept)
+            total_rejected = metrics["rejected_vs_past"] + metrics["rejected_vs_batch"]
+            if total_rejected:
+                logger.info(
+                    f"Semantic dedup: kept {len(kept)}/{len(questions)} "
+                    f"(past={metrics['rejected_vs_past']}, batch={metrics['rejected_vs_batch']})"
+                )
+            return kept, metrics
+
+        except Exception as e:
+            logger.warning(f"Semantic dedup failed, returning all questions: {e}")
+            return questions, metrics
     
     def _parse_questions(
         self,

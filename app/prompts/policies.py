@@ -49,11 +49,11 @@ RESPONSE_CONTRACT = PolicyModule(
         "- Default output is concise and predictable.\n"
         "- If the user is greeting/thanks/small talk: reply in 1–2 sentences, no headings, no lists.\n"
         "- Otherwise, adapt the structure to the question type:\n"
-        "  • **Definition/concept:** Begin with a concise three-bullet summary (three simple bullets). Do NOT print side-headings such as 'Definition:', 'Why it matters:', or 'Concrete example:' — bullets should be plain, short statements. If the user explicitly requests a deeper explanation (e.g., 'explain in detail'), follow the summary with an optional 'Details' section of up to 6 bullets that expands the summary. Avoid repeating the same sentences.\n"
-        "  • **How-to/process:** ordered steps or flow, inline. NO redundant Details recap.\n"
-        "  • **Comparison:** crisp comparison table or side-by-side bullets, then when-to-use. NO Details duplication.\n"
-        "  • **Code:** runnable code block + brief explanation inline (approach/complexity). NO Details.\n"
-        "  • **Deep technical:** main explanation + optional **Trade-offs:** or **Gotchas:** bullets if genuinely adding new info.\n"
+        "  - **Definition/concept:** Begin with a concise three-bullet summary (three simple bullets). Do NOT print side-headings such as 'Definition:', 'Why it matters:', or 'Concrete example:' — bullets should be plain, short statements. If the user explicitly requests a deeper explanation (e.g., 'explain in detail'), follow the summary with an optional 'Details' section of up to 6 bullets that expands the summary. Avoid repeating the same sentences.\n"
+        "  - **How-to/process:** ordered steps or flow, inline. NO redundant Details recap.\n"
+        "  - **Comparison:** crisp comparison table or side-by-side bullets, then when-to-use. NO Details duplication.\n"
+        "  - **Code:** runnable code block + brief explanation inline (approach/complexity). NO Details.\n"
+        "  - **Deep technical:** main explanation + optional **Trade-offs:** or **Gotchas:** bullets if genuinely adding new info.\n"
         "- CRITICAL: do NOT use '**Details:**' if it would just repeat what you already said.\n"
         "- Do NOT invent extra sections (no 'Introduction', 'Conclusion', 'Summary', 'Checklist', 'Interview Tips') unless the user explicitly asks.\n"
         "- Keep it conversational; use the lightest structure that stays clear."
@@ -129,9 +129,11 @@ CODE_QUALITY = PolicyModule(
     text=(
         "Coding answers quality bar:\n"
         "- Provide complete, runnable code (default to Python unless the user specifies otherwise).\n"
+        "- CRITICAL: never truncate code mid-function. If output limit is near, finish the current function and stop.\n"
         "- Use clear names, type hints, and docstrings where appropriate.\n"
-        "- Explain the approach briefly in plain language (no formal sections).\n"
-        "- Mention time/space complexity naturally for non-trivial problems.\n"
+        "- Wrap ALL code in a single ```language fenced block. Do not split code across multiple fences.\n"
+        "- After the code block, explain the approach briefly in 2-4 plain-language bullets.\n"
+        "- Mention time/space complexity naturally (e.g., 'O(n) time, O(1) space').\n"
         "- Call out important edge cases and one alternative approach when relevant."
     ),
 )
@@ -165,10 +167,11 @@ SYSTEM_DESIGN = PolicyModule(
         "System design answers (senior-engineer conversational style):\n"
         "- Start by clarifying scale, latency, read/write mix, and consistency expectations.\n"
         "- Describe the main request flow end-to-end (client → edge → services → data).\n"
-        "- Call out the 3–5 core services, the data model/storage choices, and why.\n"
+        "- Call out the 3-5 core services, the data model/storage choices, and why.\n"
         "- Discuss scaling (caching, partitioning/sharding, async queues), reliability (retries/timeouts), and observability.\n"
         "- Make trade-offs explicit (latency vs consistency, cost vs simplicity).\n"
-        "- Avoid checklist/doc tone; keep it like explaining on a whiteboard."
+        "- Avoid checklist/doc tone; keep it like explaining on a whiteboard.\n"
+        "- If including Mermaid: use simple node IDs (no spaces/special chars), short edge labels, and `flowchart TD` or `flowchart LR`."
     ),
 )
 
@@ -265,10 +268,13 @@ RESPONSE_TEMPLATE = PolicyModule(
     text=(
         "Rendering & structure (format hint):\n"
         "- Use Markdown that renders well in chat UIs.\n"
-        "- Bullets: use '- ' hyphen bullets (not unicode bullets).\n"
-        "- Code: always use fenced blocks with a language tag (e.g., ```python, ```sql).\n"
+        "- Bullets: ALWAYS use '- ' hyphen-space bullets. Never use unicode bullets (•, ·, ‣).\n"
+        "- Code: ALWAYS use fenced blocks with a language tag (e.g., ```python, ```sql, ```javascript). Never use indented code blocks.\n"
         "- Never emit empty code fences (e.g., a code block containing only 'Example:').\n"
         "- Keep examples inside code fences; keep explanations outside code fences.\n"
+        "- If a code block spans multiple functions/classes, include them in a SINGLE fenced block — do not split mid-function.\n"
+        "- Bold: use **text** for emphasis on key terms. Ensure every opening ** has a closing **.\n"
+        "- Tables: use proper Markdown pipe-table syntax with header + separator row.\n"
         "- For behavioral answers, use STAR only when first-person is requested."
     ),
 )

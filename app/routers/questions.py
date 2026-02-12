@@ -958,8 +958,9 @@ async def submit_question(
 					out_lines: list[str] = []
 					for raw_line in text.splitlines():
 						line = raw_line.rstrip()
-						# Remove top-level headings (caller provides them)
-						if re.match(r"^\s*#{1,2}\s+", line):
+						# Remove only top-level H1/H2 headings (caller provides the view H2 title).
+						# Preserve H3/H4+ sub-headings within the layer explanation.
+						if re.match(r"^\s*#{1,2}\s+", line) and not re.match(r"^\s*#{3,}", line):
 							continue
 						# Remove stray 'Bottom line' inside layers (keep final summaries clean)
 						if re.match(r"^\s*([\-*]\s*)?(\*\*?)?bottom line(\*\*?)?:", line, flags=re.IGNORECASE):
@@ -968,8 +969,20 @@ async def submit_question(
 					return "\n".join(out_lines).strip()
 
 				def _safe_ascii(text: str) -> str:
-					# Keep UI stable and avoid non-ASCII issues.
-					return (text or "").encode("ascii", errors="ignore").decode("ascii", errors="ignore")
+					# Normalize known problematic unicode but preserve valid UTF-8.
+					if not text:
+						return ""
+					replacements = {
+						"\u2019": "'", "\u2018": "'",  # smart quotes
+						"\u201c": '"', "\u201d": '"',
+						"\u2013": "-", "\u2014": "-",  # en/em dash
+						"\u2026": "...",                 # ellipsis
+						"\u2022": "-",                   # bullet
+						"\u2192": "->", "\u2190": "<-",  # arrows
+					}
+					for k, v in replacements.items():
+						text = text.replace(k, v)
+					return text
 
 				# 2. Select views: keep multi-view deterministic (the product promise is 5 views).
 				views_to_gen = [
@@ -1424,8 +1437,14 @@ async def submit_question(
 				# EventSource spec requires 'data: ' prefix for every line of the data payload
 				safe_chunk = chunk.replace('\n', '\ndata: ')
 				yield f"data: {safe_chunk}\n\n"
-			# On stream end, persist the full answer
+			# On stream end, persist the full answer (post-processed for clean history)
 			full_answer = "".join(collected)
+			# Apply the full formatting pipeline to the collected text for history.
+			# (Live stream gets per-chunk sanitization; stored history gets full cleanup.)
+			try:
+				full_answer = llm_service._format_response(full_answer)
+			except Exception:
+				pass  # never fail the stream over post-processing
 			if payload.save_to_history:
 				await manager.append_qna(state.session_id, payload.question, full_answer)
 			

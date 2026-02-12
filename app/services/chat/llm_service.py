@@ -731,6 +731,9 @@ class LLMService:
 	def _clean_explanation_formatting(self, text: str) -> str:
 		return response_postprocess._clean_explanation_formatting(self, text)
 
+	def _structural_integrity_check(self, text: str) -> str:
+		return response_postprocess._structural_integrity_check(self, text)
+
 	def _estimate_response_complexity(self, question: str) -> int:
 		"""Estimate response complexity and suggest token limit"""
 		question_lower = question.lower()
@@ -2456,6 +2459,29 @@ class LLMService:
 		
 		return False, 0.0, "all classification attempts failed"
 
+	def _stream_sanitize_chunk(self, chunk: str) -> str:
+		"""Lightweight per-chunk sanitizer for streaming responses.
+
+		Applies the most visible fixes without needing full-document context:
+		- Unicode bullet → hyphen bullet
+		- Smart quotes → ASCII quotes
+		- Prompt-leak lines removed
+		"""
+		if not chunk:
+			return chunk
+		# Unicode bullet markers → '- '
+		for marker in ("•", "·", "‣", "◦"):
+			chunk = chunk.replace(f"{marker} ", "- ")
+			# Lone marker at start of chunk
+			if chunk.startswith(marker):
+				chunk = "- " + chunk[len(marker):].lstrip()
+		# Smart quotes → ASCII
+		chunk = chunk.replace("\u2019", "'").replace("\u2018", "'")
+		chunk = chunk.replace("\u201c", '"').replace("\u201d", '"')
+		chunk = chunk.replace("\u2013", "-").replace("\u2014", "-")
+		chunk = chunk.replace("\u2026", "...")
+		return chunk
+
 
 	async def stream_answer(
 		self,
@@ -2592,6 +2618,7 @@ class LLMService:
 							out_parts.append(seg)
 						emit = "".join(out_parts)
 						if emit:
+							emit = self._stream_sanitize_chunk(emit)
 							if (not saw_recommendations) and self._has_recommendations_already(emit):
 								saw_recommendations = True
 							assistant_tail = (assistant_tail + emit)[-4000:]

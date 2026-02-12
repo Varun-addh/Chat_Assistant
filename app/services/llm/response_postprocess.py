@@ -186,20 +186,34 @@ def _drop_empty_example_code_blocks(self, text: str) -> str:
 
 
 def _fix_markdown_syntax(self, text: str) -> str:
-	"""Fix common broken markdown syntax artifacts"""
+	"""Fix common broken markdown syntax artifacts (code-fence-aware)."""
 	import re
 
-	# Fix double colons :: -> : (excluding C++ scope resolution or CSS pseudo-elements if identified,
-	# but roughly safe for general text)
-	# We'll target colons at end of words/lines specifically
-	text = re.sub(r"(\w)::\s", r"\1: ", text)
-	text = re.sub(r"(\w)::$", r"\1:", text, flags=re.MULTILINE)
+	if not text:
+		return text
 
-	# Fix unclosed bold tags near colons: "**Label: value" -> "**Label:** value"
-	# Matches: **Text: (without closing **)
-	text = re.sub(r"(\*\*[^*\n]+:)(?!\*\*)", r"\1**", text)
+	lines = text.split("\n")
+	out: list[str] = []
+	in_code = False
+	for line in lines:
+		stripped = line.strip()
+		if stripped.startswith("```"):
+			in_code = not in_code
+			out.append(line)
+			continue
+		if in_code:
+			out.append(line)
+			continue
 
-	return text
+		# Fix double colons :: -> : (safe for non-code text)
+		line = re.sub(r"(\w)::\s", r"\1: ", line)
+		line = re.sub(r"(\w)::$", r"\1:", line)
+
+		# Fix unclosed bold tags near colons: "**Label: value" -> "**Label:** value"
+		line = re.sub(r"(\*\*[^*\n]+:)(?!\*\*)", r"\1**", line)
+
+		out.append(line)
+	return "\n".join(out)
 
 
 def _split_runon_plus_bullets(self, text: str) -> str:
@@ -473,7 +487,7 @@ def _format_response(self, text: str) -> str:
 
 	# If content includes a Mermaid diagram, normalize and return as-is (don't treat as code)
 	if self._contains_mermaid(text):
-		return self._normalize_mermaid_blocks(text)
+		return self._structural_integrity_check(self._normalize_mermaid_blocks(text))
 
 	# First, check if this is code content that should not be formatted as tables
 	if self._is_code_content(text):
@@ -485,7 +499,7 @@ def _format_response(self, text: str) -> str:
 		text = self._strip_latex_math(text)
 		# Normalize Mermaid blocks even inside mixed content
 		text = self._normalize_mermaid_blocks(text)
-		return text
+		return self._structural_integrity_check(text)
 
 	# Check if this is explanation content that should use text formatting, not tables
 	if self._is_explanation_content(text):
@@ -497,7 +511,7 @@ def _format_response(self, text: str) -> str:
 		text = self._format_headings_bold(text)
 		# Remove LaTeX math markers for readability
 		text = self._strip_latex_math(text)
-		return text
+		return self._structural_integrity_check(text)
 
 	# Only touch pipe tables; do not try to infer tables from text
 	text = self._clean_table_markdown_artifacts(text)
@@ -530,6 +544,11 @@ def _format_response(self, text: str) -> str:
 
 	# Final guardrail: strip any accidental system-prompt leakage.
 	text = self._strip_internal_prompt_leakage(text)
+
+	# ── Enterprise-grade structural integrity check ──
+	# Validates & auto-repairs: balanced fences, emphasis markers,
+	# Mermaid block hygiene, and response size limits.
+	text = self._structural_integrity_check(text)
 
 	return text
 
@@ -569,15 +588,15 @@ def _normalize_colon_label_lists(self, text: str) -> str:
 		s_stripped = s.strip()
 		m = bold_label_re.match(s_stripped)
 		if m:
-			# Convert '**Label**: rest' to '- Label: rest' (avoid emitting '**' for UIs that don't render it).
+			# Preserve bold: '**Label**: rest' → '- **Label:** rest'
 			label = m.group(1).strip()
-			rest = s_stripped.split(":", 1)[1].strip()
-			return f"- {label}: {rest}"
+			rest = s_stripped.split(":", 1)[1].strip() if ":" in s_stripped else ""
+			return f"- **{label}:** {rest}"
 		m2 = plain_label_re.match(s_stripped)
 		if m2:
 			label = m2.group(1).strip()
 			rest = s_stripped.split(":", 1)[1].strip()
-			return f"- {label}: {rest}"
+			return f"- **{label}:** {rest}"
 		return "- " + s_stripped
 
 	i = 0
@@ -651,14 +670,21 @@ def _fix_unbalanced_markdown_emphasis(self, text: str) -> str:
 			out.append(line)
 			continue
 
-		# Fix unbalanced '**'
+		# Fix unbalanced '**' — only strip the LAST orphan marker, not all
 		if line.count("**") % 2 == 1:
-			line = line.replace("**", "")
-		# Fix unbalanced single '*' (ignore list markers like '* ')
-		# Only apply if there are '*' characters and it's not a bullet prefix.
+			# Find the last '**' and remove only it (preserves earlier valid pairs)
+			idx = line.rfind("**")
+			if idx >= 0:
+				line = line[:idx] + line[idx + 2:]
+		# Fix unbalanced single '*' — only strip the last orphan
+		# Skip list markers ('* ') and avoid destroying content like *args
 		lstrip = line.lstrip()
-		if "*" in line and not lstrip.startswith("* ") and (line.count("*") % 2 == 1):
-			line = line.replace("*", "")
+		if not lstrip.startswith("* "):
+			# Count only isolated emphasis markers (not inside words)
+			emphasis_count = len(re.findall(r'(?<![\w*])\*(?![\w*])|(?<![\w*])\*(?=\w)', line))
+			if emphasis_count % 2 == 1:
+				# Remove only the last orphan '*' that looks like a broken emphasis
+				line = re.sub(r'\*(?=[^*]*$)', '', line, count=1)
 
 		out.append(line)
 	return "\n".join(out)
@@ -854,6 +880,24 @@ def _normalize_mermaid_blocks(self, text: str) -> str:
 	"""Normalize Mermaid blocks without changing their content semantics."""
 	import re
 
+	_NON_FLOWCHART_TYPES = {
+		"sequencediagram", "classdiagram", "statediagram",
+		"erdiagram", "journey", "gantt", "pie", "gitgraph",
+		"mindmap", "timeline",
+	}
+
+	def _is_non_flowchart(code: str) -> bool:
+		first_line = code.strip().split("\n")[0].strip().lower() if code.strip() else ""
+		return any(first_line.startswith(t) for t in _NON_FLOWCHART_TYPES)
+
+	def _basic_cleanup(code: str) -> str:
+		"""Light cleanup for non-flowchart diagrams — preserve structure as-is."""
+		c = code.strip()
+		c = c.replace("`mermaid", "").replace("```", "").replace("`", "")
+		# Remove blank lines but keep the diagram intact
+		lines = [l for l in c.split("\n") if l.strip()]
+		return "\n".join(lines)
+
 	def normalize_block(code: str) -> str:
 		"""Bulletproof Mermaid normalizer that completely rebuilds valid syntax."""
 		c = code.strip()
@@ -969,7 +1013,13 @@ def _normalize_mermaid_blocks(self, text: str) -> str:
 			continue
 		if in_mermaid and line.strip().startswith("```"):
 			# close block
-			normalized = normalize_block("\n".join(buffer))
+			raw_block = "\n".join(buffer)
+			# Only apply the flowchart-specific normalizer to flowchart/graph diagrams.
+			# Non-flowchart diagrams (sequence, ER, class, etc.) get light cleanup only.
+			if _is_non_flowchart(raw_block):
+				normalized = _basic_cleanup(raw_block)
+			else:
+				normalized = normalize_block(raw_block)
 			out.append(normalized)
 			out.append(line)
 			in_mermaid = False
@@ -1087,8 +1137,8 @@ def _deplaceholderize(self, text: str) -> str:
 		# Fallback: plain, lower-cased phrase without brackets
 		return inside.lower()
 
-	# Replace all [ ... ] occurrences
-	return re.sub(r"\[([^\]]{1,80})\]", repl, text)
+	# Replace all [ ... ] occurrences EXCEPT markdown links [text](url)
+	return re.sub(r"\[([^\]]{1,80})\](?!\()", repl, text)
 
 
 def _format_summary_sections(self, text: str) -> str:
@@ -1498,6 +1548,171 @@ def _clean_explanation_formatting(self, text: str) -> str:
 	return "\n".join(cleaned_lines)
 
 
+# ---------------------------------------------------------------------------
+# Structural Integrity Validator  (enterprise-grade final assertion layer)
+# ---------------------------------------------------------------------------
+# Runs as the very last step of _format_response.  Four checks:
+#   1. Balanced code fences  — auto-close any unclosed ``` block
+#   2. Balanced emphasis      — strip orphan ** / * markers
+#   3. Mermaid block hygiene  — ensure diagram header present & no empty blocks
+#   4. Response size limit    — truncate cleanly if over 32 KB (≈8k tokens)
+# Each check is self-contained and never raises; it repairs in-place.
+# ---------------------------------------------------------------------------
+
+# Max response size in characters (~32 KB ≈ 8 000 tokens).
+_MAX_RESPONSE_CHARS = 32_000
+
+
+def _structural_integrity_check(self, text: str) -> str:
+	"""Final assertion & auto-repair layer before the response is saved / sent."""
+	if not text:
+		return text
+
+	text = _repair_balanced_code_fences(text)
+	text = _repair_balanced_emphasis(text)
+	text = _repair_mermaid_blocks(text)
+	text = _enforce_size_limit(text)
+	return text
+
+
+# ── 1. Balanced code fences ──────────────────────────────────────────────
+
+def _repair_balanced_code_fences(text: str) -> str:
+	"""If there is an odd number of ``` fence lines, close the last block."""
+	fence_indices: list[int] = []
+	for i, line in enumerate(text.split("\n")):
+		if line.strip().startswith("```"):
+			fence_indices.append(i)
+
+	if len(fence_indices) % 2 == 1:
+		# Odd count → unclosed code block.  Append a closing fence.
+		text = text.rstrip() + "\n```\n"
+	return text
+
+
+# ── 2. Balanced emphasis markers ─────────────────────────────────────────
+
+def _repair_balanced_emphasis(text: str) -> str:
+	"""Scan every non-code line for orphan ** or * markers and strip them.
+
+	This is a safety net *after* `_fix_unbalanced_markdown_emphasis` which
+	operates earlier.  Here we only touch lines that earlier passes missed
+	(e.g. lines introduced by later pipeline steps).
+	"""
+	lines = text.split("\n")
+	out: list[str] = []
+	in_code = False
+	for line in lines:
+		stripped = line.strip()
+		if stripped.startswith("```"):
+			in_code = not in_code
+			out.append(line)
+			continue
+		if in_code:
+			out.append(line)
+			continue
+
+		# Double-star orphans
+		if line.count("**") % 2 == 1:
+			idx = line.rfind("**")
+			if idx >= 0:
+				line = line[:idx] + line[idx + 2:]
+
+		# Single-star orphans (skip list-marker lines "* item")
+		lstrip = line.lstrip()
+		if not lstrip.startswith("* "):
+			star_count = len(re.findall(r'(?<!\*)\*(?!\*)', line))
+			if star_count % 2 == 1:
+				# Remove last lone *
+				line = re.sub(r'\*(?=[^*]*$)', '', line, count=1)
+
+		out.append(line)
+	return "\n".join(out)
+
+
+# ── 3. Mermaid block hygiene ─────────────────────────────────────────────
+
+_MERMAID_DIAGRAM_HEADERS = re.compile(
+	r"^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|"
+	r"erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline)\b",
+	re.IGNORECASE,
+)
+
+
+def _repair_mermaid_blocks(text: str) -> str:
+	"""Validate every ```mermaid ... ``` block:
+	- Must contain a recognised diagram header.
+	- Must not be empty.
+	If invalid, replace with a markdown comment so the UI isn't broken.
+	"""
+	if "```mermaid" not in text.lower():
+		return text
+
+	parts: list[str] = []
+	lines = text.split("\n")
+	i = 0
+	while i < len(lines):
+		line = lines[i]
+		# Detect opening ```mermaid fence
+		if line.strip().lower().startswith("```mermaid"):
+			block_lines: list[str] = [line]
+			i += 1
+			# Gather until closing ``` or EOF
+			while i < len(lines):
+				block_lines.append(lines[i])
+				if lines[i].strip() == "```":
+					i += 1
+					break
+				i += 1
+
+			# Extract inner content (skip opening/closing fences)
+			inner = "\n".join(block_lines[1:-1] if len(block_lines) > 2 else [])
+			inner_stripped = inner.strip()
+
+			# Validation: non-empty and has a valid diagram header
+			if not inner_stripped:
+				# Empty mermaid block → drop silently
+				parts.append("<!-- empty diagram removed -->")
+			elif not _MERMAID_DIAGRAM_HEADERS.search(inner_stripped):
+				# No recognisable header → drop and explain
+				parts.append("<!-- invalid diagram removed -->")
+			else:
+				# Valid — keep the block
+				parts.append("\n".join(block_lines))
+			continue
+
+		parts.append(line)
+		i += 1
+
+	return "\n".join(parts)
+
+
+# ── 4. Response size limit ───────────────────────────────────────────────
+
+def _enforce_size_limit(text: str) -> str:
+	"""Truncate response cleanly at a sentence boundary if it exceeds the max."""
+	if len(text) <= _MAX_RESPONSE_CHARS:
+		return text
+
+	# Attempt to cut at the last sentence boundary within the limit.
+	truncated = text[:_MAX_RESPONSE_CHARS]
+
+	# Walk back to last sentence-ending punctuation followed by whitespace/newline.
+	for end_marker in ("\n\n", ".\n", ". ", "!\n", "! ", "?\n", "? "):
+		idx = truncated.rfind(end_marker)
+		if idx > _MAX_RESPONSE_CHARS * 0.6:  # don't cut more than 40%
+			truncated = truncated[: idx + len(end_marker)]
+			break
+
+	# If we're inside a code fence, close it
+	fence_count = truncated.count("```")
+	if fence_count % 2 == 1:
+		truncated = truncated.rstrip() + "\n```\n"
+
+	truncated = truncated.rstrip() + "\n\n*... (response truncated for length)*"
+	return truncated
+
+
 def attach_text_postprocess_methods(cls) -> None:
 	"""Attach text-postprocess functions as methods on LLMService."""
 	cls._process_thinking_tags = _process_thinking_tags
@@ -1531,3 +1746,4 @@ def attach_text_postprocess_methods(cls) -> None:
 	cls._is_explanation_content = _is_explanation_content
 	cls._clean_code_formatting = _clean_code_formatting
 	cls._clean_explanation_formatting = _clean_explanation_formatting
+	cls._structural_integrity_check = _structural_integrity_check

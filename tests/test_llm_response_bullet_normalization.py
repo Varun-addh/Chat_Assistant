@@ -64,9 +64,10 @@ def test_format_response_converts_colon_label_runs_into_bullets():
 
     out = svc._format_response(raw)
 
-    assert "- Platform Independence: Runs on any JVM." in out
-    assert "- Object-Oriented: Uses classes and objects." in out
-    assert "- Simple Syntax: Familiar to C/C++ developers." in out
+    # _to_bullet now wraps labels in bold: **Label:**
+    assert "- **Platform Independence:** Runs on any JVM." in out
+    assert "- **Object-Oriented:** Uses classes and objects." in out
+    assert "- **Simple Syntax:** Familiar to C/C++ developers." in out
 
 
 @pytest.mark.fast
