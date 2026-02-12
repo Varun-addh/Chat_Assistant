@@ -819,7 +819,10 @@ async def start_round_based_interview(
                     status_code=401,
                     detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
                 )
-            api_key = settings.gemini_api_key or settings.groq_api_key
+            if settings.llm_provider == "gemini":
+                api_key = settings.gemini_api_key or settings.groq_api_key
+            else:
+                api_key = settings.groq_api_key or settings.gemini_api_key
  
         # Start interview with EXPERIENCE-BASED difficulty (not round's default)
         session_id, first_question, audio_filename = await practice_service.start_interview(
@@ -975,7 +978,10 @@ async def quick_start_interview(
                     status_code=401,
                     detail="No active API key. Please log in or add your Groq/Gemini API key in Bridge Settings.",
                 )
-            api_key = settings.gemini_api_key or settings.groq_api_key
+            if settings.llm_provider == "gemini":
+                api_key = settings.gemini_api_key or settings.groq_api_key
+            else:
+                api_key = settings.groq_api_key or settings.gemini_api_key
 
         # Use AI to build profile from conversational input
         result = await practice_service.quick_start_conversational(
@@ -1479,7 +1485,10 @@ async def end_practice_session(
                     status_code=401,
                     detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
                 )
-            api_key = settings.gemini_api_key or settings.groq_api_key
+            if settings.llm_provider == "gemini":
+                api_key = settings.gemini_api_key or settings.groq_api_key
+            else:
+                api_key = settings.groq_api_key or settings.gemini_api_key
 
         logger.info(f"🛑 End session requested for {session_id} by {user_id}")
 
@@ -1553,7 +1562,10 @@ async def acknowledge_feedback(
                     status_code=401,
                     detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
                 )
-            api_key = settings.gemini_api_key or settings.groq_api_key
+            if settings.llm_provider == "gemini":
+                api_key = settings.gemini_api_key or settings.groq_api_key
+            else:
+                api_key = settings.groq_api_key or settings.gemini_api_key
 
         # Get next question after acknowledgment
         runner = practice_graph if (practice_graph and practice_graph.available) else None
@@ -1721,7 +1733,10 @@ async def get_conversational_response(
                     status_code=401,
                     detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
                 )
-            api_key = settings.gemini_api_key or settings.groq_api_key
+            if settings.llm_provider == "gemini":
+                api_key = settings.gemini_api_key or settings.groq_api_key
+            else:
+                api_key = settings.groq_api_key or settings.gemini_api_key
 
         result = await practice_service.get_conversational_response(
             voice_input=q,
@@ -1910,7 +1925,10 @@ async def get_evaluation(
                             status_code=401,
                             detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
                         )
-                    api_key = settings.gemini_api_key or settings.groq_api_key
+                    if settings.llm_provider == "gemini":
+                        api_key = settings.gemini_api_key or settings.groq_api_key
+                    else:
+                        api_key = settings.groq_api_key or settings.gemini_api_key
 
                 evaluation_report = await practice_service.evaluation_agent.evaluate_interview(
                     session.answers,

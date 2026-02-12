@@ -745,10 +745,14 @@ class PracticeModeService:
                 effective = getattr(session, "difficulty", None)
                 pressure_state = None
 
-            # 🚀 ALWAYS-ON ADAPTIVE FOLLOW-UP:
+            # 🚀 ADAPTIVE FOLLOW-UP (skipped when the answer was very poor):
             # Replace the upcoming question with a drill-down follow-up framed from
             # the candidate's *last* answer (transcript + micro_feedback). This makes
             # the practice feel like a real interviewer (even when a topic/profile is selected).
+            #
+            # However, if the candidate answered completely wrong (correctness < 30),
+            # drilling deeper on the same topic traps them in a loop.  Instead we
+            # move them forward to a fresh topic so the interview feels progressive.
             try:
                 next_index = session.current_question_index + 1
                 if 0 <= next_index < len(session.questions):
@@ -759,10 +763,31 @@ class PracticeModeService:
                             last_answer = a
                             break
 
+                    # Guard: skip follow-up drill if the answer was very poor —
+                    # the user clearly doesn't know this topic, move on.
+                    _skip_followup = False
+                    if last_answer is not None:
+                        _mf = getattr(last_answer, "micro_feedback", None)
+                        _cs = getattr(_mf, "correctness_score", None) if _mf else None
+                        _transcript = (getattr(last_answer, "transcript", "") or "").strip()
+
+                        if _cs is not None and _cs < 30:
+                            logger.info(
+                                f"Skipping adaptive follow-up: correctness_score={_cs} < 30, "
+                                "moving to next pre-generated topic"
+                            )
+                            _skip_followup = True
+                        elif len(_transcript.split()) < 3:
+                            logger.info(
+                                f"Skipping adaptive follow-up: transcript too short ({len(_transcript.split())} words), "
+                                "moving to next pre-generated topic"
+                            )
+                            _skip_followup = True
+
                     prev_q = session.questions[question_id - 1]
                     already_asked = [q.text for q in (session.questions or []) if getattr(q, "text", None)]
 
-                    if last_answer is not None:
+                    if last_answer is not None and not _skip_followup:
                         follow_up = await self.adaptive_interviewer.generate_follow_up_question(
                             user_profile=session.user_profile,
                             difficulty=effective,
