@@ -78,7 +78,7 @@ def test_demo_mock_interview_start_is_capped_to_one_question(monkeypatch):
         def __init__(self):
             self.last_num_questions: int | None = None
 
-        async def start_session(self, user_id, interview_type, difficulty, num_questions=5, topic=None, api_key=None):
+        async def start_session(self, user_id, interview_type, difficulty, num_questions=5, topic=None, api_key=None, **kwargs):
             self.last_num_questions = int(num_questions)
             return _Session("s1", total_questions=int(num_questions), interview_type=str(interview_type), difficulty=str(difficulty))
 

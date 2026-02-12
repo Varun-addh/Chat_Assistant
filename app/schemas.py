@@ -361,6 +361,25 @@ class RoundConfig(BaseModel):
 	categories: List[str] = Field(..., description="Question categories for this round")
 
 
+class ResumeProject(BaseModel):
+	"""A project extracted from a candidate's resume."""
+	name: str = Field(..., description="Project name")
+	tech: List[str] = Field(default_factory=list, description="Technologies used")
+	claims: List[str] = Field(default_factory=list, description="Quantifiable claims or achievements from this project")
+
+
+class ResumeContext(BaseModel):
+	"""Structured resume data extracted by the resume parser (privacy-safe — no raw text stored)."""
+	skills: List[str] = Field(default_factory=list, description="All technologies, frameworks, and tools")
+	projects: List[ResumeProject] = Field(default_factory=list, description="Key projects with claims")
+	experience_summary: str = Field(default="Not specified", description="One-paragraph experience summary")
+	role_titles: List[str] = Field(default_factory=list, description="Job titles (most recent first)")
+	education: str = Field(default="Not specified", description="Degree and institution")
+	achievements: List[str] = Field(default_factory=list, description="Quantifiable achievements")
+	years_of_experience: int = Field(default=0, ge=0, description="Estimated years of experience")
+	primary_domain: str = Field(default="General Software Engineering", description="Best-guess primary domain")
+
+
 class UserProfile(BaseModel):
 	"""User profile for adaptive interview customization."""
 	domain: str = Field(..., description="Primary domain (e.g., 'Python Backend', 'Data Science', 'Frontend React')")
@@ -370,6 +389,7 @@ class UserProfile(BaseModel):
 	company_preference: Optional[str] = Field(default=None, description="Target company (e.g., 'Google', 'Meta', 'Amazon', 'Microsoft', 'Netflix', 'Apple', 'Startup', 'Enterprise')")
 	interview_focus: Optional[List[str]] = Field(default=None, description="Specific areas to focus on")
 	target_round: Optional[InterviewRound] = Field(default=None, description="Specific interview round to practice")
+	resume_context: Optional[ResumeContext] = Field(default=None, description="Structured resume data for claim-based probing (parsed from uploaded resume)")
 
 
 class PracticeInterviewQuestion(BaseModel):
@@ -541,6 +561,7 @@ class RoundSelectionRequest(BaseModel):
 	question_count: Optional[int] = Field(default=None, ge=1, le=15, description="Number of questions (1-15). If not provided, uses round default.")
 	user_profile: Optional[UserProfile] = Field(default=None, description="Optional: Complete user profile (overrides domain/experience if provided)")
 	company_specific: Optional[str] = Field(default=None, description="Optional: Make it company-specific (e.g., 'Google', 'Amazon')")
+	resume_context: Optional[ResumeContext] = Field(default=None, description="Optional: Pre-parsed resume context for claim-based probing")
 
 
 class RoundSelectionResponse(BaseModel):
@@ -560,6 +581,8 @@ class QuickStartRequest(BaseModel):
 	target_company: Optional[str] = Field(default=None, description="Specific target company (e.g., 'Google', 'Meta', 'Amazon', 'Microsoft'). If not provided, AI infers from voice_input.")
 	# NEW: Round-based selection
 	target_round: Optional[InterviewRound] = Field(default=None, description="Specific interview round to practice")
+	# NEW: Pre-parsed resume context
+	resume_context: Optional[ResumeContext] = Field(default=None, description="Optional: Pre-parsed structured resume context for claim-based probing")
 
 
 class ConversationalResponse(BaseModel):

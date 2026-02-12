@@ -47,6 +47,7 @@ from app.schemas import (
     CodeEvaluationFeedback,
     PracticeConfidenceOutcomeIn,
     PracticeConfidenceOutcomeOut,
+    ResumeContext,
 )
 from app.services.practice.practice_mode_service import PracticeModeService
 from app.services.practice.practice_mode_graph import PracticeModeGraph
@@ -605,6 +606,101 @@ def cleanup_practice_mode():
         logger.error(f"Error cleaning up Practice Mode: {e}")
 
 
+# ── Resume Upload for Practice Mode ─────────────────────────────────────
+
+@router.post("/upload-resume")
+async def upload_resume_for_practice(
+    file: UploadFile = File(...),
+    http_request: Request = None,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    📄 Upload resume for resume-based interview practice.
+    
+    Accepts: .txt, .md, .pdf, .docx
+    
+    Pipeline: Parse → Structure → Return structured JSON (raw file is NOT stored).
+    
+    The returned `resume_context` can be passed in `RoundSelectionRequest.resume_context`
+    or `QuickStartRequest.resume_context` to enable claim-based probing.
+    
+    Returns:
+        Structured resume context with skills, projects, achievements, etc.
+    """
+    try:
+        from app.services.core.resume_parser import parse_resume
+
+        # Validate file type
+        allowed = {".txt", ".md", ".pdf", ".docx"}
+        ext = Path(file.filename).suffix.lower() if file.filename else ""
+        if ext not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(allowed))}"
+            )
+
+        # Read file content
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+        # Size guard: 5MB max
+        if len(content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+
+        # Resolve API key for LLM parsing
+        groq_key = x_api_key
+        gemini_key = x_gemini_key
+        if not groq_key and authorization and authorization.startswith("Bearer "):
+            bearer_value = authorization.split(" ", 1)[1].strip()
+            if bearer_value.count(".") != 2:
+                groq_key = bearer_value
+        api_key = gemini_key if gemini_key else groq_key
+
+        if not api_key:
+            from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key to parse resume.",
+                )
+            if settings.llm_provider == "gemini":
+                api_key = settings.gemini_api_key or settings.groq_api_key
+            else:
+                api_key = settings.groq_api_key or settings.gemini_api_key
+
+        # Parse resume → structured JSON (raw bytes are discarded after this call)
+        result = await parse_resume(content, file.filename, api_key=api_key)
+
+        logger.info(
+            f"✅ Resume parsed for practice: {len(result.skills)} skills, "
+            f"{len(result.projects)} projects, {len(result.achievements)} achievements"
+        )
+
+        return {
+            "status": "ok",
+            "resume_context": result.to_dict(),
+            "summary": {
+                "skills_count": len(result.skills),
+                "projects_count": len(result.projects),
+                "achievements_count": len(result.achievements),
+                "years_of_experience": result.years_of_experience,
+                "primary_domain": result.primary_domain,
+            },
+            "message": "Resume parsed successfully. Pass the resume_context in your interview start request to enable claim-based probing.",
+        }
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Resume upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Resume parsing failed: {str(e)}")
+
+
 @router.get("/rounds/available", response_model=RoundSelectionResponse)
 async def get_available_rounds(
     experience_years: Optional[int] = None,
@@ -794,6 +890,11 @@ async def start_round_based_interview(
                 company_preference=payload.company_specific
             )
         
+        # Wire resume context from request into profile (if provided)
+        if payload.resume_context and not profile.resume_context:
+            profile.resume_context = payload.resume_context
+            logger.info(f"📄 Resume context attached: {len(payload.resume_context.skills)} skills, {len(payload.resume_context.projects)} projects")
+        
         # Override company preference if specified
         if payload.company_specific:
             profile.company_preference = payload.company_specific
@@ -959,6 +1060,7 @@ async def quick_start_interview(
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
         
+        user_id = get_user_id_from_request(http_request) or "guest_unknown"
         logger.info("🚀 Quick Start AI Mode initiated")
         
         # API Key selection (Bridge Settings)

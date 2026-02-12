@@ -541,6 +541,9 @@ CONTENT_RELEVANCE: <assessment>"""
                 f"- Key skills: {skills_str or '(none)'}\n"
                 f"- Focus areas: {focus_areas}\n\n"
             )
+            # Inject resume context for claim-based follow-up probing
+            if getattr(user_profile, "resume_context", None):
+                profile_block += self._build_resume_prompt_block(user_profile.resume_context) + "\n\n"
 
         round_block = ""
         if round_type is not None:
@@ -802,6 +805,11 @@ Guidance:
         # Build round-specific context
         round_context = self._get_round_specific_context(round_type) if round_type else ""
         round_focus = self._get_round_focus(round_type) if round_type else "general interview questions"
+
+        # ── Resume context injection (claim-based probing) ───────────────
+        resume_block = ""
+        if getattr(profile, "resume_context", None):
+            resume_block = self._build_resume_prompt_block(profile.resume_context)
         
         # Prepare fallback question mix (outside f-string to avoid backslash issues)
         fallback_mix = f"""- Behavioral/Situational: Real scenarios they've likely faced at this level
@@ -821,6 +829,8 @@ CANDIDATE PROFILE:
 
 {round_context}
 
+{resume_block}
+
 Generate {count} realistic interview questions that:
 1. Match the candidate's experience level and domain
 2. Test relevant skills from their profile
@@ -828,6 +838,7 @@ Generate {count} realistic interview questions that:
 4. {"Reflect " + profile.company_preference + "'s actual interview patterns" if profile.company_preference and profile.company_preference.lower() not in ["any", "general"] else "Reflect what top companies actually ask for this level"}
 5. Progress from foundation → application → complex scenarios
 6. **IMPORTANT**: Vary difficulty appropriately - mix of easy/medium/hard based on the interview level
+{"7. **RESUME-BASED**: At least 30-40% of questions MUST probe specific claims, projects, or achievements from the candidate's resume. Ask them to explain HOW they achieved specific metrics, WHAT tradeoffs they made, and WHY they chose their approach." if resume_block else ""}
 
 QUESTION MIX (distribute across these types):
 {self._get_round_question_mix(round_type, profile.domain) if round_type else fallback_mix}
@@ -912,6 +923,72 @@ IMPORTANT: Return ONLY the JSON array above. No explanations. No markdown. Just 
 Generate exactly {count} questions with proper formatting INCLUDING key_points, expected_answer_template, AND question_type."""
 
         return prompt
+
+    # ── Resume context helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _build_resume_prompt_block(resume_context) -> str:
+        """Build a compact prompt block from structured resume context for injection into prompts."""
+        if resume_context is None:
+            return ""
+
+        # Accept both dict and Pydantic model
+        if hasattr(resume_context, "model_dump"):
+            rc = resume_context.model_dump()
+        elif hasattr(resume_context, "dict"):
+            rc = resume_context.dict()
+        elif isinstance(resume_context, dict):
+            rc = resume_context
+        else:
+            return ""
+
+        lines = [
+            "=== CANDIDATE RESUME CONTEXT (use for claim-based probing) ===",
+        ]
+
+        summary = rc.get("experience_summary", "")
+        if summary and summary != "Not specified":
+            lines.append(f"Summary: {summary}")
+
+        roles = rc.get("role_titles", [])
+        if roles:
+            lines.append(f"Roles: {', '.join(roles[:5])}")
+
+        skills = rc.get("skills", [])
+        if skills:
+            lines.append(f"Skills from resume: {', '.join(skills[:15])}")
+
+        education = rc.get("education", "")
+        if education and education != "Not specified":
+            lines.append(f"Education: {education}")
+
+        projects = rc.get("projects", [])
+        if projects:
+            lines.append("Key Projects:")
+            for proj in projects[:5]:
+                name = proj.get("name", "Unnamed") if isinstance(proj, dict) else getattr(proj, "name", "Unnamed")
+                tech = proj.get("tech", []) if isinstance(proj, dict) else getattr(proj, "tech", [])
+                claims = proj.get("claims", []) if isinstance(proj, dict) else getattr(proj, "claims", [])
+                lines.append(f"  - {name} [{', '.join(tech[:5])}]")
+                for claim in claims[:3]:
+                    lines.append(f"    • Claim: {claim}")
+
+        achievements = rc.get("achievements", [])
+        if achievements:
+            lines.append("Notable Achievements (probe these!):")
+            for ach in achievements[:8]:
+                lines.append(f"  • {ach}")
+
+        lines.append("=== END RESUME CONTEXT ===")
+        lines.append("")
+        lines.append("RESUME-BASED PROBING GUIDANCE:")
+        lines.append("- Ask the candidate to EXPLAIN how they achieved specific metrics from their resume")
+        lines.append("- Probe the TRADEOFFS they made in their projects")
+        lines.append("- Ask about FAILURE MODES and edge cases in their claimed systems")
+        lines.append("- Verify DEPTH: 'You mentioned X — walk me through the architecture/implementation'")
+        lines.append("- Challenge claims: 'You improved latency by Y% — what was the bottleneck and how did you measure it?'")
+
+        return "\n".join(lines)
     
     async def _call_llm(self, prompt: str, api_key: Optional[str] = None) -> str:
         """Call LLM with JSON mode for structured output."""

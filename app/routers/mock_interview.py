@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, Query, Depends, Header, Request
-from typing import Optional
+from fastapi import APIRouter, HTTPException, Query, Depends, Header, Request, UploadFile, File
+from typing import Optional, Dict, Any
 from pydantic import BaseModel
 import logging
 
@@ -10,6 +10,7 @@ from app.services.interview.mock_interview_service import (
     InterviewSession,
     EvaluationResult,
 )
+from app.schemas import ResumeContext
 
 from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
 from app.utils.demo_mode import resolve_effective_api_key
@@ -40,6 +41,7 @@ class StartSessionRequest(BaseModel):
     difficulty: DifficultyLevel
     num_questions: int = 5
     topic: Optional[str] = None
+    resume_context: Optional[Dict[str, Any]] = None
 
 
 class StartSessionResponse(BaseModel):
@@ -66,6 +68,65 @@ class SubmitAnswerResponse(BaseModel):
     next_question: Optional[dict] = None
     is_last_question: bool
     progress: dict
+
+
+# ── Resume Upload for Mock Interview ─────────────────────────────────────
+
+@router.post("/upload-resume")
+async def upload_resume_for_mock_interview(
+    file: UploadFile = File(...),
+    http_request: Request = None,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    📄 Upload resume for resume-based mock interview.
+    
+    Returns structured resume_context to pass into /sessions/start request body.
+    """
+    try:
+        from app.services.core.resume_parser import parse_resume
+        from pathlib import Path
+
+        allowed = {".txt", ".md", ".pdf", ".docx"}
+        ext = Path(file.filename).suffix.lower() if file.filename else ""
+        if ext not in allowed:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(allowed))}")
+
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        if len(content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+
+        # Resolve API key
+        groq_key = x_api_key
+        gemini_key = x_gemini_key
+        if not groq_key and authorization and authorization.startswith("Bearer "):
+            bearer_value = authorization.split(" ", 1)[1].strip()
+            if bearer_value.count(".") != 2:
+                groq_key = bearer_value
+        api_key = gemini_key if gemini_key else groq_key
+        if not api_key:
+            from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(status_code=401, detail="No active API key.")
+            api_key = (settings.groq_api_key if settings.llm_provider != "gemini" else settings.gemini_api_key) or settings.groq_api_key
+
+        result = await parse_resume(content, file.filename, api_key=api_key)
+        return {
+            "status": "ok",
+            "resume_context": result.to_dict(),
+            "message": "Pass resume_context in /sessions/start to enable resume-based mock interviews.",
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Mock interview resume upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Resume parsing failed: {str(e)}")
 
 
 @router.post("/sessions/start", response_model=StartSessionResponse)
@@ -121,7 +182,8 @@ async def start_mock_interview(
             difficulty=request.difficulty,
             num_questions=effective_num_questions,
             topic=request.topic,
-            api_key=api_key
+            api_key=api_key,
+            resume_context=request.resume_context,
         )
         
         # Get first question

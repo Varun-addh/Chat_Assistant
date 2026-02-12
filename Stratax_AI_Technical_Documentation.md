@@ -3,8 +3,8 @@
 
 ---
 
-**Version:** 1.0  
-**Date:** January 2026  
+**Version:** 2.0  
+**Date:** February 2026  
 **Organization:** Stratax AI Development Team  
 **Classification:** Technical Architecture Document
 
@@ -135,6 +135,28 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 
 ## Recent Updates (Past Week)
 
+### Response formatting & structural integrity (NEW)
+
+- Built a comprehensive **response post-processing pipeline** (`app/services/llm/response_postprocess.py`, ~1,750 lines) that sanitizes all LLM output before it reaches the UI.
+- Pipeline stages: bullet normalization, code-fence-aware markdown repair, Mermaid block sanitization, colon-label list conversion, emphasis balancing, prompt-leak stripping, and more.
+- Added **per-chunk stream sanitization** so streamed responses get real-time cleanup (unicode bullets, smart quotes, dashes) before each SSE chunk is sent to the client.
+- Added a **structural integrity validator** as the final assertion layer: verifies balanced code fences, balanced emphasis markers, Mermaid block hygiene (valid header + non-empty), and response size limits (32 KB with clean sentence-boundary truncation). Auto-repairs all violations.
+- Strengthened `RESPONSE_TEMPLATE` and `CODE_QUALITY` system prompt policies with explicit code-block, bold, table, and anti-truncation rules.
+
+### Modular prompt architecture (NEW)
+
+- Introduced a **PolicyModule system** (`app/prompts/policies.py`) with named, composable prompt modules: `RESPONSE_CONTRACT`, `RESPONSE_TEMPLATE`, `CODE_QUALITY`, `SYSTEM_DESIGN`, `COPILOT_SYSTEM`, `MIRROR_MODE`, and others.
+- `app/prompts/builder.py` provides `build_default_system_prompt()` which composes policies based on `PromptFlags` (question type, domain, routing intent).
+- Mirror mode uses a completely separate policy set via `app/prompts/mirror_policies.py`.
+- Response planning via `app/prompts/response_plan.py` defines a `ResponsePlan` dataclass for structured LLM output.
+
+### Cross-session semantic deduplication (NEW)
+
+- `AdaptiveInterviewerAgent` now performs **semantic deduplication** of generated questions using `sentence-transformers` (`all-MiniLM-L6-v2`).
+- Cross-session memory prevents repeating questions across practice sessions.
+- Intra-batch cosine-similarity dedup ensures variety within a single generation batch.
+- Rejection metrics logged for observability.
+
 ### Telemetry & learning loops
 
 - Added a structured telemetry spine using a database-backed `event_records` stream (SQLAlchemy `EventRecord`).
@@ -190,40 +212,55 @@ The system is designed as a **monolithic FastAPI service** with optional modular
 ```
 FastAPI Application
 ├── Core Q&A Engine
-│   ├── Session Manager (per-user state)
-│   ├── LLM Service (provider routing)
-│   └── History Manager (JSONL logging)
+│   ├── Session Manager (app/services/core/session_manager.py)
+│   ├── LLM Service (app/services/chat/llm_service.py)
+│   ├── History Manager (app/services/core/history_manager.py)
+│   └── Response Post-Processing (app/services/llm/response_postprocess.py)
+│
+├── Prompt Architecture
+│   ├── PolicyModule System (app/prompts/policies.py)
+│   ├── Prompt Builder (app/prompts/builder.py)
+│   ├── Mirror Policies (app/prompts/mirror_policies.py)
+│   └── Response Plan (app/prompts/response_plan.py)
+│
+├── LLM Intelligence Layer
+│   ├── Identity Guard (app/services/llm/identity.py)
+│   ├── Intent Overrides (app/services/llm/intent_overrides.py)
+│   ├── Groq Model Routing (app/services/llm/groq_models.py)
+│   └── Structural Integrity Validator (in response_postprocess.py)
 │
 ├── Practice Mode (Optional)
-│   ├── Interview Orchestrator
-│   ├── Speech Analytics Agent
-│   ├── Adaptive Interviewer Agent
-│   ├── Conversational Agent
-│   ├── Evaluation Agent
-│   ├── Local STT Service (faster-whisper)
-│   └── Local TTS Service (pyttsx3/gTTS)
+│   ├── Interview Orchestrator (app/services/practice/practice_mode_service.py)
+│   ├── Speech Analytics Agent (app/services/practice/speech_analytics_agent.py)
+│   ├── Adaptive Interviewer Agent (app/services/practice/adaptive_interviewer_agent.py)
+│   ├── Conversational Agent (app/services/practice/conversational_agent.py)
+│   ├── Evaluation Agent (app/services/practice/evaluation_agent.py)
+│   ├── Local STT Service (app/services/practice/local_stt_service.py)
+│   ├── Local TTS Service (app/services/practice/local_tts_service.py)
+│   ├── Semantic Deduplication (in adaptive_interviewer_agent.py)
+│   └── Learning Loops (app/services/practice/learning_loops.py)
 │
 ├── Interview Intelligence (Optional)
-│   ├── Vector Store (Qdrant + embeddings)
+│   ├── Vector Store — Qdrant + embeddings (app/services/interview/interview_intelligence_service.py)
 │   ├── Question Generator (LLM)
-│   ├── Hybrid Search Engine (BM25 + semantic)
+│   ├── Hybrid Search Engine — BM25 + semantic (app/services/chat/ai_native_enhancements.py)
 │   ├── Cohere Reranker (optional)
 │   ├── Query Expansion (LLM-based)
 │   └── Code Execution Sandbox (optional)
 │
 ├── Mock Interview
-│   ├── Session Persistence
+│   ├── Session Persistence (app/services/interview/mock_interview_service.py)
 │   ├── Progressive Hints
 │   └── LLM Evaluation
 │
 ├── Code Evaluation
-│   ├── Static Analysis
+│   ├── Static Analysis (app/services/core/code_evaluation_service.py)
 │   ├── LLM Critique
 │   └── In-memory Cache
 │
 └── Architecture/Diagram Generator
-    ├── Mermaid Sanitization
-    ├── Complexity Detection
+    ├── Mermaid Sanitization (app/utils/mermaid_sanitizer.py)
+    ├── Complexity Detection (app/services/architecture/architecture_generator.py)
     └── Optional Kroki Rendering
 ```
 
@@ -601,6 +638,90 @@ Automatic system architecture diagram generation from codebase analysis with Mer
 
 # AI & Intelligence Layer
 
+## Response Post-Processing Pipeline (NEW)
+
+### Purpose
+Enterprise-grade formatting and validation layer that ensures every LLM response reaches the UI as clean, well-structured markdown — regardless of provider quirks, mid-stream truncation, or hallucinated formatting.
+
+### Architecture
+```
+Raw LLM Output
+    ↓
+[Bullet Normalization] → Unicode •/·/‣ → hyphen bullets
+    ↓
+[Colon-Label Lists] → "Label: value" → "- **Label:** value"
+    ↓
+[Emphasis Repair] → Orphan **/​* markers stripped
+    ↓
+[Code-Fence-Aware Markdown Fix] → Double colons, unclosed bold (skips code blocks)
+    ↓
+[Mermaid Block Sanitization] → Type detection, header validation, syntax repair
+    ↓
+[Prompt Leak Stripping] → Removes accidental system prompt leakage
+    ↓
+[Structural Integrity Validator] → Final assertion layer (see below)
+    ↓
+Clean Markdown → UI / History Save
+```
+
+### Structural Integrity Validator (Final Gate)
+
+Runs as the absolute last step before any response is saved or sent:
+
+| Check | Validates | Auto-Repair |
+|-------|-----------|-------------|
+| **Balanced code fences** | Odd ` ``` ` count = unclosed block | Appends closing ` ``` ` |
+| **Balanced emphasis** | Orphan `**` or `*` on non-code lines | Strips the trailing orphan marker |
+| **Mermaid hygiene** | Empty blocks or missing diagram header | Replaces with HTML comment |
+| **Response size limit** | > 32 KB (~8k tokens) | Truncates at sentence boundary + closes fences |
+
+### Stream Sanitization
+
+Streamed responses receive **per-chunk sanitization** via `_stream_sanitize_chunk()`:
+- Unicode bullet normalization (•, ·, ‣, ◦ → `- `)
+- Smart quote → ASCII quote conversion
+- Em/en dash → hyphen
+- Ellipsis character → `...`
+
+After the full stream completes, the collected answer receives the **full formatting pipeline** before being saved to history.
+
+### Key File
+- `app/services/llm/response_postprocess.py` (~1,750 lines)
+
+---
+
+## Modular Prompt Architecture (NEW)
+
+### Purpose
+Composable system prompt construction using named `PolicyModule` objects. Eliminates monolithic prompt strings and enables fine-grained control per question type.
+
+### PolicyModule System
+Each module encapsulates a single behavioral contract:
+
+| Module | Purpose |
+|--------|---------|
+| `RESPONSE_CONTRACT` | Core formatting rules (bullets, length, style) |
+| `RESPONSE_TEMPLATE` | Explicit code-block, bold, table formatting rules |
+| `CODE_QUALITY` | No mid-function truncation, single fence blocks |
+| `SYSTEM_DESIGN` | Senior-engineer conversational style + Mermaid guidance |
+| `COPILOT_SYSTEM` | Interview copilot identity + attribution |
+| `UX_CONVERSATION` | Natural conversational tone enforcement |
+| `MIRROR_MODE` | Separate policy set for mirror/comparison mode |
+
+### Prompt Composition
+```python
+build_default_system_prompt(flags: PromptFlags) → str
+```
+Selects and concatenates relevant policies based on question type, domain, and routing intent. Mirror mode uses a completely separate module set.
+
+### Key Files
+- `app/prompts/policies.py` — PolicyModule definitions
+- `app/prompts/builder.py` — Composer + PromptFlags
+- `app/prompts/mirror_policies.py` — Mirror mode policies
+- `app/prompts/response_plan.py` — ResponsePlan dataclass
+
+---
+
 ## LLM Abstraction Architecture
 
 ### Provider-Agnostic Design
@@ -615,12 +736,15 @@ The system implements a unified `LLMService` abstraction that decouples business
 ### Provider Implementation
 
 ```
-LLMService (Abstraction)
+LLMService (app/services/chat/llm_service.py, ~2,740 lines)
     ├─ generate_answer() → Full conversation response
+    ├─ stream_answer() → SSE streaming with per-chunk sanitization
     ├─ generate_text() → Single completion
+    ├─ _format_response() → Full post-processing pipeline
+    ├─ _structural_integrity_check() → Final assertion gate
     └─ Provider Routing:
-        ├─ Groq SDK → Ultra-fast inference
-        └─ Gemini SDK → Large context windows
+        ├─ Groq SDK → Ultra-fast inference (llama-3.3-70b-versatile)
+        └─ Gemini SDK → Large context windows (gemini-2.0-flash)
 ```
 
 **Key Decision:** Groq chosen for speed (sub-second latency), Gemini for context length (1M tokens in latest models).
@@ -1485,16 +1609,22 @@ curl http://localhost:7860/health
    - Session creation
    - LLM invocation
    - Profile upload
+   - Architecture/system design streaming
 
 2. **Explore `app/routers/practice_mode.py`**
    - Round selection
    - Audio submission
    - Evaluation flow
 
-3. **Review `app/services/llm_service.py`**
+3. **Review `app/services/chat/llm_service.py`**
    - Provider abstraction
    - Identity guard
    - Streaming support
+   - Response post-processing delegation
+
+4. **Review `app/prompts/policies.py`**
+   - PolicyModule definitions
+   - RESPONSE_CONTRACT, CODE_QUALITY, SYSTEM_DESIGN policies
 
 **Time:** 2-3 hours
 
@@ -1503,17 +1633,27 @@ curl http://localhost:7860/health
 ### Day 3: Advanced Components
 **Goal:** Deep dive into AI subsystems.
 
-1. **Study `app/services/interview_intelligence_service.py`**
+1. **Study `app/services/interview/interview_intelligence_service.py`**
    - Vector search
    - Question generation
    - Hybrid retrieval
 
-2. **Study `app/services/practice_mode_service.py`**
+2. **Study `app/services/practice/practice_mode_service.py`**
    - Agent composition
    - Orchestration logic
    - STT/TTS integration
 
-3. **Review `app/services/ai_native_enhancements.py`**
+3. **Study `app/services/practice/adaptive_interviewer_agent.py`**
+   - Comprehensive answer evaluation
+   - Cross-session semantic deduplication
+   - Follow-up drilling logic
+
+4. **Review `app/services/llm/response_postprocess.py`**
+   - Full formatting pipeline
+   - Mermaid sanitization
+   - Structural integrity validator
+
+5. **Review `app/services/chat/ai_native_enhancements.py`**
    - Hybrid search
    - Reranking
    - Code execution
@@ -1527,9 +1667,9 @@ curl http://localhost:7860/health
 
 1. **Run test suite:**
    ```bash
-   python test_llm_services.py
-   python test_practice_mode.py
-   python test_mermaid_fix.py
+   pytest -q                          # Full suite (~153 tests)
+   pytest tests/test_structural_integrity_validator.py -v  # Validator tests
+   pytest tests/evals/ -v             # Copilot contract evals
    ```
 
 2. **Try Docker build:**
@@ -1551,15 +1691,19 @@ curl http://localhost:7860/health
 
 | File | Purpose | Complexity | Lines |
 |------|---------|------------|-------|
-| `app/main.py` | Application entry | ⭐ Low | ~100 |
-| `app/config.py` | Settings & flags | ⭐ Low | ~300 |
-| `app/middleware/auth.py` | User ID extraction | ⭐ Low | ~50 |
-| `app/schemas.py` | Data contracts | ⭐⭐ Medium | ~500 |
-| `app/routers/questions.py` | Q&A endpoints | ⭐⭐ Medium | ~900 |
-| `app/routers/practice_mode.py` | Practice endpoints | ⭐⭐⭐ High | ~800 |
-| `app/services/llm_service.py` | LLM abstraction | ⭐⭐ Medium | ~600 |
-| `app/services/practice_mode_service.py` | Practice orchestrator | ⭐⭐⭐ High | ~1200 |
-| `app/services/interview_intelligence_service.py` | Vector search + generation | ⭐⭐⭐⭐ Very High | ~3000+ |
+| `app/main.py` | Application entry | ⭐ Low | ~290 |
+| `app/config.py` | Settings & flags | ⭐ Low | ~625 |
+| `app/middleware/auth.py` | User ID extraction | ⭐ Low | ~200 |
+| `app/schemas.py` | Data contracts | ⭐⭐ Medium | ~970 |
+| `app/prompts/policies.py` | PolicyModule definitions | ⭐⭐ Medium | ~350 |
+| `app/prompts/builder.py` | System prompt compositor | ⭐⭐ Medium | ~200 |
+| `app/routers/questions.py` | Q&A + copilot endpoints | ⭐⭐⭐ High | ~1,755 |
+| `app/routers/practice_mode.py` | Practice endpoints | ⭐⭐⭐ High | ~2,134 |
+| `app/services/chat/llm_service.py` | LLM abstraction + streaming | ⭐⭐⭐ High | ~2,740 |
+| `app/services/llm/response_postprocess.py` | Response formatting pipeline | ⭐⭐⭐ High | ~1,750 |
+| `app/services/practice/practice_mode_service.py` | Practice orchestrator | ⭐⭐⭐ High | ~1,030 |
+| `app/services/practice/adaptive_interviewer_agent.py` | Adaptive eval + semantic dedup | ⭐⭐⭐⭐ Very High | ~1,810 |
+| `app/services/interview/interview_intelligence_service.py` | Vector search + generation | ⭐⭐⭐⭐ Very High | ~3,160 |
 
 ---
 
@@ -1570,7 +1714,7 @@ curl http://localhost:7860/health
    ```python
    anthropic_api_key: str = ""
    ```
-2. Extend `llm_service.py`:
+2. Extend `app/services/chat/llm_service.py`:
    ```python
    elif self.provider == "anthropic":
        import anthropic
@@ -1701,7 +1845,7 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 - `GET /api/mock-interview/sessions/{id}/summary` — Get summary
 - `POST /api/mock-interview/sessions/{id}/hint` — Request hint
 
-*Full endpoint documentation: 74 total endpoints across 8 routers.*
+*Full endpoint documentation: 80+ total endpoints across 11 routers.*
 
 ---
 
@@ -1745,14 +1889,20 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 
 ## Appendix D: Test Coverage
 
-**Test Files:** 18 total
+**Test Files:** 67+ across `tests/` directory and root  
+**Test Count:** 153 passed, 12 skipped (as of February 2026)
 
-- `test_llm_services.py` — Provider switching
-- `test_practice_mode.py` — E2E practice flow
-- `test_session_debounce.py` — Concurrency protection
-- `test_mermaid_fix.py` — Diagram sanitization
-- `test_company_specific.py` — Targeted generation
-- `test_architecture_dynamic_limits.py` — Complexity detection
+Key test areas:
+- `tests/test_structural_integrity_validator.py` — Structural integrity validator (fences, emphasis, Mermaid, size)
+- `tests/test_llm_response_bullet_normalization.py` — Bullet/emphasis formatting
+- `tests/evals/test_copilot_contract_evals.py` — Copilot prompt & routing contract evals
+- `tests/test_adaptive_interviewer_agent_json_parsing.py` — Agent JSON recovery
+- `tests/test_auth_system.py` — JWT auth flows
+- `tests/test_company_specific.py` — Targeted question generation
+- `tests/test_architecture_dynamic_limits.py` — Complexity detection
+- `tests/test_event_logging_question_flow.py` — Telemetry pipeline
+- `tests/test_difficulty_levels.py` — Practice difficulty adaptation
+- `tests/test_code_execution_endpoint.py` — Sandbox execution
 
 *Full test suite in repository root.*
 
@@ -1804,4 +1954,4 @@ uvicorn app.main:app --log-level debug
 ---
 
 *Generated with precision from repository codebase.*  
-*Stratax AI Development Team — January 2026*
+*Stratax AI Development Team — February 2026*

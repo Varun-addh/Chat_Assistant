@@ -1827,12 +1827,21 @@ class LLMService:
 		if not profile_text:
 			return prompt
 
+		# Guard: truncate excessively large profile text to prevent context-window blowout.
+		MAX_PROFILE_CHARS = 4000
+		safe_text = profile_text.strip()
+		if len(safe_text) > MAX_PROFILE_CHARS:
+			safe_text = safe_text[:MAX_PROFILE_CHARS] + "\n…[truncated – profile too long]"
+			logger.warning(
+				f"Profile text truncated from {len(profile_text)} to {MAX_PROFILE_CHARS} chars"
+			)
+
 		# Simple profile context injection (no special document analysis behavior).
 		prompt = (
 			prompt
 			+ "\n\n"
 			+ "=== Candidate Profile Context (Use for resume/personal questions) ===\n"
-			+ profile_text.strip()
+			+ safe_text
 			+ "\n=== End of Profile ===\n"
 		)
 		if self._needs_first_person(question):
