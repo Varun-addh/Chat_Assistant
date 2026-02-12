@@ -31,7 +31,7 @@ class _DummyPracticeService:
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, PracticeSession] = {}
 
-    async def start_interview(self, difficulty, user_profile=None, question_count=5, round_type=None, api_key=None):
+    async def start_interview(self, difficulty, user_profile=None, question_count=5, round_type=None, api_key=None, **kwargs):
         session_id = str(uuid.uuid4())
         q1 = PracticeInterviewQuestion(
             id=1,

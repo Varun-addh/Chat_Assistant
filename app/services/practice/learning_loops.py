@@ -409,6 +409,75 @@ def compute_practice_insights(
     }
 
 
+def get_previously_asked_questions(
+    db: Session,
+    *,
+    user_id: str,
+    domain: Optional[str] = None,
+    lookback_days: int = 30,
+    max_questions: int = 50,
+) -> List[str]:
+    """Return question texts previously served to this user (for cross-session dedup).
+
+    Queries ``practice_question_served`` events and extracts
+    ``extra_data["question_text"]`` for the given user (optionally filtered
+    by domain via the session's ``practice_session_started`` event).
+
+    Returns at most *max_questions* unique question texts, newest first.
+    """
+
+    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+
+    event_types = ["practice_question_served"]
+    if domain:
+        event_types.append("practice_session_started")
+
+    rows: List[EventRecord] = (
+        db.query(EventRecord)
+        .filter(EventRecord.user_id == user_id)
+        .filter(EventRecord.timestamp >= since)
+        .filter(EventRecord.event_type.in_(event_types))
+        .order_by(EventRecord.timestamp.desc())
+        .limit(max_questions * 5)  # over-fetch to account for domain filtering
+        .all()
+    )
+
+    # Build session → domain map (if filtering by domain)
+    session_domain: Dict[str, str] = {}
+    if domain:
+        for r in rows:
+            if r.event_type == "practice_session_started" and r.session_id:
+                dom = (r.extra_data or {}).get("domain")
+                if isinstance(dom, str) and dom.strip():
+                    session_domain[r.session_id] = dom.strip()
+
+    seen: set[str] = set()
+    result: List[str] = []
+
+    for r in rows:
+        if r.event_type != "practice_question_served":
+            continue
+        extra = r.extra_data or {}
+        q_text = extra.get("question_text")
+        if not q_text or not isinstance(q_text, str) or not q_text.strip():
+            continue
+
+        # Domain filter
+        if domain and r.session_id:
+            sd = session_domain.get(r.session_id)
+            if sd and sd.lower() != domain.strip().lower():
+                continue
+
+        normalized = q_text.strip().lower()
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(q_text.strip())
+            if len(result) >= max_questions:
+                break
+
+    return result
+
+
 def merge_focus_areas(existing: Optional[List[str]], recommended: List[str], *, max_items: int = 5) -> List[str]:
     """Merge recommended focus areas into an existing list, deduped."""
     out: List[str] = []

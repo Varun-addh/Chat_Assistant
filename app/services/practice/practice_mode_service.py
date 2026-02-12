@@ -5,7 +5,7 @@ Coordinates all three agents for complete interview practice flow.
 
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, List, Tuple
 import uuid
 from datetime import datetime
 import asyncio
@@ -145,7 +145,8 @@ class PracticeModeService:
         user_profile: Optional[UserProfile] = None,
         question_count: int = 5,
         round_type: Optional[InterviewRound] = None,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        previously_asked: Optional[List[str]] = None,
     ) -> Tuple[str, PracticeInterviewQuestion, str]:
         """
         Start a new practice interview session with adaptive questions.
@@ -155,6 +156,7 @@ class PracticeModeService:
             user_profile: User profile for adaptive question generation
             question_count: Number of questions
             round_type: Specific interview round (NEW - for round-based practice)
+            previously_asked: Question texts from prior sessions (for cross-session dedup)
             
         Returns:
             Tuple of (session_id, first_question, tts_audio_path)
@@ -212,7 +214,8 @@ class PracticeModeService:
                             difficulty=difficulty,
                             count=sub_count,
                             round_type=sub_round,
-                            api_key=api_key
+                            api_key=api_key,
+                            previously_asked=previously_asked,
                         )
                     else:
                         sub_questions = self.interviewer_agent.get_questions(
@@ -239,8 +242,9 @@ class PracticeModeService:
                         user_profile=user_profile,
                         difficulty=difficulty,
                         count=question_count,
-                        round_type=round_type,  # NEW - pass round type
-                        api_key=api_key
+                        round_type=round_type,
+                        api_key=api_key,
+                        previously_asked=previously_asked,
                     )
                 else:
                     logger.info(f"No profile provided, using standard question bank - {question_count} questions")
@@ -300,7 +304,8 @@ class PracticeModeService:
         use_memory: bool = True,
         question_count: Optional[int] = None,
         target_company: Optional[str] = None,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        user_id: Optional[str] = None,
     ):
         """
         🚀 AI QUICK START - Conversational zero-click interview setup.
@@ -373,13 +378,29 @@ class PracticeModeService:
                     suggested_profile=profile
                 )
             
+            # Cross-session dedup: fetch previously asked questions for this user+domain
+            previously_asked: List[str] = []
+            if user_id:
+                try:
+                    from app.database import get_db_context
+                    from app.services.practice.learning_loops import get_previously_asked_questions
+                    with get_db_context() as db:
+                        previously_asked = get_previously_asked_questions(
+                            db, user_id=user_id, domain=profile.domain
+                        )
+                    if previously_asked:
+                        logger.info(f"📋 Cross-session dedup: {len(previously_asked)} previously asked questions for {profile.domain}")
+                except Exception as e:
+                    logger.warning(f"Could not fetch previously asked questions: {e}")
+
             # Auto-start interview with inferred profile
             session_id, first_question, audio_filename = await self.start_interview(
                 difficulty=difficulty,
                 user_profile=profile,
                 question_count=ai_question_count,
                 round_type=profile.target_round if hasattr(profile, 'target_round') else None,  # Support round selection
-                api_key=api_key
+                api_key=api_key,
+                previously_asked=previously_asked or None,
             )
             
             # Get session to retrieve total questions count
@@ -414,6 +435,7 @@ class PracticeModeService:
         voice_input: str,
         context: Optional[str] = None,
         api_key: Optional[str] = None,
+        user_id: Optional[str] = None,
     ):
         """Backward-compatible conversational onboarding endpoint.
 
@@ -425,6 +447,7 @@ class PracticeModeService:
             context=context,
             auto_mode=False,
             api_key=api_key,
+            user_id=user_id,
         )
     
     async def submit_answer(

@@ -363,7 +363,8 @@ CONTENT_RELEVANCE: <assessment>"""
         difficulty: QuestionDifficulty,
         count: int = 5,
         round_type: Optional[InterviewRound] = None,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        previously_asked: Optional[List[str]] = None,
     ) -> List[PracticeInterviewQuestion]:
         """
         Generate interview questions tailored to user profile and round type.
@@ -373,6 +374,7 @@ CONTENT_RELEVANCE: <assessment>"""
             difficulty: Base difficulty level
             count: Number of questions
             round_type: Specific interview round (NEW - for round-based practice)
+            previously_asked: Question texts from prior sessions (for cross-session dedup)
             
         Returns:
             List of contextually relevant questions
@@ -385,7 +387,7 @@ CONTENT_RELEVANCE: <assessment>"""
         interview_level = self._determine_interview_level(user_profile.experience_years, difficulty)
 
         # Build intelligent prompt (with round context if specified)
-        prompt = self._build_adaptive_prompt(user_profile, interview_level, count, round_type)
+        prompt = self._build_adaptive_prompt(user_profile, interview_level, count, round_type, previously_asked=previously_asked)
 
         try:
             round_info = f" for {round_type.value} round" if round_type else ""
@@ -678,13 +680,25 @@ Guidance:
             return f"{level} (screening round - core competencies)"
         else:
             return f"{level} (main round - comprehensive assessment)"
-    
+
+    @staticmethod
+    def _format_previously_asked(previously_asked: Optional[List[str]]) -> str:
+        """Format previously asked questions for the prompt."""
+        if not previously_asked:
+            return "(none — this is the candidate's first session)"
+        # Limit to 30 to keep prompt size reasonable
+        items = previously_asked[:30]
+        lines = [f"  {i+1}. {q}" for i, q in enumerate(items)]
+        footer = f"\n  ... and {len(previously_asked) - 30} more" if len(previously_asked) > 30 else ""
+        return "\n".join(lines) + footer
+
     def _build_adaptive_prompt(
         self,
         profile: UserProfile,
         interview_level: str,
         count: int,
-        round_type: Optional[InterviewRound] = None
+        round_type: Optional[InterviewRound] = None,
+        previously_asked: Optional[List[str]] = None,
     ) -> str:
         """Build intelligent prompt for question generation with optional round context."""
         
@@ -772,9 +786,12 @@ Example: "Write the Python code snippet to..." → question_type: "coding", time
 5. Keep strings on single lines - no line breaks within string values
 6. Test your JSON is valid before returning
 
+**PREVIOUSLY ASKED QUESTIONS (DO NOT REPEAT THESE):**
+{self._format_previously_asked(previously_asked)}
+
 **VARIETY HINT (DYNAMISM):** 
 Current Session Context: {datetime.now().isoformat()}
-Ensure these questions are unique and varied. Focus on different sub-topics, edge cases, or specific architectural tradeoffs within {profile.domain} that haven't been covered yet. Avoid the most common "textbook" questions.
+Ensure these questions are COMPLETELY DIFFERENT from the previously asked questions listed above. Focus on different sub-topics, edge cases, or specific architectural tradeoffs within {profile.domain} that haven't been covered yet. Avoid the most common "textbook" questions. If the candidate has been asked about topic X before, ask about topic Y instead.
 
 Format (strict JSON only - include key_points for answer evaluation):
 [

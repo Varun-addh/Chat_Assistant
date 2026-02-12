@@ -55,7 +55,7 @@ from app.config import settings
 from app.database import get_db_context
 from app.middleware.auth import get_user_id_from_request
 from app.utils.event_logging import track_event, stable_question_id, stable_hash
-from app.services.practice.learning_loops import compute_practice_insights, merge_focus_areas
+from app.services.practice.learning_loops import compute_practice_insights, merge_focus_areas, get_previously_asked_questions
 from app.models import PracticeAttemptRecord, PracticeSessionMedia, PracticeProctoringEvent
 from app.services.practice.practice_learning import upsert_practice_session_metrics
 from app.services.practice.practice_learning import upsert_practice_session_outcome_confidence
@@ -487,6 +487,11 @@ def _track_practice_event(
     if not getattr(settings, "enable_event_logging", True):
         return
     try:
+        # Always persist question text for practice_question_served events
+        # (LLM-generated text, not user PII) — needed for cross-session dedup.
+        if question_text and event_type == "practice_question_served":
+            extra = dict(extra or {})
+            extra.setdefault("question_text", question_text)
         with get_db_context() as db:
             track_event(
                 db,
@@ -824,13 +829,26 @@ async def start_round_based_interview(
             else:
                 api_key = settings.groq_api_key or settings.gemini_api_key
  
+        # Cross-session dedup: fetch previously asked questions for this user+domain
+        previously_asked: list[str] = []
+        try:
+            with get_db_context() as db:
+                previously_asked = get_previously_asked_questions(
+                    db, user_id=user_id, domain=payload.domain
+                )
+            if previously_asked:
+                logger.info(f"📋 Cross-session dedup: {len(previously_asked)} previously asked questions for {payload.domain}")
+        except Exception:
+            pass
+
         # Start interview with EXPERIENCE-BASED difficulty (not round's default)
         session_id, first_question, audio_filename = await practice_service.start_interview(
             difficulty=experience_based_difficulty,  # ✅ Use experience-based difficulty
             user_profile=profile,
             question_count=final_question_count,  # ✅ Now dynamic
             round_type=payload.round_type,
-            api_key=api_key
+            api_key=api_key,
+            previously_asked=previously_asked or None,
         )
         
         # Get session to retrieve total questions
@@ -991,9 +1009,41 @@ async def quick_start_interview(
             use_memory=request.session_memory,
             question_count=request.question_count,  # User can override AI decision
             target_company=request.target_company,   # User can specify exact company
-            api_key=api_key
+            api_key=api_key,
+            user_id=user_id,
         )
         
+        # Track events for quick-start sessions (other entry points track in their handlers)
+        if result.session_id and result.first_question:
+            profile = result.suggested_profile
+            _track_practice_event(
+                user_id=user_id,
+                session_id=result.session_id,
+                event_type="practice_session_started",
+                question_text=getattr(result.first_question, "text", None),
+                extra={
+                    "flow": "quick_start",
+                    "domain": getattr(profile, "domain", None) if profile else None,
+                    "experience_years": getattr(profile, "experience_years", None) if profile else None,
+                    "company": getattr(profile, "company_preference", None) if profile else None,
+                    "question_count": result.total_questions,
+                },
+            )
+            _track_practice_event(
+                user_id=user_id,
+                session_id=result.session_id,
+                event_type="practice_question_served",
+                question_text=getattr(result.first_question, "text", None),
+                extra={
+                    "question_num": 1,
+                    "question_id": int(getattr(result.first_question, "id", 1) or 1),
+                    "question_hash": stable_question_id(getattr(result.first_question, "text", "") or ""),
+                    "difficulty": _safe_enum_value(getattr(result.first_question, "difficulty", None)),
+                    "category": getattr(result.first_question, "category", None),
+                    "tts": bool(result.tts_audio_url),
+                },
+            )
+
         return result
         
     except HTTPException:
@@ -1052,6 +1102,20 @@ async def start_interview(
             profile=payload.user_profile,
         )
 
+        # Cross-session dedup: fetch previously asked questions for this user+domain
+        previously_asked: list[str] = []
+        try:
+            domain = getattr(enriched_profile, "domain", None) if enriched_profile else None
+            if domain:
+                with get_db_context() as db:
+                    previously_asked = get_previously_asked_questions(
+                        db, user_id=user_id, domain=domain
+                    )
+                if previously_asked:
+                    logger.info(f"📋 Cross-session dedup: {len(previously_asked)} previously asked questions for {domain}")
+        except Exception:
+            pass
+
         # Start interview with user profile
         runner = practice_graph if (practice_graph and practice_graph.available) else None
         if runner:
@@ -1066,7 +1130,8 @@ async def start_interview(
             difficulty=payload.difficulty,
             user_profile=enriched_profile,
             question_count=payload.question_count,
-            api_key=api_key
+            api_key=api_key,
+            previously_asked=previously_asked or None,
             )
         
         # Get session to retrieve total questions count
@@ -1708,6 +1773,7 @@ async def rate_feedback(
 async def get_conversational_response(
     q: str = Query(...), 
     context: Optional[str] = Query(None),
+    http_request: Request = None,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -1716,7 +1782,10 @@ async def get_conversational_response(
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
-        
+
+        user_id = get_user_id_from_request(http_request) if http_request else "guest_unknown"
+        user_id = user_id or "guest_unknown"
+
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
         gemini_key = x_gemini_key
@@ -1741,7 +1810,8 @@ async def get_conversational_response(
         result = await practice_service.get_conversational_response(
             voice_input=q,
             context=context,
-            api_key=api_key
+            api_key=api_key,
+            user_id=user_id,
         )
         return result
         
