@@ -135,7 +135,10 @@ def extract_text_from_bytes(content: bytes, filename: str) -> str:
 
 
 def _extract_pdf_text(content: bytes) -> str:
-    """Extract text from PDF bytes."""
+    """Extract text from PDF bytes.  Tries multiple libraries in order."""
+    import io
+
+    # 1. PyMuPDF (fastest, best quality)
     try:
         import fitz  # PyMuPDF
         doc = fitz.open(stream=content, filetype="pdf")
@@ -143,14 +146,43 @@ def _extract_pdf_text(content: bytes) -> str:
         doc.close()
         return "\n".join(pages)
     except ImportError:
-        logger.warning("PyMuPDF not installed, trying pdfplumber")
+        logger.debug("PyMuPDF not available, trying next extractor")
+    except Exception as e:
+        logger.warning(f"PyMuPDF extraction failed: {e}, trying next extractor")
+
+    # 2. pdfplumber
     try:
         import pdfplumber
-        import io
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             return "\n".join(page.extract_text() or "" for page in pdf.pages)
     except ImportError:
-        raise ImportError("Install PyMuPDF (`pip install pymupdf`) or pdfplumber for PDF support")
+        logger.debug("pdfplumber not available, trying next extractor")
+    except Exception as e:
+        logger.warning(f"pdfplumber extraction failed: {e}, trying next extractor")
+
+    # 3. PyPDF2 (already in requirements.txt)
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(io.BytesIO(content))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(pages)
+    except ImportError:
+        logger.debug("PyPDF2 not available, trying next extractor")
+    except Exception as e:
+        logger.warning(f"PyPDF2 extraction failed: {e}, trying next extractor")
+
+    # 4. pdfminer.six (already in requirements.txt)
+    try:
+        from pdfminer.high_level import extract_text as pdfminer_extract
+        return pdfminer_extract(io.BytesIO(content))
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"pdfminer extraction failed: {e}")
+
+    raise ImportError(
+        "No PDF library available. Install one of: pymupdf, pdfplumber, PyPDF2, or pdfminer.six"
+    )
 
 
 def _extract_docx_text(content: bytes) -> str:

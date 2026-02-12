@@ -28,6 +28,7 @@ playwright>=1.41.0
 pdfminer.six
 python-docx
 PyPDF2
+pymupdf
 aiohttp
 beautifulsoup4
 lxml
