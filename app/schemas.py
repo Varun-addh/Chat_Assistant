@@ -518,6 +518,8 @@ class PracticeConfidenceOutcomeOut(BaseModel):
 class PracticeSession(BaseModel):
 	"""Complete practice interview session."""
 	session_id: str = Field(..., description="Unique session identifier")
+	# Owner tracking for progress persistence (set by router on session start)
+	user_id: Optional[str] = Field(default=None, description="Owner user/guest id for progress persistence")
 	# Optional context for persistence/progress (backward-compatible)
 	user_profile: Optional[UserProfile] = Field(default=None, description="User profile used to generate questions")
 	difficulty: Optional[QuestionDifficulty] = Field(default=None, description="Difficulty level used for this session")

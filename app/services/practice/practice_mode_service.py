@@ -496,15 +496,27 @@ class PracticeModeService:
             
             # Step 3: Generate micro-feedback with AI analysis
             # Use adaptive agent with COMPREHENSIVE EVALUATION
-            micro_feedback = await self.adaptive_interviewer.generate_micro_feedback(
-                metrics,
-                question_text=question.text,
-                transcript=transcript,
-                question_key_points=question.key_points if hasattr(question, 'key_points') else None,
-                question_expected_answer=question.expected_answer_template if hasattr(question, 'expected_answer_template') else None,
-                question_category=question.category,
-                api_key=api_key
-            )
+            try:
+                micro_feedback = await self.adaptive_interviewer.generate_micro_feedback(
+                    metrics,
+                    question_text=question.text,
+                    transcript=transcript,
+                    question_key_points=question.key_points if hasattr(question, 'key_points') else None,
+                    question_expected_answer=question.expected_answer_template if hasattr(question, 'expected_answer_template') else None,
+                    question_category=question.category,
+                    api_key=api_key
+                )
+            except Exception as mf_err:
+                logger.error(f"❌ Micro-feedback generation failed: {mf_err}", exc_info=True)
+                # Fallback: create minimal feedback so the answer is still recorded
+                from app.schemas import MicroFeedback
+                micro_feedback = MicroFeedback(
+                    delivery_tips=["Feedback unavailable due to API error"],
+                    pace_feedback="Unable to analyze",
+                    overall_note=f"AI feedback could not be generated: {type(mf_err).__name__}",
+                    correctness_score=None,
+                    technical_accuracy=None,
+                )
             
             # Create answer submission
             answer = AnswerSubmission(
@@ -974,12 +986,45 @@ class PracticeModeService:
         }
     
     async def cleanup_session(self, session_id: str):
-        """Clean up session and audio files."""
+        """Clean up session and audio files.
+
+        Before deleting the session from memory, attempt to persist progress
+        to the database so that answered questions are never silently lost
+        (e.g. when a user closes the tab without clicking 'End Session').
+        """
         try:
             session = self.sessions.get(session_id)
             if not session:
                 return
-            
+
+            # --- Best-effort persist before eviction ---
+            if session.answers:
+                try:
+                    # Mark as complete if not already (abandoned sessions)
+                    if not session.is_complete:
+                        session.is_complete = True
+                        session.completed_at = utcnow()
+
+                    owner = getattr(session, "user_id", None) or "guest_unknown"
+
+                    from app.database import get_db_context
+                    from app.models import PracticeAttemptRecord
+                    from app.services.practice.practice_progress import save_completed_attempt
+
+                    with get_db_context() as db:
+                        already = (
+                            db.query(PracticeAttemptRecord)
+                            .filter(PracticeAttemptRecord.session_id == session_id)
+                            .first()
+                        )
+                        if not already:
+                            aid = save_completed_attempt(db, user_id=owner, session=session)
+                            logger.info(f"[cleanup-persist] ✅ Saved attempt id={aid} for session {session_id}")
+                        else:
+                            logger.debug(f"[cleanup-persist] Already persisted session {session_id}")
+                except Exception as pe:
+                    logger.warning(f"[cleanup-persist] Could not persist session {session_id}: {pe}")
+
             # Delete audio files
             for filename in session.audio_files:
                 audio_path = self.audio_dir / filename

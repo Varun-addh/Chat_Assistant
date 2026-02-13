@@ -521,6 +521,9 @@ def _persist_completed_practice_attempt(*, user_id: str, session_id: str) -> Non
         if not getattr(sess, "is_complete", False):
             logger.warning(f"[persist] Session {session_id} is_complete=False, skipping persist")
             return
+        if not sess.answers:
+            logger.warning(f"[persist] Session {session_id} has no answers, skipping persist")
+            return
 
         logger.info(f"[persist] Persisting attempt for user={user_id}, session={session_id}, "
                      f"questions={len(sess.questions or [])}, answers={len(sess.answers or [])}")
@@ -528,7 +531,6 @@ def _persist_completed_practice_attempt(*, user_id: str, session_id: str) -> Non
         with get_db_context() as db:
             existing = (
                 db.query(PracticeAttemptRecord)
-                .filter(PracticeAttemptRecord.user_id == user_id)
                 .filter(PracticeAttemptRecord.session_id == session_id)
                 .first()
             )
@@ -955,6 +957,10 @@ async def start_round_based_interview(
         # Get session to retrieve total questions
         session = practice_service.get_session(session_id)
         total_questions = len(session.questions) if session else round_config.question_count
+
+        # Stamp user_id for cleanup-time persist
+        if session:
+            session.user_id = user_id
         
         tts_audio_url = f"/api/practice/audio/{audio_filename}" if audio_filename else ""
 
@@ -1117,6 +1123,11 @@ async def quick_start_interview(
         
         # Track events for quick-start sessions (other entry points track in their handlers)
         if result.session_id and result.first_question:
+            # Stamp user_id for cleanup-time persist
+            qs_session = practice_service.get_session(result.session_id) if practice_service else None
+            if qs_session:
+                qs_session.user_id = user_id
+
             profile = result.suggested_profile
             _track_practice_event(
                 user_id=user_id,
@@ -1239,6 +1250,10 @@ async def start_interview(
         # Get session to retrieve total questions count
         session = practice_service.get_session(session_id)
         total_questions = len(session.questions) if session else payload.question_count
+
+        # Stamp user_id for cleanup-time persist
+        if session:
+            session.user_id = user_id
         
         # Build audio URL
         tts_audio_url = f"/api/practice/audio/{audio_filename}" if audio_filename else ""
@@ -1301,7 +1316,7 @@ async def submit_answer(
     http_request: Request,
     audio: UploadFile = File(..., description="Audio file of the answer"),
     session_id: str = Form(..., description="Session ID"),
-    question_id: int = Form(..., ge=1, le=5, description="Question ID (1-5)"),
+    question_id: int = Form(..., ge=1, le=15, description="Question ID (1-15)"),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -1459,6 +1474,7 @@ async def submit_answer(
 @router.post("/interview/submit-code", response_model=SubmitCodeResponse)
 async def submit_code(
     payload: SubmitCodeRequest,
+    background_tasks: BackgroundTasks,
     http_request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
@@ -1583,6 +1599,14 @@ async def submit_code(
                 "execution_success": bool(execution_success) if should_execute else None,
             },
         )
+
+        # Flagship loop: persist completed attempt for progress/trends (best-effort)
+        if bool(svc_resp.get("complete")):
+            background_tasks.add_task(
+                _persist_completed_practice_attempt,
+                user_id=user_id,
+                session_id=payload.session_id,
+            )
 
         return SubmitCodeResponse(
             test_results=results,
@@ -1776,12 +1800,12 @@ async def acknowledge_feedback(
             logger.info(f"✅ Interview complete for session {payload.session_id}")
 
             # Flagship loop: persist completed attempt for progress/trends (best-effort)
-            if bool(result.get("evaluation_report")):
-                background_tasks.add_task(
-                    _persist_completed_practice_attempt,
-                    user_id=user_id,
-                    session_id=payload.session_id,
-                )
+            # Persist on completion regardless of whether evaluation_report succeeded
+            background_tasks.add_task(
+                _persist_completed_practice_attempt,
+                user_id=user_id,
+                session_id=payload.session_id,
+            )
         else:
             # Next question available
             response.next_question = result["next_question"]
