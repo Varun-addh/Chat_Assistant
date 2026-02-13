@@ -29,6 +29,7 @@ pdfminer.six
 python-docx
 PyPDF2
 pymupdf
+edge-tts
 aiohttp
 beautifulsoup4
 lxml

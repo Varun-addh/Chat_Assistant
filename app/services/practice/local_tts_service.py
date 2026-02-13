@@ -20,6 +20,13 @@ except ImportError:
     GTTS_AVAILABLE = False
     logging.warning("gtts not installed. Install with: pip install gtts")
 
+try:
+    import edge_tts
+    EDGE_TTS_AVAILABLE = True
+except ImportError:
+    EDGE_TTS_AVAILABLE = False
+    logging.info("edge-tts not installed. Install with: pip install edge-tts")
+
 from app.schemas import TTSConfig
 from app.config import settings
 
@@ -452,7 +459,113 @@ class LocalTTSService:
     def __del__(self):
         """Destructor to ensure cleanup."""
         self.cleanup()
-    
+
+    # ------------------------------------------------------------------
+    # Edge-TTS (Microsoft Neural Voices) — Primary high-quality engine
+    # ------------------------------------------------------------------
+
+    # Curated interviewer voices — professional, clear, natural
+    _EDGE_INTERVIEWER_VOICES = [
+        "en-US-GuyNeural",          # Deep, confident male — excellent for interviewer
+        "en-US-ChristopherNeural",  # Warm, professional male
+        "en-US-EricNeural",         # Clear, authoritative male
+        "en-US-SteffanNeural",      # Calm, measured male
+    ]
+
+    def _build_interviewer_ssml(self, text: str, voice: str) -> str:
+        """
+        Convert plain interviewer text into SSML with natural prosody.
+
+        Adds:
+        - Strategic <break/> pauses at ellipsis and sentence boundaries
+        - Emphasis on question words for rising intonation
+
+        NOTE: This SSML is used for engines that accept raw SSML.
+        For edge-tts we use the simpler Communicate API (rate/pitch params).
+        """
+        import re as _re
+
+        # Insert <break/> at ellipsis markers the format_tts_text engine leaves behind
+        processed = _re.sub(r'\.{2,3}', ' <break time="400ms"/> ', text)
+
+        # Add a short breath pause after intro sentences (first sentence ending with . or ,)
+        first_sentence_end = _re.search(r'(?<=[.!])\s', processed)
+        if first_sentence_end:
+            pos = first_sentence_end.end()
+            processed = processed[:pos] + '<break time="350ms"/> ' + processed[pos:]
+
+        # Light emphasis on question words at start of clauses
+        processed = _re.sub(
+            r'\b(What|How|Why|When|Where|Who|Which|Can you|Could you|Tell me|Describe|Explain)\b',
+            r'<emphasis level="moderate">\1</emphasis>',
+            processed,
+            count=2,  # Only first 2 occurrences to avoid over-emphasis
+        )
+
+        ssml = (
+            '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+            'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US">'
+            f'<voice name="{voice}">'
+            '<prosody rate="-5%" pitch="-3%">'
+            f'{processed}'
+            '</prosody>'
+            '</voice>'
+            '</speak>'
+        )
+        return ssml
+
+    async def _synthesize_edge_tts(self, text: str, output_path: Path) -> Optional[str]:
+        """
+        Synthesize speech using Microsoft Edge Neural TTS.
+
+        Produces natural, human-sounding interviewer audio using Azure Neural voices
+        — the same voices that power Edge browser's Read Aloud feature.
+        Free, no API key required.  Needs internet connectivity.
+
+        The neural voices inherently handle:
+        - Question intonation (rising pitch)
+        - Natural pauses at punctuation
+        - Emphasis based on sentence context
+        - Human-like warmth and authority
+
+        Combined with format_tts_text() which adds interviewer intros/transitions,
+        this produces realistic interviewer audio.
+        """
+        if not EDGE_TTS_AVAILABLE:
+            return None
+
+        mp3_path = output_path.with_suffix(".mp3")
+
+        # Pick voice: use configured setting or default to GuyNeural
+        voice = (
+            getattr(settings, "practice_edge_tts_voice", None)
+            or self._EDGE_INTERVIEWER_VOICES[0]
+        )
+
+        try:
+            # Edge-tts Communicate handles SSML internally.
+            # We pass plain text + prosody params for the best result.
+            # The neural voice does the heavy lifting — natural intonation,
+            # question inflection, pauses — far beyond what SAPI/espeak can do.
+            communicate = edge_tts.Communicate(
+                text,
+                voice,
+                rate="-5%",   # Slightly slower than default for interview gravitas
+                pitch="-3Hz", # Slightly deeper pitch for authoritative interviewer
+            )
+            await communicate.save(str(mp3_path))
+
+            if mp3_path.exists() and mp3_path.stat().st_size > 0:
+                logger.info(f"Edge-TTS synthesis complete ({voice}): {mp3_path}")
+                return str(mp3_path)
+            else:
+                logger.warning("Edge-TTS produced empty file")
+                return None
+
+        except Exception as e:
+            logger.warning(f"Edge-TTS synthesis failed: {e}")
+            return None
+
     def _normalize_text_for_speech(self, text: str) -> str:
         """
         Intelligently normalize text for natural speech synthesis.
@@ -645,13 +758,31 @@ class LocalTTSService:
         
         output_path = Path(self.output_dir) / filename
         
-        # Check cache
-        if use_cache and output_path.exists():
-            logger.debug(f"Using cached TTS: {output_path}")
-            return str(output_path)
-        
-        # Try pyttsx3 first (offline)
-        if self.config.engine in ["pyttsx3", "offline"]:
+        # Check cache — also check .mp3 variant since edge-tts/gTTS produce mp3
+        if use_cache:
+            if output_path.exists():
+                logger.debug(f"Using cached TTS: {output_path}")
+                return str(output_path)
+            mp3_variant = output_path.with_suffix(".mp3")
+            if mp3_variant.exists():
+                logger.debug(f"Using cached TTS (mp3): {mp3_variant}")
+                return str(mp3_variant)
+
+        # =================================================================
+        # ENGINE CASCADE — best quality first, offline fallbacks last
+        # =================================================================
+
+        # 1. Edge-TTS (Neural voices — sounds like a real interviewer)
+        if EDGE_TTS_AVAILABLE and self.config.engine in ["edge_tts", "edge-tts", "neural", "auto", "pyttsx3", "offline"]:
+            try:
+                audio_path = await self._synthesize_edge_tts(normalized_text, output_path)
+                if audio_path:
+                    return audio_path
+            except Exception as e:
+                logger.warning(f"Edge-TTS synthesis failed, trying fallbacks: {e}")
+
+        # 2. pyttsx3 / Windows SAPI (offline fallback)
+        if self.config.engine in ["pyttsx3", "offline", "auto"]:
             try:
                 audio_path = await self._synthesize_pyttsx3(normalized_text, output_path)
                 if audio_path:
@@ -662,10 +793,11 @@ class LocalTTSService:
         # If you want a consistent device voice, you can hard-disable gTTS fallback.
         if getattr(settings, "practice_tts_disable_gtts_fallback", False):
             raise RuntimeError(
-                "pyttsx3 TTS failed and gTTS fallback is disabled (practice_tts_disable_gtts_fallback=true)."
+                "All primary TTS engines failed and gTTS fallback is disabled "
+                "(practice_tts_disable_gtts_fallback=true)."
             )
-        
-        # Fallback to gTTS (requires internet)
+
+        # 3. gTTS (Google online fallback — flat but reliable)
         if GTTS_AVAILABLE:
             try:
                 audio_path = await self._synthesize_gtts(normalized_text, output_path)
@@ -673,8 +805,10 @@ class LocalTTSService:
                     return audio_path
             except Exception as e:
                 logger.error(f"gTTS synthesis failed: {e}")
-        
-        raise RuntimeError("All TTS engines failed. Install pyttsx3 or gtts.")
+
+        raise RuntimeError(
+            "All TTS engines failed. Install edge-tts (recommended), pyttsx3, or gtts."
+        )
     
     async def synthesize_async(self, text: str, output_path: str) -> str:
         """
@@ -825,7 +959,9 @@ class LocalTTSService:
             "initialized": self._initialized,
             "available_engines": []
         }
-        
+
+        if EDGE_TTS_AVAILABLE:
+            info["available_engines"].append("edge_tts")
         if PYTTSX3_AVAILABLE:
             info["available_engines"].append("pyttsx3")
         if GTTS_AVAILABLE:
