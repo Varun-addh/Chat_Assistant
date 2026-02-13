@@ -352,6 +352,94 @@ def _remove_forbidden_side_headings(self, text: str) -> str:
 	return "\n".join(out)
 
 
+def _break_wall_of_text_paragraphs(self, text: str) -> str:
+	"""Break wall-of-text paragraphs into readable, structured content.
+
+	Detection: any non-code, non-heading, non-bullet paragraph with more than
+	~80 words is considered a "wall of text" and gets split at sentence
+	boundaries into short paragraphs separated by blank lines.
+
+	This acts as a backend safety net for when the LLM ignores the
+	RESPONSE_CONTRACT anti-wall-of-text policy.
+	"""
+	import re
+
+	if not text:
+		return ""
+
+	WORD_THRESHOLD = 80  # words before we consider it a wall of text
+
+	lines = text.split("\n")
+	out: list[str] = []
+	in_code = False
+
+	i = 0
+	while i < len(lines):
+		line = lines[i]
+		stripped = line.strip()
+
+		# Track fenced code blocks — never touch them.
+		if stripped.startswith("```"):
+			in_code = not in_code
+			out.append(line)
+			i += 1
+			continue
+		if in_code:
+			out.append(line)
+			i += 1
+			continue
+
+		# Skip headings, bullets, empty lines — they're fine as-is.
+		if (
+			not stripped
+			or stripped.startswith("#")
+			or stripped.startswith("- ")
+			or stripped.startswith("* ")
+			or stripped.startswith("+ ")
+			or re.match(r"^\d+\.\s", stripped)
+			or stripped.startswith("|")
+		):
+			out.append(line)
+			i += 1
+			continue
+
+		# ── Candidate paragraph — check word count ──
+		word_count = len(stripped.split())
+		if word_count <= WORD_THRESHOLD:
+			out.append(line)
+			i += 1
+			continue
+
+		# ── Wall of text detected — split at sentence boundaries ──
+		# Split on sentence-ending punctuation followed by a space.
+		sentences = re.split(r'(?<=[.!?])\s+', stripped)
+
+		if len(sentences) <= 2:
+			# Only 1-2 very long sentences — not much we can do structurally.
+			out.append(line)
+			i += 1
+			continue
+
+		# Group sentences into short paragraphs (2-3 sentences each).
+		chunk: list[str] = []
+		chunk_words = 0
+		for sentence in sentences:
+			s_words = len(sentence.split())
+			chunk.append(sentence)
+			chunk_words += s_words
+			if chunk_words >= 35 or len(chunk) >= 3:
+				out.append(" ".join(chunk))
+				out.append("")  # blank line between paragraphs
+				chunk = []
+				chunk_words = 0
+		if chunk:
+			out.append(" ".join(chunk))
+
+		i += 1
+
+	return "\n".join(out)
+
+
 def _rewrite_onboarding_brochure_if_present(self, text: str) -> str:
 	"""Rewrite common brochure-style onboarding into a natural chat reply.
 
@@ -480,6 +568,8 @@ def _format_response(self, text: str) -> str:
 	# Remove forbidden side-headings like 'Definition:', 'Why it matters:', 'Concrete example:'
 	# This ensures these label-headings are never shown to end users (strip them conservatively).
 	text = self._remove_forbidden_side_headings(text)
+	# Break wall-of-text paragraphs into readable chunks
+	text = self._break_wall_of_text_paragraphs(text)
 	# Ensure summary sections are properly formatted (remove bullet conversion logic)
 	text = self._format_summary_sections(text)
 	# Enforce unlabeled bullets inside Complete Answer

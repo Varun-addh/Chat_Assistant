@@ -56,6 +56,7 @@ RESPONSE_CONTRACT = PolicyModule(
         "  - **Deep technical:** main explanation + optional **Trade-offs:** or **Gotchas:** bullets if genuinely adding new info.\n"
         "- CRITICAL: do NOT use '**Details:**' if it would just repeat what you already said.\n"
         "- Do NOT invent extra sections (no 'Introduction', 'Conclusion', 'Summary', 'Checklist', 'Interview Tips') unless the user explicitly asks.\n"
+        "- FORMATTING RULE: NEVER output a wall-of-text paragraph. If you have more to say after the bullet summary, break it into short paragraphs (2–3 sentences each) separated by blank lines, or use additional bullets. A single paragraph must NEVER exceed 3 sentences or ~60 words.\n"
         "- Keep it conversational; use the lightest structure that stays clear."
     ),
 )
@@ -66,10 +67,11 @@ DEPTH_BUDGET = PolicyModule(
     text=(
         "Depth budget (hard limits, product-critical):\n"
         "- quick: max 3 bullets, ~120 words total, zero extra sections.\n"
-        "- standard: max 6 bullets, ~250 words total, details optional.\n"
-        "- deep: explanation blocks allowed, but avoid essay sprawl; ~600 words cap.\n"
+        "- standard: max 6 bullets, ~250 words total, details optional. NO wall-of-text paragraphs — use bullets or short separated paragraphs only.\n"
+        "- deep: explanation blocks allowed, but avoid essay sprawl; ~600 words cap. Each paragraph max 3 sentences.\n"
         "- Code: runnable code + brief explanation (2–4 bullets max).\n"
-        "- System design: main flow + 1 diagram (if user asks) + trade-offs (3–5 bullets); skip encyclopedic templates."
+        "- System design: main flow + 1 diagram (if user asks) + trade-offs (3–5 bullets); skip encyclopedic templates.\n"
+        "- NEVER produce a single paragraph longer than 3 sentences. Break long content into bullets or short separated paragraphs."
     ),
 )
 

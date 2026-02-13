@@ -650,6 +650,9 @@ class LLMService:
 	def _remove_forbidden_side_headings(self, text: str) -> str:
 		return response_postprocess._remove_forbidden_side_headings(self, text)
 
+	def _break_wall_of_text_paragraphs(self, text: str) -> str:
+		return response_postprocess._break_wall_of_text_paragraphs(self, text)
+
 	def _rewrite_onboarding_brochure_if_present(self, text: str) -> str:
 		return response_postprocess._rewrite_onboarding_brochure_if_present(self, text)
 
