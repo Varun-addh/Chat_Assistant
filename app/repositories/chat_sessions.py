@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.models import ChatSession
 
@@ -89,7 +90,31 @@ class ChatSessionRepository:
         if row.created_at is None:
             row.created_at = _utcnow()
 
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            # Race: another transaction inserted the same primary key between
+            # our SELECT and INSERT. Roll back and retry by updating the
+            # existing row instead of inserting a new one.
+            db.rollback()
+            row = (
+                db.query(ChatSession)
+                .filter(ChatSession.user_id == user_id)
+                .filter(ChatSession.id == state["session_id"])
+                .first()
+            )
+            if row is None:
+                # If the row still doesn't exist, re-raise to surface the error
+                raise
+
+            row.qna = list(state.get("qna") or [])
+            row.partial_transcript = state.get("partial_transcript") or ""
+            row.profile_text = state.get("profile_text") or ""
+            row.custom_title = state.get("custom_title")
+            row.last_update = state.get("last_update") or _utcnow()
+            if row.created_at is None:
+                row.created_at = _utcnow()
+            db.commit()
 
     def delete(self, db: Session, *, user_id: str, session_id: str) -> bool:
         row = (
