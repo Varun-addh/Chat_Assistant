@@ -41,6 +41,9 @@ pip-wheel-metadata/
 # Application data (runtime-generated)
 data/
 
+# Documentation & generated files (PDFs, HTML exports, etc.)
+docs/
+
 # PDF files (binary files not allowed on Hugging Face)
 *.pdf
 
@@ -67,6 +70,12 @@ debug.log
 *.db
 *.sqlite
 *.sqlite3
+
+# Binary executables
+*.exe
+*.dll
+*.so
+*.dylib
 
 # IDEs
 .vscode/
