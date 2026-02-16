@@ -1,0 +1,105 @@
+# ---- Stability pins (stop pip backtracking hell) ----
+transformers==4.35.2
+# transformers==4.35.2 requires tokenizers>=0.14,<0.19; 0.13.3 also lacks cp311 wheels.
+tokenizers==0.15.2
+langchain-core==0.2.43
+langchain==0.2.17
+langsmith==0.1.147
+google-genai==1.58.0
+
+# Optional: graph-based agent orchestration (Practice Mode)
+langgraph
+
+
+# FastAPI + core deps
+fastapi
+uvicorn
+pydantic[email]
+pydantic-settings
+email-validator>=2.1.0
+httpx
+requests
+python-multipart
+redis>=5.0.0
+websockets
+orjson
+markdown
+playwright>=1.41.0
+pdfminer.six
+python-docx
+PyPDF2
+pymupdf
+edge-tts
+aiohttp
+beautifulsoup4
+lxml
+groq
+google-generativeai
+google-genai
+aiofiles
+
+# Authentication & Security
+PyJWT>=2.8.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+# passlib 1.7.x expects bcrypt.__about__.__version__ which was removed in newer bcrypt versions.
+# Pin bcrypt to a compatible release to avoid trapped warnings and hashing edge-case failures.
+bcrypt==4.0.1
+# Production error tracking
+sentry-sdk[fastapi]>=1.40.0
+
+# Database
+sqlalchemy>=2.0.0
+alembic>=1.12.0
+psycopg[binary]>=3.1.18
+
+# Embeddings (CPU)
+torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+sentence-transformers==2.2.2
+huggingface_hub==0.17.3
+
+# LangChain minimal
+langchain-community==0.2.6
+langchain-text-splitters==0.2.2
+
+
+# Vector DB
+qdrant-client==1.9.1
+
+# Reranking + BM25
+cohere
+rank-bm25
+
+# Additional dependencies for Docker builds and runtime
+starlette
+jinja2
+numpy
+scipy
+Pillow
+python-dotenv
+setuptools<81
+pytest
+pytest-asyncio>=0.23.0
+matplotlib
+networkx
+joblib
+scikit-learn
+sentencepiece
+
+# Practice Mode Dependencies
+# Local STT (faster-whisper) - compatible with Python 3.12
+faster-whisper>=1.0.0
+
+# Local TTS - Using pyttsx3 (cross-platform) and gTTS as alternatives
+pyttsx3>=2.90  # Offline TTS (Windows SAPI, macOS NSSpeechSynthesizer, Linux espeak)
+gtts>=2.5.0  # Google Text-to-Speech (requires internet but simple)
+pydub>=0.25.0  # Audio processing for TTS
+
+# Speech Analytics
+librosa>=0.10.0
+soundfile>=0.12.0
+audioread>=3.0.0
+anyio
+
+# Piper TTS (optional, alternative to Coqui)
+# piper-tts==1.2.0  # Uncomment if using Piper instead of Coqui
