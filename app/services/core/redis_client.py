@@ -10,36 +10,39 @@ Uses redis-py asyncio client (redis.asyncio).
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import asyncio
+from typing import Optional, TYPE_CHECKING
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from redis.asyncio import Redis as _RedisType
+
 try:
     import redis.asyncio as redis_async
-    from redis.asyncio import Redis
     from redis.exceptions import RedisError
 
     _REDIS_IMPORT_OK = True
 except Exception:  # pragma: no cover
     redis_async = None  # type: ignore[assignment]
-    Redis = object  # type: ignore[misc,assignment]
 
-    class RedisError(Exception):
+    class RedisError(Exception):  # type: ignore[no-redef]
         pass
 
     _REDIS_IMPORT_OK = False
 
 
-_redis: Optional["Redis"] = None
+_redis: Optional[_RedisType] = None
+_redis_lock = asyncio.Lock()
 
 
 def redis_enabled() -> bool:
     return bool(getattr(settings, "redis_url", None)) and _REDIS_IMPORT_OK
 
 
-async def get_redis() -> Optional["Redis"]:
+async def get_redis() -> Optional[_RedisType]:
     """Return a singleton Redis client if enabled, else None.
 
     Note: We do not ping on every call; failures are handled by callers.
@@ -51,7 +54,13 @@ async def get_redis() -> Optional["Redis"]:
     if not url or not _REDIS_IMPORT_OK:
         return None
 
-    if _redis is None:
+    if _redis is not None:
+        return _redis
+
+    async with _redis_lock:
+        # Double-check after acquiring lock
+        if _redis is not None:
+            return _redis
         try:
             _redis = redis_async.from_url(url, decode_responses=True)
         except Exception as e:

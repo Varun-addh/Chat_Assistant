@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AliasChoices, field_validator, model_validator
 from typing import List
 import secrets
+import logging
 import os
 import re
 from dotenv import load_dotenv
@@ -142,7 +143,7 @@ class Settings(BaseSettings):
 					"Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
 				)
 			# Dev/test convenience - warn about ephemeral secret
-			print("⚠️  WARNING: Using auto-generated JWT secret (dev only). Tokens will be invalid after restart.")
+			logging.warning("Using auto-generated JWT secret (dev only). Tokens will be invalid after restart.")
 			return secrets.token_urlsafe(32)
 		return v
 
@@ -156,7 +157,7 @@ class Settings(BaseSettings):
 					"COOKIE_SECRET must be explicitly set in production/staging. "
 					"Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
 				)
-			print("⚠️  WARNING: Using auto-generated cookie secret (dev only). Sessions will be invalid after restart.")
+			logging.warning("Using auto-generated cookie secret (dev only). Sessions will be invalid after restart.")
 			return secrets.token_urlsafe(32)
 		return v
 

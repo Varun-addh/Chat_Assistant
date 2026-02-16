@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query, Depends, Header, Request, UploadFile, File
 from typing import Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import logging
 
 from app.services.interview.mock_interview_service import (
@@ -39,7 +39,7 @@ class StartSessionRequest(BaseModel):
     user_id: str
     interview_type: InterviewType
     difficulty: DifficultyLevel
-    num_questions: int = 5
+    num_questions: int = Field(default=5, ge=1, le=30)
     topic: Optional[str] = None
     resume_context: Optional[Dict[str, Any]] = None
 
@@ -209,7 +209,7 @@ async def start_mock_interview(
         raise
     except Exception as e:
         logger.error(f"Failed to start session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/sessions/submit-answer", response_model=SubmitAnswerResponse)
@@ -309,7 +309,7 @@ async def submit_answer(
             "total": session.total_questions if session else 0,
             "percentage": round(
                 (session.current_question_index / session.total_questions * 100)
-                if session else 0
+                if session and session.total_questions > 0 else 0
             )
         }
         
@@ -390,7 +390,7 @@ async def submit_answer(
         raise
     except Exception as e:
         logger.error(f"Failed to submit answer: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/sessions/{session_id}")
@@ -416,6 +416,7 @@ async def get_session_status(
                 "total": session.total_questions,
                 "percentage": round(
                     (session.current_question_index / session.total_questions * 100)
+                    if session.total_questions > 0 else 0
                 )
             },
             "current_question": {
@@ -429,7 +430,7 @@ async def get_session_status(
         raise
     except Exception as e:
         logger.error(f"Failed to get session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/sessions/{session_id}/summary")
@@ -456,7 +457,7 @@ async def get_session_summary(
         raise
     except Exception as e:
         logger.error(f"Failed to get summary: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/sessions/{session_id}/end")
@@ -500,7 +501,7 @@ async def end_session(
         raise
     except Exception as e:
         logger.error(f"Failed to end session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/sessions/{session_id}")
@@ -541,7 +542,7 @@ async def delete_session(
         raise
     except Exception as e:
         logger.error(f"Failed to delete session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/history/{user_id}/sessions/{session_id}")
@@ -585,7 +586,7 @@ async def delete_user_session(
         raise
     except Exception as e:
         logger.error(f"Failed to delete user session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/history/{user_id}")
@@ -631,7 +632,7 @@ async def clear_user_history(
     
     except Exception as e:
         logger.error(f"Failed to clear user history: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/health")
@@ -706,7 +707,7 @@ async def get_hint(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to get hint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/sessions/{session_id}/progress")
@@ -750,7 +751,7 @@ async def get_progress(
         raise
     except Exception as e:
         logger.error(f"Failed to get progress: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/history/{user_id}")
@@ -904,4 +905,4 @@ async def get_user_history(
     
     except Exception as e:
         logger.error(f"Failed to get user history: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

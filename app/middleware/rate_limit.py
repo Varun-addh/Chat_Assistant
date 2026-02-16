@@ -117,8 +117,13 @@ class InMemoryRateLimiter:
     async def _cleanup_loop(self):
         """Remove old records periodically"""
         while True:
-            await asyncio.sleep(300)  # 5 minutes
-            await self._cleanup_old_records()
+            try:
+                await asyncio.sleep(300)  # 5 minutes
+                await self._cleanup_old_records()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.exception("Rate limiter cleanup error: %s", e)
     
     async def _cleanup_old_records(self):
         """Remove records older than 24 hours"""

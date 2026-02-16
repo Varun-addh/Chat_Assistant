@@ -142,8 +142,10 @@ def _extract_pdf_text(content: bytes) -> str:
     try:
         import fitz  # PyMuPDF
         doc = fitz.open(stream=content, filetype="pdf")
-        pages = [page.get_text() for page in doc]
-        doc.close()
+        try:
+            pages = [page.get_text() for page in doc]
+        finally:
+            doc.close()
         return "\n".join(pages)
     except ImportError:
         logger.debug("PyMuPDF not available, trying next extractor")

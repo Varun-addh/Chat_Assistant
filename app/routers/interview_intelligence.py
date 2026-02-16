@@ -1385,7 +1385,7 @@ async def search_with_verification(
         
     except Exception as e:
         logger.error(f"Enhanced search failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/search/enhanced", response_model=EnhancedSearchResponse)
@@ -1458,7 +1458,7 @@ async def search_with_verification_post(
             tips=[]
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/sources/stats")
 async def get_source_statistics():
@@ -1497,7 +1497,7 @@ async def get_source_statistics():
             },
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/companies")
@@ -1857,7 +1857,7 @@ async def ultra_production_search(
         }
     except Exception as e:
         logger.error(f"Ultra search failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/code/execute")
 async def execute_code(request: CodeExecutionRequest):
@@ -1871,7 +1871,7 @@ async def execute_code(request: CodeExecutionRequest):
         )
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/questions/{question_id}/vote")
@@ -1889,7 +1889,7 @@ async def vote_question(
         )
         return {"status": "ok", "message": "Vote recorded"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/features")

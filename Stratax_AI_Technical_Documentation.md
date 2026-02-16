@@ -135,6 +135,38 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 
 ## Recent Updates (Past Week)
 
+### Resume Parsing & Document Analysis (NEW)
+
+- Added **resume parser** (`app/services/core/resume_parser.py`) with LLM-based structured extraction from PDF/DOCX/TXT uploads.
+- Parsed resumes feed claim-based probing: interview questions target stated project claims, skills, and achievements.
+- Added **document analyzer** (`app/services/core/document_analyzer.py`) with ATS scoring, skills-gap analysis, career trajectory insights, and industry benchmarking at four analysis depths (Quick → Expert).
+- Automatic document type detection via configurable keyword heuristics.
+
+### Mirror Ontology, Progress Tracking & Dynamic Budget (NEW)
+
+- **Mirror Ontology Generator** (`app/services/chat/mirror_ontology.py`) — LLM-generated ontologies (primitives, senior signals, red flags) with two-layer cache (in-memory + Redis).
+- **Mirror Progress Comparison** (`app/services/chat/mirror_compare.py`) — cross-attempt diff of gaps closed, confidence delta, and red flags resolved.
+- **Dynamic Budget Engine** (`app/services/chat/dynamic_budget.py`) — adaptive per-request token budgeting replacing hardcoded limits, using intent × depth × user-tier multipliers.
+
+### Practice Mode Enhancements (NEW)
+
+- **Deterministic Scoring** (`app/services/practice/practice_scoring.py`) — rubric-based practice scoring without LLM.
+- **Adaptive Pressure** (`app/services/practice/adaptive_pressure.py`) — difficulty auto-adjustment based on running performance.
+- **Practice Progress & Learning** (`app/services/practice/practice_progress.py`, `practice_learning.py`) — cross-session progress tracking and learning-loop insights.
+- **Round Config Service** (`app/services/practice/round_config_service.py`) — centralized round selection logic.
+- **LangGraph Orchestration** (`app/services/practice/practice_mode_graph.py`) — optional graph-based practice flow (behind `ENABLE_LANGGRAPH_PRACTICE` flag).
+
+### Mock Interview Analytics (NEW)
+
+- Added `app/services/interview/mock_interview_analytics.py` for within-session trajectory computation (per-criterion deltas, direction detection).
+
+### Infrastructure: Redis, Sentry, Gemini Adapter (NEW)
+
+- **Redis client** (`app/services/core/redis_client.py`) — optional Redis for distributed caching and rate limiting.
+- **Sentry integration** (`app/services/core/sentry.py`) — automatic error tracking with `SENTRY_DSN`.
+- **Gemini adapter** (`app/services/llm/gemini_adapter.py`) — direct Gemini model adapter with content-safety mapping.
+- **Usage tracking** (`app/utils/usage_tracking.py`) — per-session token usage tracking.
+
 ### Response formatting & structural integrity (NEW)
 
 - Built a comprehensive **response post-processing pipeline** (`app/services/llm/response_postprocess.py`, ~1,750 lines) that sanitizes all LLM output before it reaches the UI.
@@ -238,6 +270,12 @@ FastAPI Application
 │   ├── Local STT Service (app/services/practice/local_stt_service.py)
 │   ├── Local TTS Service (app/services/practice/local_tts_service.py)
 │   ├── Semantic Deduplication (in adaptive_interviewer_agent.py)
+│   ├── Deterministic Scoring (app/services/practice/practice_scoring.py)
+│   ├── Adaptive Pressure (app/services/practice/adaptive_pressure.py)
+│   ├── Practice Progress (app/services/practice/practice_progress.py)
+│   ├── Practice Learning (app/services/practice/practice_learning.py)
+│   ├── Round Config (app/services/practice/round_config_service.py)
+│   ├── LangGraph Orchestration (app/services/practice/practice_mode_graph.py) [optional]
 │   └── Learning Loops (app/services/practice/learning_loops.py)
 │
 ├── Interview Intelligence (Optional)
@@ -250,8 +288,27 @@ FastAPI Application
 │
 ├── Mock Interview
 │   ├── Session Persistence (app/services/interview/mock_interview_service.py)
+│   ├── Session Analytics (app/services/interview/mock_interview_analytics.py)
 │   ├── Progressive Hints
 │   └── LLM Evaluation
+│
+├── Resume & Document Intelligence
+│   ├── Resume Parser (app/services/core/resume_parser.py)
+│   └── Document Analyzer (app/services/core/document_analyzer.py)
+│
+├── Mirror Mode
+│   ├── Ontology Generator (app/services/chat/mirror_ontology.py)
+│   └── Progress Comparison (app/services/chat/mirror_compare.py)
+│
+├── LLM Cost & Budget
+│   └── Dynamic Budget Engine (app/services/chat/dynamic_budget.py)
+│
+├── Infrastructure
+│   ├── Redis Client (app/services/core/redis_client.py)
+│   ├── Sentry Integration (app/utils/sentry.py)
+│   ├── Usage Tracking (app/utils/usage_tracking.py)
+│   ├── Email Sender (app/utils/email_sender.py)
+│   └── Gemini Adapter — lazy import proxy (app/services/chat/gemini_adapter.py)
 │
 ├── Code Evaluation
 │   ├── Static Analysis (app/services/core/code_evaluation_service.py)
@@ -633,6 +690,141 @@ Automatic system architecture diagram generation from codebase analysis with Mer
 - **Deployment View:** Infrastructure and hosting topology
 - **Sequence Diagram:** Request/response flows for key operations
 - **Data Flow:** Information movement through system layers
+
+---
+
+## 7. Resume Parsing & Claim-Based Interview Probing (NEW)
+
+### Purpose
+Extract structured data from uploaded resumes for privacy-safe, claim-based interview probing. Enables targeted questioning on specific project claims, achievements, and stated experience.
+
+### Key Responsibilities
+- **Multi-format support:** PDF, DOCX, plain text extraction
+- **LLM-based structured parsing:** Extracts skills, projects (with tech + claims), experience summary, role titles, education, achievements, years of experience, and primary domain
+- **Regex fallback:** Deterministic extraction when LLM is unavailable
+- **Privacy-safe design:** Raw file is deleted after extraction; only structured `ResumeParseResult` persists in-memory for the session duration
+
+### Architecture
+```
+Resume Upload (PDF/DOCX/TXT)
+    ↓
+[Text Extraction] → Raw text (max 6,000 chars for LLM)
+    ↓
+[LLM Structured Parsing] → JSON with skills, projects, claims
+    ↓ (fallback)
+[Regex Extraction] → Basic skills/education/experience
+    ↓
+ResumeParseResult → ResumeContext (Pydantic schema)
+    ↓
+Injected into Practice/Mock Interview prompts
+    ↓
+Claim-based follow-up questions
+```
+
+### Schema Extensions
+- `ResumeProject` — structured project with name, tech stack, and claims
+- `ResumeContext` — holds parsed resume data
+- `UserProfile.resume_context` — optional field for enriched sessions
+- `RoundSelectionRequest.resume_context` / `QuickStartRequest.resume_context` — enable resume-aware starts
+
+### Key File
+- `app/services/core/resume_parser.py` (~350 lines)
+
+---
+
+## 8. Document Analysis (NEW)
+
+### Purpose
+Multi-dimensional document analysis engine surpassing basic keyword matching — supports resumes, job descriptions, cover letters, and LinkedIn profiles.
+
+### Key Responsibilities
+- **ATS compatibility scoring** (0-100) with specific recommendations
+- **Industry benchmarking** and competitive positioning analysis
+- **Skills gap identification** with learning paths
+- **Career trajectory analysis** from work history patterns
+- **Formatting quality and readability scoring**
+
+### Analysis Depths
+| Depth | Time | Description |
+|-------|------|-------------|
+| Quick | ~30s | Overview only |
+| Standard | 1-2 min | Comprehensive analysis |
+| Deep | 3-5 min | Exhaustive with recommendations |
+| Expert | 5+ min | Industry expert-level assessment |
+
+### Document Type Detection
+Uses configurable keyword heuristics (`document_jd_keywords`, `document_resume_keywords`, `document_cover_letter_keywords` in `app/config.py`) for automatic document classification.
+
+### Key File
+- `app/services/core/document_analyzer.py` (~658 lines)
+
+---
+
+## 9. Mirror Ontology & Progress Tracking (NEW)
+
+### Purpose
+Powers the Mirror Mode comparison feature with LLM-driven ontology generation and cross-attempt progress tracking.
+
+### Mirror Ontology Generator
+For a given interview question, generates:
+- **Topic** — identified subject area
+- **Primitives** — core concepts expected in a good answer
+- **Senior signals** — indicators of senior-level understanding
+- **Red flags** — warning signs of poor understanding
+- **Likely follow-ups** — expected follow-up questions
+
+Uses a two-layer cache: in-memory TTL/LRU + optional Redis (via `app/services/core/redis_client.py`).
+
+### Mirror Progress Comparison
+`compute_mirror_progress()` computes the diff between successive mirror reports:
+- Gaps closed / new gaps
+- Confidence delta
+- New strengths
+- Red flags resolved / new red flags
+
+### Key Files
+- `app/services/chat/mirror_ontology.py` (~193 lines)
+- `app/services/chat/mirror_compare.py` (~137 lines)
+
+---
+
+## 10. Dynamic Budget Engine (NEW)
+
+### Purpose
+Adaptive token budget computation that replaces hardcoded token buckets. Controls LLM cost and response quality per-request.
+
+### Formula
+```
+tokens = token_per_budget_unit × intent_unit × depth_multiplier × length_scale × user_tier_multiplier
+```
+
+### Budget Multipliers
+| Dimension | Values |
+|-----------|--------|
+| Intent | general (1.0), system_design (2.0), coding (1.5), mirror (1.2), greeting (0.5) |
+| Depth | quick (0.6), standard (1.0), deep (1.6) |
+| User Tier | free (0.8), standard (1.0), pro (1.25), internal (1.5) |
+
+Result is clamped to configured ceilings. Singleton: `dynamic_budget_engine`.
+
+### Key File
+- `app/services/chat/dynamic_budget.py` (~80 lines)
+
+---
+
+## 11. Mock Interview Analytics (NEW)
+
+### Purpose
+Deterministic within-session trajectory computation for Mock Interview sessions.
+
+### Key Capabilities
+- **Per-criterion score tracking:** correctness, completeness, clarity, confidence, technical_depth
+- **Trajectory computation:** start/end/delta per criterion
+- **Direction detection:** Improving / Stable / Declining based on overall score delta
+- **Best improvement criterion:** identifies which skill improved most
+
+### Key File
+- `app/services/interview/mock_interview_analytics.py` (~151 lines)
 
 <div style="page-break-after: always;"></div>
 
@@ -1190,6 +1382,13 @@ See `docker-compose.yml` for the full configuration (volumes, restart policies, 
 | `KROKI_URL` | Diagram rendering service |
 | `QDRANT_URL` | Qdrant as a service (required for multi-worker scaling) |
 | `REDIS_URL` | Distributed rate limiting / cross-worker coordination |
+| `SENTRY_DSN` | Sentry error tracking endpoint |
+| `APP_VERSION` | Application version tag sent to Sentry |
+| `QDRANT_API_KEY` | API key for managed Qdrant Cloud |
+| `QDRANT_GRPC_PORT` | gRPC port for Qdrant (default: 6334) |
+| `QDRANT_PREFER_GRPC` | Use gRPC transport for Qdrant (default: true) |
+| `EDGE_TTS_VOICE` | Practice mode TTS voice name |
+| `EDGE_TTS_RATE` | Practice mode TTS speech rate |
 
 ### Feature Flags
 
@@ -1200,6 +1399,7 @@ ENABLE_CODE_EXECUTION=true
 ENABLE_QUERY_EXPANSION=false
 ENABLE_STREAMING=true
 ENABLE_PRACTICE_LEARNING=false
+ENABLE_LANGGRAPH_PRACTICE=false
 ```
 
 ### Demo-mode cost controls (optional)
@@ -1744,7 +1944,7 @@ curl http://localhost:7860/health
 ---
 
 ### Add a New Agent
-1. Create `app/services/my_agent.py`:
+1. Create `app/services/<subdirectory>/my_agent.py`:
    ```python
    class MyAgent:
        def __init__(self, config):
@@ -1889,8 +2089,8 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 
 ## Appendix D: Test Coverage
 
-**Test Files:** 67+ across `tests/` directory and root  
-**Test Count:** 153 passed, 12 skipped (as of February 2026)
+**Test Files:** 80+ across `tests/` directory and root  
+**Last verified:** February 2026
 
 Key test areas:
 - `tests/test_structural_integrity_validator.py` — Structural integrity validator (fences, emphasis, Mermaid, size)
@@ -1903,6 +2103,17 @@ Key test areas:
 - `tests/test_event_logging_question_flow.py` — Telemetry pipeline
 - `tests/test_difficulty_levels.py` — Practice difficulty adaptation
 - `tests/test_code_execution_endpoint.py` — Sandbox execution
+- `tests/test_resume_parser.py` — Resume parsing & claim extraction
+- `tests/test_mirror_ontology.py` — Mirror ontology generation & caching
+- `tests/test_mirror_compare.py` — Mirror cross-attempt progress diff
+- `tests/test_practice_scoring.py` — Deterministic practice scoring rubrics
+- `tests/test_adaptive_pressure.py` — Adaptive difficulty adjustment
+- `tests/test_dynamic_budget.py` — Token budget computation
+- `tests/test_mock_interview_analytics.py` — Mock interview trajectory
+- `tests/test_email_verification_and_password_reset.py` — Email auth flows
+- `tests/test_rate_limiting.py` — Tier-based rate limiting
+- `tests/test_domain_profile.py` — Domain profile detection
+- `tests/test_interview_intelligence_requires_user_key.py` — II BYOK enforcement
 
 *Full test suite in repository root.*
 

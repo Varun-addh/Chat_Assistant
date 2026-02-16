@@ -168,4 +168,4 @@ async def execute_code(payload: CodeExecutionIn, http_request: Request) -> CodeE
         raise
     except Exception as e:
         logger.error("Code execution failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

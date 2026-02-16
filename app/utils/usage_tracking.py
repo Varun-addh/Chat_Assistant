@@ -46,8 +46,10 @@ def track_api_usage(
                     existing_user = db.get(User, user_id)
                     if existing_user is None:
                         # Create a minimal placeholder user. Fill required fields with safe placeholders.
-                        placeholder_email = f"{user_id}@guest.invalid"
-                        placeholder_password = ""  # hashed_password required by schema; leave blank
+                        placeholder_email = f"{user_id}@noreply.stratax.internal"
+                        # Use an impossible-to-match hash so verify_password() always
+                        # returns False rather than crashing on an empty/invalid hash.
+                        placeholder_password = "!GUEST_STUB_NO_LOGIN!"
                         stub = User(
                             id=user_id,
                             email=placeholder_email,

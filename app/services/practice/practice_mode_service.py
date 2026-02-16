@@ -174,7 +174,7 @@ class PracticeModeService:
                 experience_years = user_profile.experience_years if user_profile else 3
                 # Get the base breakdown (sums to 18)
                 base_breakdown = RoundConfigService.get_full_interview_breakdown(experience_years)
-                base_total = sum(base_breakdown.values())
+                base_total = sum(base_breakdown.values()) or 1  # guard against empty/zero breakdown
                 
                 # Scale the breakdown to match the requested question_count
                 # Ensure we have at least 1 question per sub-round if possible

@@ -41,25 +41,29 @@
 The backend provides a FastAPI service for an “AI Interview Assistant” with:
 
 - **Q&A sessions** (create session, ask question, persist Q&A)
-  - `app/routers/questions.py`, `app/services/session_manager.py`
+  - `app/routers/questions.py`, `app/services/core/session_manager.py`
 - **Architecture/diagram generation** (Mermaid + sanitization + optional rendering)
-  - `app/routers/diagrams.py`, `app/services/architecture_generator.py`, `app/utils/story_contract.py`
+  - `app/routers/diagrams.py`, `app/services/architecture/architecture_generator.py`, `app/utils/story_contract.py`
 - **Code evaluation** (static signals + LLM critique)
-  - `app/routers/evaluate.py`, `app/services/code_evaluation_service.py`
+  - `app/routers/evaluate.py`, `app/services/core/code_evaluation_service.py`
 - **Interview Intelligence** (search/generation, vector DB via Qdrant, optional web/rerank/code-exec features)
-  - `app/routers/interview_intelligence.py`, `app/services/interview_intelligence_service.py`
-- **Mock interview sessions** (question sequences + LLM-based scoring)
-  - `app/routers/mock_interview.py`, `app/services/mock_interview_service.py`
-- **Practice Mode** (round-based interview practice + local STT/TTS + analytics/evaluation orchestration)
-  - `app/routers/practice_mode.py`, `app/services/practice_mode_service.py`, `app/services/local_stt_service.py`, `app/services/local_tts_service.py`
+  - `app/routers/interview_intelligence.py`, `app/services/interview/interview_intelligence_service.py`
+- **Mock interview sessions** (question sequences + LLM-based scoring + session trajectory analytics)
+  - `app/routers/mock_interview.py`, `app/services/interview/mock_interview_service.py`, `app/services/interview/mock_interview_analytics.py`
+- **Practice Mode** (round-based interview practice + local STT/TTS + analytics/evaluation orchestration + deterministic scoring)
+  - `app/routers/practice_mode.py`, `app/services/practice/practice_mode_service.py`, `app/services/practice/local_stt_service.py`, `app/services/practice/local_tts_service.py`, `app/services/practice/practice_scoring.py`
+- **Resume parsing + claim-based interview probing** (PDF/DOCX/TXT extraction → LLM-structured parsing → privacy-safe storage)
+  - `app/services/core/resume_parser.py`, `app/schemas.py` (`ResumeProject`, `ResumeContext`)
+- **Document Analysis** (ATS compatibility, industry benchmarking, skills gap identification, career trajectory)
+  - `app/services/core/document_analyzer.py`
 - **Telemetry + learning loops** (structured event stream + deterministic personalization hints)
-  - `app/models.py` (`EventRecord`), `app/utils/event_logging.py`, `app/services/learning_loops.py`
+  - `app/models.py` (`EventRecord`), `app/utils/event_logging.py`, `app/services/practice/learning_loops.py`
 - **Authentication + user profiles** (JWT login, optional Google OAuth, user-stored provider keys)
   - `app/routers/auth_routes.py`, `app/auth.py`, `app/models.py` (`User`)
 - **Rate limiting + demo-mode cost controls** (tier-based metering for expensive endpoints)
   - `app/middleware/rate_limit.py`, `app/models.py` (`UserTier`, `TIER_QUOTAS`), `app/config.py` (demo key pool flags)
 - **Real-time partial transcripts over WebSocket** (intentionally deferred; placeholder implementation)
-  - `app/routers/ws.py`, `app/services/stt_service.py`
+  - `app/routers/ws.py`, `app/services/practice/stt_service.py`
 
 ### Entry point and lifecycle
 
@@ -98,31 +102,31 @@ The application entrypoint is `app/main.py`.
 
 ### AI / LLM providers
 
-- **Groq SDK** (`groq.Groq`) — used in `app/services/llm_service.py`
-- **Google Generative AI** (`google.generativeai`) — used when available in `app/services/llm_service.py`
+- **Groq SDK** (`groq.Groq`) — used in `app/services/chat/llm_service.py`
+- **Google Generative AI** (`google.generativeai`) — used when available via lazy import proxy (`app/services/chat/gemini_adapter.py`)
 
-Provider choice is driven by `settings.llm_provider` (`app/config.py`), and the LLM service routes accordingly (`app/services/llm_service.py`).
+Provider choice is driven by `settings.llm_provider` (`app/config.py`), and the LLM service routes accordingly (`app/services/chat/llm_service.py`).
 
 ### Agents (Practice Mode)
 
-Practice Mode composes multiple “agent” classes (in `app/services/`) that wrap LLM calls and/or local signal processing:
+Practice Mode composes multiple “agent” classes (in `app/services/practice/`) that wrap LLM calls and/or local signal processing:
 
 - `InterviewerAgent` — question bank + question sequencing + micro-feedback; **optionally** uses Gemini directly via `google.generativeai` when available (`GEMINI_AVAILABLE`).
-  - `app/services/interviewer_agent.py`
+  - `app/services/practice/interviewer_agent.py`
 - `SpeechAnalyticsAgent` — delivery metrics extraction using audio DSP; **not** an LLM component.
-  - `app/services/speech_analytics_agent.py`
+  - `app/services/practice/speech_analytics_agent.py`
 - `AdaptiveInterviewerAgent` — LLM-driven “comprehensive answer evaluation” (JSON-mode) via the shared `llm_service`.
-  - `app/services/adaptive_interviewer_agent.py`
+  - `app/services/practice/adaptive_interviewer_agent.py`
 - `ConversationalAgent` — LLM-driven profile inference from natural language input via the shared `llm_service`.
-  - `app/services/conversational_agent.py`
+  - `app/services/practice/conversational_agent.py`
 - `EvaluationAgent` — end-of-interview coaching report generation (expects JSON) via the shared `llm_service`.
-  - `app/services/evaluation_agent.py`
+  - `app/services/practice/evaluation_agent.py`
 
 ### Retrieval / vector DB / search
 
-- **Qdrant local client** for vector storage (`QdrantClient(path=...)`) — `app/services/interview_intelligence_service.py`
-- **SentenceTransformers** embeddings (`SentenceTransformer`) — `app/services/interview_intelligence_service.py`
-- **LangChain Community** tooling (BM25 retriever, embeddings wrapper, Qdrant vectorstore, splitters) — `app/services/ai_native_enhancements.py`
+- **Qdrant local client** for vector storage (`QdrantClient(path=...)`) — `app/services/interview/interview_intelligence_service.py`
+- **SentenceTransformers** embeddings (`SentenceTransformer`) — `app/services/interview/interview_intelligence_service.py`
+- **LangChain Community** tooling (BM25 retriever, embeddings wrapper, Qdrant vectorstore, splitters) — `app/services/chat/ai_native_enhancements.py`
 - **aiohttp** used for HTTP calls (GitHub API, Serper, Cohere, code execution APIs) — `app/services/*`
 
 ### AI / ML / DSP libraries (from `requirements.txt`)
@@ -142,8 +146,16 @@ This project installs the following AI/ML/DSP-related libraries (not all are use
 
 ### Audio (Practice Mode)
 
-- **faster-whisper** (local STT) — `app/services/local_stt_service.py`
-- **pyttsx3** (offline TTS) + **gTTS** fallback — `app/services/local_tts_service.py`
+- **faster-whisper** (local STT) — `app/services/practice/local_stt_service.py`
+- **pyttsx3** (offline TTS) + **gTTS** fallback + **Edge TTS** (neural voice) — `app/services/practice/local_tts_service.py`
+
+### Caching / Cross-worker coordination
+
+- **Redis** (async via `redis.asyncio`) — `app/services/core/redis_client.py` — singleton client used for distributed rate limiting, mirror ontology caching, and cross-worker coordination. Fail-open design: callers degrade gracefully when Redis is unavailable.
+
+### Error Tracking
+
+- **Sentry SDK** — `app/utils/sentry.py` — production error tracking and performance monitoring with FastAPI, SQLAlchemy, and asyncio integrations. Auto-disabled in development/test environments.
 
 ### Containerization
 
@@ -273,7 +285,14 @@ See also (crypto helper used by auth + demo-mode key resolution): `app/utils/sec
 - Telemetry (EventRecord stream): `analytics_hmac_key`, `analytics_store_raw_text`, `analytics_text_preview_len`, `enable_event_logging`
 - STT (WebSocket): `stt_provider`
 - Practice mode toggles + audio config (`practice_mode_enabled`, `practice_*`)
+- Practice TTS engine selection: `practice_tts_engine` (`edge_tts` / `pyttsx3` / `gtts`), `practice_edge_tts_voice` (neural voice selection)
+- Practice LangGraph toggle: `enable_practice_mode_langgraph`
 - Architecture detection heuristics (`architecture_detection_*`, `architecture_complexity_signals`)
+- Document analysis keyword heuristics: `document_jd_keywords`, `document_resume_keywords`, `document_cover_letter_keywords`
+- Redis configuration: `redis_url`, `redis_key_prefix`, `redis_fail_open`, `redis_cache_ttl_seconds`
+- Error tracking: `sentry_dsn`, `app_version`
+- Gemini model (default updated to `models/gemini-3-flash-preview`): `gemini_model`
+- Qdrant managed instances: `qdrant_api_key`, `qdrant_collection_name`, `qdrant_url`
 
 Provider selection behavior note:
 
@@ -327,7 +346,7 @@ Rate limiting is implemented with an in-memory limiter by default, with an optio
 
 See: `app/middleware/rate_limit.py`, `app/models.py`.
 
-### 4.4 `app/services/session_manager.py` — Q&A session state + persistence
+### 4.4 `app/services/core/session_manager.py` — Q&A session state + persistence
 
 - `SessionManager` maintains per-user in-memory session cache and persists sessions to disk.
 - Storage location: `data/sessions/<user_id>/<session_id>.json`.
@@ -340,9 +359,9 @@ See also (persistence adapter):
 - `ChatSessionRepository` (`app/repositories/chat_sessions.py`) is used by `SessionManager` for file/DB-backed session persistence.
 - `HistoryTabRepository` (`app/repositories/history_tabs.py`) is used by `HistoryManager` for the History tab CRUD surface.
 
-See: `app/services/session_manager.py`.
+See: `app/services/core/session_manager.py`.
 
-### 4.5 `app/services/llm_service.py` — LLM routing + identity guard
+### 4.5 `app/services/chat/llm_service.py` — LLM routing + identity guard
 
 - Holds a large “forward prompt” (`CODE_FORWARD_PROMPT`) with formatting rules and identity/attribution rules.
 - Imports Groq SDK and Gemini SDK (Gemini import is optional; guarded).
@@ -361,7 +380,7 @@ See also (prompt assembly + post-processing):
 - `app/services/llm/identity.py` implements identity/attribution guard behavior.
 - `app/services/llm/intent_overrides.py` implements deterministic intent routing overrides.
 
-See: `app/services/llm_service.py`.
+See: `app/services/chat/llm_service.py`.
 
 ### 4.6 `app/routers/questions.py` — Q&A endpoints
 
@@ -380,21 +399,21 @@ Key endpoints (prefix `/api` via `app/main.py`):
 
 See: `app/routers/questions.py`.
 
-### 4.7 `app/routers/diagrams.py` + `app/services/architecture_generator.py` — diagram generation
+### 4.7 `app/routers/diagrams.py` + `app/services/architecture/architecture_generator.py` — diagram generation
 
 - Exposes endpoints to render Mermaid and generate architecture packages.
 - Uses Mermaid sanitization/repair utilities to strip CSS/HTML artifacts (file is large).
 - Uses `KROKI_URL` (via `os.getenv`) as a rendering backend when configured.
 - At least one endpoint requires `verify_api_key` (simple bearer auth) via FastAPI dependency injection.
 
-See: `app/routers/diagrams.py`, `app/services/architecture_generator.py`, `app/utils/security.py`.
+See: `app/routers/diagrams.py`, `app/services/architecture/architecture_generator.py`, `app/utils/security.py`.
 
-### 4.8 `app/routers/evaluate.py` + `app/services/code_evaluation_service.py`
+### 4.8 `app/routers/evaluate.py` + `app/services/core/code_evaluation_service.py`
 
 - `GET /api/evaluate/allowed` — determines whether evaluation is allowed using a classifier (prefers LLM-based classification when available).
 - `POST /api/evaluate` — runs static analysis and an LLM critique; caches results in-memory by a hash over session + context + code.
 
-See: `app/routers/evaluate.py`, `app/services/code_evaluation_service.py`.
+See: `app/routers/evaluate.py`, `app/services/core/code_evaluation_service.py`.
 
 ### 4.8.1 `app/routers/code_execution.py` — sandboxed code execution (LeetCode-style)
 
@@ -438,7 +457,7 @@ Rate limiting:
 - `/api/code/execute` is protected by demo-mode quotas and the global rate limiting/metering middleware.
 - See: `app/middleware/rate_limit.py`.
 
-### 4.9 `app/routers/interview_intelligence.py` + `app/services/interview_intelligence_service.py`
+### 4.9 `app/routers/interview_intelligence.py` + `app/services/interview/interview_intelligence_service.py`
 
 Interview Intelligence is **optional at startup** (disabled if `qdrant_client` is missing). When enabled:
 
@@ -462,17 +481,18 @@ Interview Intelligence is **optional at startup** (disabled if `qdrant_client` i
   - Streaming updates (`RealTimeSearchStream`)
   - Query expansion (`QueryExpansion`)
 
-See: `app/main.py`, `app/routers/interview_intelligence.py`, `app/services/interview_intelligence_service.py`, `app/services/ai_native_enhancements.py`.
+See: `app/main.py`, `app/routers/interview_intelligence.py`, `app/services/interview/interview_intelligence_service.py`, `app/services/chat/ai_native_enhancements.py`.
 
-### 4.10 `app/routers/mock_interview.py` + `app/services/mock_interview_service.py`
+### 4.10 `app/routers/mock_interview.py` + `app/services/interview/mock_interview_service.py`
 
 - Implements a mock interview workflow with sessions persisted to `data/sessions/mock_interview_sessions.json`.
 - Uses `llm_service.generate_answer(...)` to generate evaluations and hints.
 - Endpoints are under `/api/mock-interview`.
+- **Mock Interview Analytics** (`app/services/interview/mock_interview_analytics.py`): deterministic within-session trajectory computation — per-criterion score tracking (correctness, completeness, clarity, confidence, technical_depth), improvement delta analysis, and trajectory direction (Improving/Stable/Declining).
 
-See: `app/routers/mock_interview.py`, `app/services/mock_interview_service.py`.
+See: `app/routers/mock_interview.py`, `app/services/interview/mock_interview_service.py`, `app/services/interview/mock_interview_analytics.py`.
 
-### 4.11 Practice Mode: `app/routers/practice_mode.py` + `app/services/practice_mode_service.py`
+### 4.11 Practice Mode: `app/routers/practice_mode.py` + `app/services/practice/practice_mode_service.py`
 
 - Router is mounted at `/api/practice` (router itself sets `prefix="/api/practice"`).
 - Service orchestrates multiple agents, local STT/TTS, and evaluation.
@@ -481,23 +501,29 @@ See: `app/routers/mock_interview.py`, `app/services/mock_interview_service.py`.
   - Client initiates camera access; the backend only logs signals (no frames/audio by default)
   - Events are validated against an active practice `session_id` and logged into `EventRecord` as `practice_proctoring_*`
 - Concrete agent components (constructed inside `PracticeModeService`) include:
-  - `InterviewerAgent` (`app/services/interviewer_agent.py`)
-  - `AdaptiveInterviewerAgent` (`app/services/adaptive_interviewer_agent.py`)
-  - `ConversationalAgent` (`app/services/conversational_agent.py`)
-  - `EvaluationAgent` (`app/services/evaluation_agent.py`)
-  - Speech delivery metrics are computed via `SpeechAnalyticsAgent` (`app/services/speech_analytics_agent.py`).
+  - `InterviewerAgent` (`app/services/practice/interviewer_agent.py`)
+  - `AdaptiveInterviewerAgent` (`app/services/practice/adaptive_interviewer_agent.py`)
+  - `ConversationalAgent` (`app/services/practice/conversational_agent.py`)
+  - `EvaluationAgent` (`app/services/practice/evaluation_agent.py`)
+  - Speech delivery metrics are computed via `SpeechAnalyticsAgent` (`app/services/practice/speech_analytics_agent.py`).
+- **Deterministic Scoring** (`app/services/practice/practice_scoring.py`): stable, explainable scoring contract (no LLM required) producing overall score (0-100), dimension scores (correctness, delivery, clarity, structure), 'why' reasons, improvement plan, and a next-session plan.
+- **Adaptive Pressure** (`app/services/practice/adaptive_pressure.py`): deterministic supportive/balanced/challenging mode selection based on recent answer scores.
+- **Practice Progress** (`app/services/practice/practice_progress.py`): DB-backed persistence for completed attempts, progress summaries, and heatmap-friendly trend data.
+- **Practice Learning** (`app/services/practice/practice_learning.py`): per-session aggregate metrics, peer bucketing (WPM/filler rate), DB-backed learning insights.
+- **Round Configuration** (`app/services/practice/round_config_service.py`): maps real company interview processes to practice rounds with difficulty, categories, and timing.
+- Optional **LangGraph orchestration** (`app/services/practice/practice_mode_graph.py`): when `enable_practice_mode_langgraph=true` and `langgraph` is installed, provides graph-based practice flow orchestration. Falls back gracefully when unavailable.
 - Supports round-based interviews via `RoundConfigService` and `InterviewRound`.
 - Stores synthesized audio under `data/practice_audio` by default.
 
-See: `app/routers/practice_mode.py`, `app/services/practice_mode_service.py`, `app/services/local_stt_service.py`, `app/services/local_tts_service.py`, `app/config_practice_mode.py`.
+See: `app/routers/practice_mode.py`, `app/services/practice/practice_mode_service.py`, `app/services/practice/local_stt_service.py`, `app/services/practice/local_tts_service.py`, `app/config_practice_mode.py`.
 
-### 4.12 WebSocket STT: `app/routers/ws.py` + `app/services/stt_service.py`
+### 4.12 WebSocket STT: `app/routers/ws.py` + `app/services/practice/stt_service.py`
 
 - WebSocket endpoint: `GET ws://.../ws/stt/{session_id}`.
 - Requires API key only if `settings.api_key` is set, provided via `Sec-WebSocket-Protocol` header.
-- WebSocket STT is intentionally deferred; Practice Mode uses faster-whisper (production-ready). The `STTService` in `app/services/stt_service.py` currently yields placeholder tokens (`"..."` or `"(audio)"`) rather than real transcripts.
+- WebSocket STT is intentionally deferred; Practice Mode uses faster-whisper (production-ready). The `STTService` in `app/services/practice/stt_service.py` currently yields placeholder tokens (`"..."` or `"(audio)"`) rather than real transcripts.
 
-See: `app/routers/ws.py`, `app/utils/security.py`, `app/services/stt_service.py`.
+See: `app/routers/ws.py`, `app/utils/security.py`, `app/services/practice/stt_service.py`.
 
 ### 4.13 Telemetry & learning loops: `EventRecord` + `event_logging` + `learning_loops`
 
@@ -508,12 +534,164 @@ This repo includes a lightweight “data moat” foundation based on a structure
   - stable IDs for questions (`stable_question_id`) using SHA256 or **HMAC-SHA256** (when `analytics_hmac_key` is set)
   - safe-by-default storage (raw text is not stored unless explicitly enabled)
   - best-effort writes (event logging never blocks product flows)
-- `app/services/learning_loops.py` aggregates recent events into explainable, deterministic signals.
+- `app/services/practice/learning_loops.py` aggregates recent events into explainable, deterministic signals.
 - Practice Mode consumes these signals:
   - `GET /api/practice/insights` returns aggregated insights and a recommended focus list.
   - Practice start flows may merge those recommended focus areas into `UserProfile.interview_focus`.
 
-See: `app/models.py`, `app/utils/event_logging.py`, `app/services/learning_loops.py`, `app/routers/practice_mode.py`.
+See: `app/models.py`, `app/utils/event_logging.py`, `app/services/practice/learning_loops.py`, `app/routers/practice_mode.py`.
+
+### 4.14 Resume Parser: `app/services/core/resume_parser.py`
+
+Extracts structured JSON from uploaded resumes for claim-based interview probing. Privacy-safe: only the structured representation is stored, never the raw file.
+
+- **Input formats:** PDF, DOCX, plain text
+- **Pipeline:** Raw text extraction → LLM-based structured parsing → regex fallback if LLM is unavailable
+- **Output schema** (`ResumeParseResult`):
+  - `skills` — all technologies, frameworks, languages, and tools
+  - `projects` — name, tech stack, and quantifiable claims per project
+  - `experience_summary` — one-paragraph summary
+  - `role_titles` — ordered list of positions
+  - `education`, `achievements`, `years_of_experience`, `primary_domain`
+- **Schema extensions** (`app/schemas.py`):
+  - `ResumeProject` — Pydantic model for structured project data
+  - `ResumeContext` — Pydantic model holding parsed resume data
+  - `UserProfile.resume_context` — optional field for resume-enriched practice sessions
+  - `RoundSelectionRequest.resume_context` and `QuickStartRequest.resume_context` — enable resume-aware interview starts
+- **Usage:** When a resume is uploaded, structured claims are injected into practice session prompts (adaptive interviewer + follow-up drilling), enabling targeted probing on specific project claims and achievements.
+- **Privacy:** Raw file is deleted after extraction; only structured `ResumeParseResult` persists in-memory for the session.
+
+See: `app/services/core/resume_parser.py`, `app/schemas.py`.
+
+### 4.15 Document Analyzer: `app/services/core/document_analyzer.py`
+
+`WorldClassDocumentAnalyzer` — multi-dimensional document analysis service supporting resumes, job descriptions, cover letters, and LinkedIn profiles.
+
+- **Document type detection** using keyword heuristics (configurable via `document_jd_keywords`, `document_resume_keywords`, `document_cover_letter_keywords` in `app/config.py`)
+- **Analysis depths:** Quick (30s overview), Standard (1-2 min comprehensive), Deep (3-5 min exhaustive), Expert (5+ min industry-level)
+- **Capabilities:**
+  - ATS compatibility scoring (0-100)
+  - Industry benchmarking and competitive positioning
+  - Skills gap identification with learning paths
+  - Career trajectory analysis
+  - Formatting quality and readability scoring
+- **Output** (`AnalysisResult`): summary, key strengths, improvement areas, overall score, skills/experience/education breakdowns, immediate actions, strategic recommendations, confidence score
+
+See: `app/services/core/document_analyzer.py`, `app/config.py`.
+
+### 4.16 Mirror Ontology & Progress: `app/services/chat/mirror_ontology.py` + `mirror_compare.py`
+
+These two services power the Mirror Mode comparison feature:
+
+- **`MirrorOntologyGenerator`** (`mirror_ontology.py`): LLM-driven ontology generation for interview questions. For a given question, generates topic primitives, senior signals, red flags, and likely follow-ups. Uses a two-layer cache (in-memory TTL/LRU + optional Redis) for performance.
+- **`compute_mirror_progress()`** (`mirror_compare.py`): Computes the diff between successive mirror reports — gaps closed, new gaps, confidence delta, new strengths, and red flags resolved. Returns a `MirrorProgress` dataclass.
+
+See: `app/services/chat/mirror_ontology.py`, `app/services/chat/mirror_compare.py`.
+
+### 4.17 Dynamic Budget Engine: `app/services/chat/dynamic_budget.py`
+
+Adaptive token budget computation that replaces hardcoded token buckets:
+
+- **Formula:** `tokens = token_per_budget_unit × intent_unit × depth_multiplier × length_scale × user_tier_multiplier`
+- **Intent units:** general (1.0), system_design (2.0), coding (1.5), mirror (1.2), greeting (0.5), etc.
+- **Depth multipliers:** quick (0.6), standard (1.0), deep (1.6)
+- **User tier multipliers:** free (0.8), standard (1.0), pro (1.25), internal (1.5)
+- Result is clamped to configured ceilings (`groq_max_tokens_complex` or explicit `base_limit`)
+- Singleton instance: `dynamic_budget_engine`
+
+See: `app/services/chat/dynamic_budget.py`.
+
+### 4.18 Gemini Adapter: `app/services/chat/gemini_adapter.py`
+
+Lazy import proxy for the `google.generativeai` SDK:
+
+- `_LazyGenAIProxy` defers import until first use, so the app can start without Gemini installed
+- Suppresses deprecation `FutureWarning` on import to keep startup logs clean
+- Exposes a global `genai` object used across the codebase
+
+See: `app/services/chat/gemini_adapter.py`.
+
+### 4.19 Dynamic Interview Sources: `app/services/chat/dynamic_interview_sources.py`
+
+Interview question sourcing from multiple channels:
+
+- **GitHub search** (using `GITHUB_TOKEN` / `GITHUB_API_KEY`)
+- **Community verification** pipeline
+- **LLM generation** with structured output
+- Data models: `VerifiedQuestion`, `QuestionDomain`, `SourceType`
+
+See: `app/services/chat/dynamic_interview_sources.py`.
+
+### 4.20 Utility Services
+
+#### `app/utils/email_sender.py` — Email sending
+SMTP email utility for verification codes and password reset links. Used by the auth subsystem when `EMAIL_ENABLED=true`.
+
+#### `app/utils/sentry.py` — Error tracking
+Sentry SDK integration for production error tracking and performance monitoring. Includes FastAPI, SQLAlchemy, and asyncio integrations. Auto-disabled in development/test environments. Configurable via `SENTRY_DSN` and `APP_VERSION`.
+
+#### `app/utils/domain_profile.py` — System design domain detection
+`DomainProfile` provides deterministic domain hints for system design prompting (no LLM calls). Contains 15+ domain keyword maps (video streaming, payments, chat, rideshare, search, ads, etc.) with matched signals, critical flows, key metrics, failure modes, suggested components, and cloud provider hints.
+
+#### `app/utils/architecture_layers.py` — Architecture model definitions
+`LAYER_MODEL_BY_VIEW` defines 5-layer architecture models for all multi-view diagram types (REQUEST_FLOW, DATA_MODEL, DEPLOYMENT, OBSERVABILITY, etc.).
+
+#### `app/utils/text_extract.py` — PDF text extraction
+PDF text extraction utility with PyPDF2 primary and pdfminer fallback.
+
+#### `app/utils/usage_tracking.py` — API usage tracking
+`track_api_usage()` persists per-user (or per-guest) feature usage to the SQL DB for billing/analytics. Tracks feature name, endpoint, tokens consumed, estimated cost, and metadata. Creates stub guest user records for FK constraint satisfaction.
+
+### 4.21 Service Directory Layout
+
+The `app/services/` directory is organized into domain-focused subdirectories:
+
+```
+app/services/
+├── architecture/   # Architecture diagram generation
+│   └── architecture_generator.py
+├── chat/           # LLM service, mirror, demo keys, dynamic budget, Gemini adapter
+│   ├── llm_service.py
+│   ├── ai_native_enhancements.py
+│   ├── mirror_ontology.py
+│   ├── mirror_compare.py
+│   ├── dynamic_budget.py
+│   ├── gemini_adapter.py
+│   ├── dynamic_interview_sources.py
+│   └── demo_key_pool.py
+├── core/           # Session, history, code eval, Redis, resume parser, document analyzer
+│   ├── session_manager.py
+│   ├── history_manager.py
+│   ├── code_evaluation_service.py
+│   ├── redis_client.py
+│   ├── resume_parser.py
+│   └── document_analyzer.py
+├── interview/      # Interview intelligence, mock interview + analytics
+│   ├── interview_intelligence_service.py
+│   ├── mock_interview_service.py
+│   └── mock_interview_analytics.py
+├── llm/            # Response post-processing, identity guard, intent overrides, Groq models
+│   ├── response_postprocess.py
+│   ├── identity.py
+│   ├── intent_overrides.py
+│   └── groq_models.py
+└── practice/       # All practice mode agents + services + scoring + learning
+    ├── practice_mode_service.py
+    ├── interviewer_agent.py
+    ├── adaptive_interviewer_agent.py
+    ├── conversational_agent.py
+    ├── evaluation_agent.py
+    ├── speech_analytics_agent.py
+    ├── local_stt_service.py
+    ├── local_tts_service.py
+    ├── practice_scoring.py
+    ├── practice_progress.py
+    ├── practice_learning.py
+    ├── practice_mode_graph.py
+    ├── adaptive_pressure.py
+    ├── round_config_service.py
+    └── learning_loops.py
+```
 
 ## 5) Data Flow (request → response)
 
@@ -528,7 +706,7 @@ See: `app/models.py`, `app/utils/event_logging.py`, `app/services/learning_loops
 4. Router calls `llm_service` to generate an answer and updates the session with Q&A.
 5. Response is returned (and may be streamed depending on implementation; the router imports `StreamingResponse`).
 
-Evidence: `app/routers/questions.py`, `app/services/session_manager.py`, `app/middleware/auth.py`, `app/services/llm_service.py`.
+  - Evidence: `app/services/core/session_manager.py`, `app/middleware/auth.py`, `app/services/chat/llm_service.py`.
 
 ### 5.2 Code evaluation flow (`POST /api/evaluate`)
 
@@ -538,7 +716,7 @@ Evidence: `app/routers/questions.py`, `app/services/session_manager.py`, `app/mi
 4. `evaluate_code(...)` runs static analysis and asks the LLM for critique.
 5. Result is cached in-memory keyed by session + conversation context + code.
 
-Evidence: `app/routers/evaluate.py`, `app/services/code_evaluation_service.py`, `app/services/session_manager.py`.
+  - Evidence: `app/routers/evaluate.py`, `app/services/core/code_evaluation_service.py`, `app/services/core/session_manager.py`.
 
 ### 5.3 Practice Mode flow (audio upload)
 
@@ -551,7 +729,7 @@ Evidence: `app/routers/evaluate.py`, `app/services/code_evaluation_service.py`, 
   - End-of-interview coaching report (via `EvaluationAgent.evaluate_interview`, JSON-mode)
 5. Next question is gated behind an “acknowledge feedback” endpoint.
 
-Evidence: `app/routers/practice_mode.py`, `app/services/practice_mode_service.py`, `app/services/local_stt_service.py`.
+Evidence: `app/routers/practice_mode.py`, `app/services/practice/practice_mode_service.py`, `app/services/practice/local_stt_service.py`.
 
 ### 5.3.1 Practice Mode proctoring signals (event-only)
 
@@ -585,7 +763,7 @@ At a high level (file is large):
 - Optional web search via Serper, reranking via Cohere, code execution via Judge0/Piston may be used when enabled/configured.
 - Results can be persisted to local vector DB.
 
-Evidence: `app/services/interview_intelligence_service.py`, `app/services/ai_native_enhancements.py`.
+Evidence: `app/services/interview/interview_intelligence_service.py`, `app/services/chat/ai_native_enhancements.py`.
 
 ## 5.5 “AI-native enhancements” pipeline (Interview Intelligence)
 
@@ -597,7 +775,7 @@ When enabled via settings flags, Interview Intelligence can compose the followin
 - **Code execution** (`CodeExecutionSandbox`) — executes code through external sandboxes (Judge0 and/or Piston).
 - **Streaming updates** (`RealTimeSearchStream`) — provides a streaming search result pattern (referenced in router/service).
 
-Evidence: `app/services/ai_native_enhancements.py`, `app/services/interview_intelligence_service.py`.
+Evidence: `app/services/chat/ai_native_enhancements.py`, `app/services/interview/interview_intelligence_service.py`.
 
 ## 6) Configuration & Environment
 
@@ -624,13 +802,17 @@ See: `app/config.py`.
   - `ANALYTICS_STORE_RAW_TEXT` — if true, event payloads may include text previews (default false)
   - `ANALYTICS_TEXT_PREVIEW_LEN` — preview length when storing text previews (default 120)
   - `ENABLE_EVENT_LOGGING` — enable/disable structured event logging (default true)
-- Practice Mode: `PRACTICE_MODE_ENABLED`, `PRACTICE_AUDIO_STORAGE`, `PRACTICE_STT_MODEL_SIZE`, etc.
+- Practice Mode: `PRACTICE_MODE_ENABLED`, `PRACTICE_AUDIO_STORAGE`, `PRACTICE_STT_MODEL_SIZE`, `PRACTICE_TTS_ENGINE`, `PRACTICE_EDGE_TTS_VOICE`, `ENABLE_PRACTICE_MODE_LANGGRAPH`, etc.
 - `STT_PROVIDER` — affects WebSocket STT stub behavior.
+- Redis: `REDIS_URL` — enables distributed rate limiting + cross-worker caching. `REDIS_KEY_PREFIX`, `REDIS_FAIL_OPEN`, `REDIS_CACHE_TTL_SECONDS`.
+- Error tracking: `SENTRY_DSN`, `APP_VERSION` — enables Sentry SDK for production environments.
+- Document analysis: `DOCUMENT_JD_KEYWORDS`, `DOCUMENT_RESUME_KEYWORDS`, `DOCUMENT_COVER_LETTER_KEYWORDS`.
+- Qdrant managed: `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION_NAME`.
 
 ### Additional environment variables read directly
 
 - `KROKI_URL` — used by `app/routers/diagrams.py` (via `os.getenv`).
-- `GITHUB_TOKEN` / `GITHUB_API_KEY` — used by GitHub search logic in `app/services/dynamic_interview_sources.py`.
+- `GITHUB_TOKEN` / `GITHUB_API_KEY` — used by GitHub search logic in `app/services/chat/dynamic_interview_sources.py`.
 
 ### Demo mode key pool
 
@@ -685,7 +867,7 @@ See: `app/auth.py`, `app/routers/auth_routes.py`, `app/database.py`, `app/models
 - Session files are stored under `data/sessions/<user_id>/...`.
 - The `user_id` is derived from headers/auth/query/cookie and stored in `request.state`.
 
-See: `app/services/session_manager.py`, `app/middleware/auth.py`.
+See: `app/services/core/session_manager.py`, `app/middleware/auth.py`.
 
 ### CORS
 
@@ -712,7 +894,7 @@ See: `app/main.py`, `app/utils/audit.py`.
 1. **WebSocket STT is intentionally deferred**
   - The WebSocket STT service yields placeholder tokens rather than real transcripts.
   - Practice Mode uses faster-whisper via `LocalSTTService` (production-ready path).
-  - Evidence: `app/services/stt_service.py`, `app/services/local_stt_service.py`.
+  - Evidence: `app/services/practice/stt_service.py`, `app/services/practice/local_stt_service.py`.
 
 2. **Authorization header dual-use can be confusing**
   - The API supports both JWT auth and user-supplied LLM keys; some client flows use `Authorization: Bearer ...` for keys.
@@ -723,14 +905,14 @@ See: `app/main.py`, `app/utils/audit.py`.
 3. **Local Qdrant file-lock conflicts are anticipated**
    - Interview Intelligence initialization includes explicit handling for “already accessed by another instance”.
    - Lifespan startup attempts to share a single vector client across services to avoid lock conflicts.
-   - Evidence: `app/main.py`, `app/services/interview_intelligence_service.py`.
+   - Evidence: `app/main.py`, `app/services/interview/interview_intelligence_service.py`.
 
 4. **Mixed persistence models**
    - Sessions: per-session JSON files per user.
    - Mock interview: one JSON file containing many sessions.
    - History: JSONL-style storage (via HistoryManager).
    - Recommendation: document backup/rotation strategy and consider a unified persistence layer if multi-worker scaling is required.
-   - Evidence: `app/services/session_manager.py`, `app/services/mock_interview_service.py`, `app/services/history_manager.py`.
+  - Evidence: `app/services/core/session_manager.py`, `app/services/interview/mock_interview_service.py`, `app/services/core/history_manager.py`.
 
 6. **Interview Intelligence history duplicates (avoid double-save)**
   - Symptom: one search appearing twice in History.
@@ -897,8 +1079,10 @@ All request/response schemas are defined in `app/schemas.py`. Key models include
 - **Session Management**: `CreateSessionResponse`, `SessionList`, `SessionHistory`
 - **Q&A**: `QuestionIn`, `QuestionOut`, `AnswerStyle` (enum: SHORT, DETAILED)
 - **Practice Mode**: `UserProfile`, `PracticeInterviewQuestion`, `SpeechMetrics`, `MicroFeedback`, `EvaluationReport`, `InterviewRound`
+- **Resume Parsing**: `ResumeProject`, `ResumeContext` (linked to `UserProfile.resume_context`, `RoundSelectionRequest.resume_context`, `QuickStartRequest.resume_context`)
 - **Mock Interview**: `StartSessionResponse`, `SubmitAnswerResponse`
 - **Code Evaluation**: `EvaluationIn`, `EvaluationOut`
+- **Code Execution**: `CodeExecutionIn`, `CodeExecutionOut`
 - **Diagrams**: `ArchitecturePackageOut`
 
 ### Persistence Layer
@@ -917,8 +1101,9 @@ All request/response schemas are defined in `app/schemas.py`. Key models include
 
 ### Test Files in Repository
 
-The repository contains extensive test scripts:
+The repository contains extensive test scripts (in `tests/` and root):
 
+**Core Features:**
 - `test_acknowledge_feedback.py` — Practice mode feedback acknowledgment flow
 - `test_alias_validation.py` — Configuration alias validation
 - `test_architecture_dynamic_limits.py` — Architecture generation limits
@@ -938,14 +1123,49 @@ The repository contains extensive test scripts:
 - `test_tts_formatting.py` — TTS text normalization
 - `test_web_search_debug.py`, `test_web_search.py` — Web search integration
 
+**Resume & Document Analysis:**
+- `test_resume_based_interviewing.py` — Resume parsing, schema extensions, profile text guardrails, adaptive prompt resume injection, follow-up prompt resume injection, mock interview resume question generation
+
+**Practice Mode (Advanced):**
+- `test_practice_learning_outcomes_and_metrics.py` — Practice learning metrics persistence
+- `test_practice_proctoring_event_logging.py` — Proctoring event logging
+- `test_practice_session_media_and_proctoring.py` — Session media + proctoring
+- `test_practice_session_score_endpoint.py` — Session score endpoint
+- `test_practice_progress_endpoints.py` — Progress API endpoints
+- `test_practice_progress_persist.py` — Progress DB persistence
+- `test_practice_mode_followup_drilling.py` — Follow-up drilling logic
+- `test_practice_premium_signals.py` — Practice premium signals
+- `test_practice_mode_submit_code_endpoint.py` — Practice code submission
+
+**Mock Interview:**
+- `test_mock_interview_premium_signals.py` — Mock interview premium signals
+- `test_mock_interview_end_session_payload.py` — Mock interview end session
+- `test_mock_interview_question_filtering.py` — Mock interview question filtering
+
+**Mirror Mode:**
+- `test_mirror_compare.py` — Mirror progress comparison
+- `test_mirror_golden_cases.py` — Mirror golden test cases
+
+**Auth & Security:**
+- `test_auth_system.py` — JWT auth flows
+- `test_email_verification_and_password_reset.py` — Email verification + password reset
+- `test_secret_crypto.py` — Encryption helpers
+
+**Rate Limiting:**
+- `test_rate_limit_practice_progress_unmetered.py` — Rate limit exemptions for progress
+- `test_rate_limit_render_mermaid.py` — Rate limiting on diagram rendering
+
 ### Running Tests
 
 ```bash
 # Activate environment
 source .venv/bin/activate  # or .venv\Scripts\Activate.ps1 on Windows
 
+# Run full suite
+pytest -q
+
 # Run specific test
-python test_llm_services.py
+pytest tests/test_resume_based_interviewing.py -v
 
 # Run with pytest (if configured)
 pytest tests/ -v
@@ -960,6 +1180,14 @@ pytest tests/ -v
 - ✅ Company-specific question generation
 - ✅ Architecture detection and view recommendation
 - ✅ TTS text normalization for speech synthesis
+- ✅ Resume parsing + claim-based interview probing
+- ✅ Document analysis pipeline
+- ✅ Mirror mode ontology + progress comparison
+- ✅ Practice scoring + progress persistence
+- ✅ Mock interview analytics + session trajectory
+- ✅ Email verification + password reset
+- ✅ Rate limiting exemptions + enforcement
+- ✅ Proctoring event logging
 
 ## 13) Performance & Scalability
 
@@ -1187,12 +1415,12 @@ See: `app/config.py` for full list of configurable settings.
 **Day 2: Key Features**
 1. Explore `app/routers/questions.py` — core Q&A flow
 2. Explore `app/routers/practice_mode.py` — practice interview orchestration
-3. Review `app/services/llm_service.py` — LLM provider abstraction
+3. Review `app/services/chat/llm_service.py` — LLM provider abstraction
 
 **Day 3: Advanced Components**
-1. Study `app/services/interview_intelligence_service.py` — vector search + generation
-2. Study `app/services/practice_mode_service.py` — agent composition
-3. Review `app/services/ai_native_enhancements.py` — hybrid search, reranking, code execution
+1. Study `app/services/interview/interview_intelligence_service.py` — vector search + generation
+2. Study `app/services/practice/practice_mode_service.py` — agent composition
+3. Review `app/services/chat/ai_native_enhancements.py` — hybrid search, reranking, code execution
 
 **Day 4: Testing & Deployment**
 1. Run test suite: `python test_llm_services.py`, `python test_practice_mode.py`
@@ -1206,15 +1434,15 @@ See: `app/config.py` for full list of configurable settings.
 | `app/main.py` | App composition | ⭐ Low |
 | `app/config.py` | Settings & flags | ⭐ Low |
 | `app/schemas.py` | Data contracts | ⭐⭐ Medium |
-| `app/services/llm_service.py` | LLM abstraction | ⭐⭐ Medium |
-| `app/services/practice_mode_service.py` | Practice orchestration | ⭐⭐⭐ High |
-| `app/services/interview_intelligence_service.py` | Vector search + LLM generation | ⭐⭐⭐⭐ Very High |
+| `app/services/chat/llm_service.py` | LLM abstraction | ⭐⭐ Medium |
+| `app/services/practice/practice_mode_service.py` | Practice orchestration | ⭐⭐⭐ High |
+| `app/services/interview/interview_intelligence_service.py` | Vector search + LLM generation | ⭐⭐⭐⭐ Very High |
 
 ### Common Developer Tasks
 
 **Add a new LLM provider**:
 1. Add API key to `app/config.py` Settings
-2. Add provider logic to `app/services/llm_service.py`
+2. Add provider logic to `app/services/chat/llm_service.py`
 3. Update provider routing in `generate_answer()` / `generate_text()`
 
 **Add a new router**:
@@ -1224,7 +1452,7 @@ See: `app/config.py` for full list of configurable settings.
 4. Register in `app/main.py`: `app.include_router(my_router, prefix="/api/my-feature")`
 
 **Add a new agent**:
-1. Create `app/services/my_agent.py` with agent class
+1. Create `app/services/<subdirectory>/my_agent.py` with agent class
 2. Import and instantiate in orchestrating service (e.g., `practice_mode_service.py`)
 3. Call agent methods in service logic
 

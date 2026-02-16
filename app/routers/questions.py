@@ -1587,8 +1587,11 @@ async def upload_profile(
 	filename = (file.filename or "").lower()
 	content_type = (file.content_type or "").lower()
 
-	# Read bytes
+	# Read bytes (limit to 20 MB to prevent memory exhaustion)
+	MAX_PROFILE_UPLOAD_BYTES = 20 * 1024 * 1024
 	data = await file.read()
+	if len(data) > MAX_PROFILE_UPLOAD_BYTES:
+		raise HTTPException(status_code=413, detail=f"File too large. Maximum upload size is {MAX_PROFILE_UPLOAD_BYTES // (1024*1024)} MB.")
 
 	text: str = ""
 	try:

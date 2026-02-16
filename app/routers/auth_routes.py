@@ -6,6 +6,7 @@ Includes Google OAuth popup flow endpoints.
 from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from typing import Optional
 from urllib.parse import urlencode
 import secrets
@@ -42,16 +43,18 @@ def _google_redirect_uri() -> str:
     return f"{settings.backend_base_url.rstrip('/')}/auth/google/callback"
 
 
-def _ensure_unique_username(db: Session, base: str) -> str:
+def _ensure_unique_username(db: Session, base: str, max_attempts: int = 1000) -> str:
     """Generate a unique username derived from base."""
     candidate = base
     suffix = 0
-    while True:
+    while suffix < max_attempts:
         exists = db.query(User).filter(User.username == candidate).first()
         if not exists:
             return candidate
         suffix += 1
         candidate = f"{base}{suffix}"
+    # Fallback: use a UUID-based username
+    return f"{base}_{secrets.token_hex(4)}"
 
 
 class UserResponse(BaseModel):
@@ -517,6 +520,7 @@ async def google_login():
         value=state,
         httponly=True,
         samesite="lax",
+        secure=True,
     )
     return response
 
@@ -537,7 +541,7 @@ async def google_callback(
         return RedirectResponse(_frontend_callback_url({"error": "no_code"}))
 
     expected_state = request.cookies.get("oauth_state")
-    if not expected_state or not state or state != expected_state:
+    if not expected_state or not state or not hmac.compare_digest(state, expected_state):
         return RedirectResponse(_frontend_callback_url({"error": "invalid_state"}))
 
     if not settings.google_client_id or not settings.google_client_secret:
@@ -607,10 +611,19 @@ async def google_callback(
                 is_verified=verified_email,
                 google_id=google_id,
             )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            logger.info("✅ New Google user created: %s (ID: %s)", user.email, user.id)
+            try:
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                logger.info("✅ New Google user created: %s (ID: %s)", user.email, user.id)
+            except IntegrityError:
+                db.rollback()
+                # Race: another request created the user between our SELECT and INSERT.
+                user = db.query(User).filter(User.email == email).first()
+                if not user:
+                    user = db.query(User).filter(User.google_id == google_id).first()
+                if not user:
+                    return RedirectResponse(_frontend_callback_url({"error": "account_conflict"}))
         else:
             # Link google_id if missing
             if not getattr(user, "google_id", None):

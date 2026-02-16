@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Optional
 import hashlib
 import json
 import time
+import asyncio
 
 from app.config import settings
 from app.services.core.redis_client import get_redis, redis_enabled
@@ -36,6 +37,7 @@ class MirrorOntologyGenerator:
 		self._max_entries = max(16, int(max_entries))
 		# key -> (created_ts, MirrorOntology)
 		self._cache: "OrderedDict[str, tuple[float, MirrorOntology]]" = OrderedDict()
+		self._cache_lock = asyncio.Lock()
 
 	def _cache_key(self, question: str) -> str:
 		return " ".join((question or "").strip().lower().split())
@@ -142,14 +144,17 @@ class MirrorOntologyGenerator:
 	) -> MirrorOntology:
 		q = (question or "").strip()
 		key = self._cache_key(q)
-		cached = self._get_cached(key)
-		if cached is not None:
-			return cached
+
+		async with self._cache_lock:
+			cached = self._get_cached(key)
+			if cached is not None:
+				return cached
 
 		# L2: Redis (cross-worker + survives restart)
 		redis_cached = await self._get_cached_redis(key)
 		if redis_cached is not None:
-			self._set_cached(key, redis_cached)
+			async with self._cache_lock:
+				self._set_cached(key, redis_cached)
 			return redis_cached
 
 		system_prompt = (
@@ -187,6 +192,7 @@ class MirrorOntologyGenerator:
 			likely_followups=self._coerce_list(obj.get("likely_followups"), limit=6),
 		)
 
-		self._set_cached(key, ontology)
+		async with self._cache_lock:
+			self._set_cached(key, ontology)
 		await self._set_cached_redis(key, ontology)
 		return ontology

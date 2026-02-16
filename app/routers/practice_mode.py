@@ -4,6 +4,7 @@ FastAPI endpoints for realistic interview practice mode.
 """
 
 import logging
+import re
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Header, Query, Request
 from fastapi.responses import FileResponse
 from pathlib import Path
@@ -87,6 +88,11 @@ def _media_root_dir() -> Path:
     root = Path("data") / "practice_session_media"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+_SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.,\-]+$")
+MAX_MEDIA_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
 def _safe_ext_from_upload(upload: UploadFile) -> str:
@@ -325,6 +331,10 @@ async def upload_practice_session_media(
     if not practice_service:
         raise HTTPException(status_code=503, detail="Practice Mode is not initialized")
 
+    # Validate session_id to prevent path traversal
+    if not _SAFE_ID_RE.fullmatch(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+
     sess = practice_service.get_session(session_id)
     if not sess:
         raise HTTPException(status_code=404, detail="Practice session not found")
@@ -337,6 +347,8 @@ async def upload_practice_session_media(
 
     async with aiofiles.open(temp_disk_path, "wb") as f:
         content = await file.read()
+        if len(content) > MAX_MEDIA_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"File too large (max {MAX_MEDIA_UPLOAD_BYTES // (1024*1024)}MB)")
         await f.write(content)
 
     duration_int: Optional[int] = int(duration_seconds) if duration_seconds is not None else None
@@ -378,6 +390,8 @@ async def upload_practice_session_media(
 @router.get("/session/{session_id}/media/{media_id}")
 async def fetch_practice_session_media(session_id: str, media_id: int):
     """Serve a previously uploaded recording file."""
+    if not _SAFE_ID_RE.fullmatch(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
     with get_db_context() as db:
         row = (
             db.query(PracticeSessionMedia)
@@ -754,7 +768,7 @@ async def get_available_rounds(
         
     except Exception as e:
         logger.error(f"Error getting available rounds: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/insights")
@@ -1016,7 +1030,7 @@ async def start_round_based_interview(
         raise
     except Exception as e:
         logger.error(f"Error starting round-based interview: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/difficulty-preview")
@@ -1048,7 +1062,7 @@ async def get_difficulty_preview(experience_years: int):
         }
     except Exception as e:
         logger.error(f"Error getting difficulty preview: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/interview/quick-start", response_model=ConversationalResponse)
@@ -1163,7 +1177,7 @@ async def quick_start_interview(
         raise
     except Exception as e:
         logger.error(f"Error in Quick Start: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/interview/start", response_model=StartInterviewResponse)
@@ -1307,7 +1321,7 @@ async def start_interview(
         raise
     except Exception as e:
         logger.error(f"Error starting interview: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/interview/submit-answer", response_model=SubmitAnswerResponse)
@@ -1467,7 +1481,7 @@ async def submit_answer(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Error submitting answer: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/interview/submit_code", response_model=SubmitCodeResponse)
@@ -1625,7 +1639,7 @@ async def submit_code(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Error submitting code: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/interview/end-session")
@@ -1714,7 +1728,7 @@ async def end_practice_session(
         raise
     except Exception as e:
         logger.error(f"Error ending practice session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/interview/acknowledge-feedback", response_model=NextQuestionResponse)
@@ -1836,7 +1850,7 @@ async def acknowledge_feedback(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Error acknowledging feedback: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/interview/rate-feedback", response_model=PracticeFeedbackRatedResponse)
@@ -1943,7 +1957,7 @@ async def get_conversational_response(
         
     except Exception as e:
         logger.error(f"Error getting conversational response: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/audio/{filename}")
@@ -1961,7 +1975,9 @@ async def get_audio(filename: str):
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
         
-        # Get audio path
+        # Get audio path — validate filename to prevent path traversal
+        if not _SAFE_FILENAME_RE.fullmatch(filename):
+            raise HTTPException(status_code=400, detail="Invalid filename")
         audio_path = practice_service.get_audio_path(filename)
         
         # Check if file exists
@@ -1985,7 +2001,7 @@ async def get_audio(filename: str):
         raise
     except Exception as e:
         logger.error(f"Error serving audio: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/session/{session_id}")
@@ -2014,7 +2030,7 @@ async def get_session(session_id: str):
         raise
     except Exception as e:
         logger.error(f"Error getting session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/session/{session_id}")
@@ -2035,7 +2051,7 @@ async def delete_session(session_id: str):
         
     except Exception as e:
         logger.error(f"Error deleting session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/status")
@@ -2060,7 +2076,7 @@ async def get_status():
         
     except Exception as e:
         logger.error(f"Error getting status: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/session/{session_id}/evaluation")
@@ -2150,7 +2166,7 @@ async def get_evaluation(
         raise
     except Exception as e:
         logger.error(f"Error getting evaluation: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/session/{session_id}/score")
@@ -2236,7 +2252,7 @@ async def get_session_score(
         raise
     except Exception as e:
         logger.error(f"Error getting session score: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/cleanup")
@@ -2257,4 +2273,4 @@ async def cleanup_old_sessions(max_age_minutes: int = 60):
         
     except Exception as e:
         logger.error(f"Error during cleanup: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

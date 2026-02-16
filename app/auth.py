@@ -8,7 +8,7 @@ from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, Field
 
 from app.database import get_db
 from app.models import User, UserTier
@@ -30,7 +30,7 @@ security = HTTPBearer()
 # Pydantic models for requests/responses
 class UserRegister(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(..., min_length=8, max_length=128)
     full_name: Optional[str] = None
     username: Optional[str] = None
 
@@ -87,7 +87,7 @@ def decode_access_token(token: str) -> TokenData:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str = payload.get("sub")
         email: str = payload.get("email")
-        tier: str = payload.get("tier")
+        tier: str = payload.get("tier") or "free"
         
         if user_id is None or email is None:
             raise HTTPException(
@@ -138,9 +138,12 @@ async def get_current_user(
             detail="User account is inactive",
         )
     
-    # Update last login
-    user.last_login = datetime.now(timezone.utc)
-    db.commit()
+    # Update last login (best-effort; failures must not block the request)
+    try:
+        user.last_login = datetime.now(timezone.utc)
+        db.commit()
+    except Exception:
+        db.rollback()
     
     return user
 
@@ -192,9 +195,18 @@ def create_user(db: Session, email: str, password: str, full_name: Optional[str]
         created_at=datetime.now(timezone.utc),
     )
     
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    from sqlalchemy.exc import IntegrityError as _IntegrityError
+
+    try:
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except _IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email or username already registered",
+        )
     
     return user
 
@@ -206,7 +218,11 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
     if not user:
         return None
     
-    if not verify_password(password, user.hashed_password):
+    try:
+        if not verify_password(password, user.hashed_password):
+            return None
+    except Exception:
+        # Unrecognised hash (e.g. OAuth-only or guest stub) — treat as wrong password
         return None
     
     return user

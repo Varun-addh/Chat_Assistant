@@ -222,11 +222,12 @@ async def root(logs: str | None = Query(default=None)) -> JSONResponse:
     """
     return JSONResponse({"status": "ok", "logs": logs})
 
-# CORS Middleware
+# CORS Middleware — uses settings.cors_allow_origins (env: CORS_ALLOW_ORIGINS)
+_cors_credentials = "*" not in settings.cors_allow_origins  # credentials incompatible with wildcard
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=settings.cors_allow_origins,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],

@@ -139,7 +139,7 @@ async def get_history(
     
     except Exception as e:
         logger.error(f"Failed to get history: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/{tab_id}", response_model=HistoryTabResponse)
@@ -179,7 +179,7 @@ async def get_history_tab(request: Request, tab_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get tab {tab_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 
@@ -227,7 +227,7 @@ async def save_to_history(request: Request, payload: SaveHistoryRequest):
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to save to history: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.put("/{tab_id}")
@@ -270,7 +270,7 @@ async def update_history_tab(
         raise
     except Exception as e:
         logger.error(f"Failed to update tab {tab_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/{tab_id}")
@@ -299,7 +299,7 @@ async def delete_history_tab(request: Request, tab_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to delete tab {tab_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/")
@@ -322,7 +322,7 @@ async def delete_all_history(request: Request):
     
     except Exception as e:
         logger.error(f"Failed to delete all tabs: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/search/query")
@@ -363,7 +363,7 @@ async def search_history(
     
     except Exception as e:
         logger.error(f"History search failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/stats/overview", response_model=HistoryStatsResponse)
@@ -388,7 +388,7 @@ async def get_history_stats(request: Request):
     
     except Exception as e:
         logger.error(f"Failed to get stats: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 from fastapi import Path
@@ -428,7 +428,7 @@ async def export_history(
     
     except Exception as e:
         logger.error(f"Export failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/debug/raw")

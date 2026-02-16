@@ -1,5 +1,6 @@
 import json
 import uuid
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -13,6 +14,10 @@ from app.database import get_db_context
 from app.repositories.history_tabs import HistoryTabRepository
 
 logger = logging.getLogger(__name__)
+
+
+# Regex for safe identifiers — blocks path traversal via user_id
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
 # Data directory
@@ -87,6 +92,8 @@ class HistoryManager:
     """
     
     def __init__(self, user_id: str = "default"):
+        if not _SAFE_ID_RE.fullmatch(user_id):
+            raise ValueError(f"Invalid user_id: {user_id!r}")
         self.user_id = user_id
         self.history_file = HISTORY_DIR / f"{user_id}_history.jsonl"
         self.backup_file = HISTORY_DIR / f"{user_id}_history.backup.jsonl"
@@ -202,9 +209,13 @@ class HistoryManager:
                     if not line:
                         continue
                     
-                    data = json.loads(line)
-                    tab = HistoryTab.from_dict(data)
-                    self._tabs[tab.tab_id] = tab
+                    try:
+                        data = json.loads(line)
+                        tab = HistoryTab.from_dict(data)
+                        self._tabs[tab.tab_id] = tab
+                    except (json.JSONDecodeError, KeyError) as line_err:
+                        logger.warning(f"Skipping invalid backup line: {line_err}")
+                        continue
             
             logger.info(f"Restored {len(self._tabs)} tabs from backup")
             

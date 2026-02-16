@@ -6,6 +6,8 @@ import uuid
 import asyncio
 import json
 import os
+import re
+import threading
 from pathlib import Path
 import time
 import logging
@@ -32,9 +34,20 @@ class SessionState:
 	custom_title: Optional[str] = None
 
 
+# Regex for safe identifiers (alphanumeric, hyphens, underscores)
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _validate_id(value: str, label: str) -> str:
+	"""Validate that an id contains only safe characters (no path traversal)."""
+	if not value or not _SAFE_ID_RE.fullmatch(value):
+		raise ValueError(f"Invalid {label}: {value!r}")
+	return value
+
+
 class SessionManager:
 	def __init__(self, user_id: str = "default") -> None:
-		self.user_id = user_id
+		self.user_id = _validate_id(user_id, "user_id")
 		self._sessions: Dict[str, SessionState] = {}
 		self._lock = asyncio.Lock()
 		self._repo = ChatSessionRepository()
@@ -75,6 +88,7 @@ class SessionManager:
 			return state
 
 	def _session_path(self, session_id: str) -> Path:
+		_validate_id(session_id, "session_id")
 		return self._data_dir / f"{session_id}.json"
 
 	def _serialize(self, state: SessionState) -> dict:
@@ -480,8 +494,10 @@ class SessionManager:
 
 # Cache managers per user to avoid frequent reloading
 _user_managers: Dict[str, SessionManager] = {}
+_user_managers_lock = threading.Lock()
 
 def get_session_manager(user_id: str = "default") -> SessionManager:
-	if user_id not in _user_managers:
-		_user_managers[user_id] = SessionManager(user_id)
-	return _user_managers[user_id]
+	with _user_managers_lock:
+		if user_id not in _user_managers:
+			_user_managers[user_id] = SessionManager(user_id)
+		return _user_managers[user_id]
