@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.prompts.policies import (
 	ACCURACY_AND_CALIBRATION,
+	APP_KNOWLEDGE,
 	DEPTH_BUDGET,
     ALGO_DIAGRAM,
     BASE_PERSONA,
@@ -14,6 +15,7 @@ from app.prompts.policies import (
     DB_SCHEMA_DIAGRAM,
     DIAGRAMS_GENERAL,
     IDENTITY_AND_ATTRIBUTION,
+	INTERVIEW_COACH,
 	OUTPUT_HYGIENE,
 	RESPONSE_CONTRACT,
     COPILOT_SYSTEM,
@@ -63,9 +65,11 @@ def build_default_system_prompt(
         COPILOT_SYSTEM,
         PROMPT_INJECTION_RESISTANCE,
         COPILOT_INTERVIEW_MODE,
+        INTERVIEW_COACH,
         RESPONSE_TEMPLATE,
         OUTPUT_GUARDS,
         BASE_PERSONA,
+        APP_KNOWLEDGE,
         IDENTITY_AND_ATTRIBUTION,
         ABUSE_BOUNDARIES,
         UX_CONVERSATION,
