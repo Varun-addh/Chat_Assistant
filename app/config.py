@@ -38,9 +38,12 @@ class Settings(BaseSettings):
 
 	# Product Identity (used in assistant responses)
 	app_name: str = "Stratax AI"
-	app_developer_name: str = "Varun Bikkumalla"
+	# IMPORTANT: Do not hard-code ownership/employment/affiliation claims.
+	# If you want public attribution, set these explicitly via environment variables.
+	app_developer_name: str = ""
 	app_developer_attribution: str = (
-		"Stratax AI is powered by advanced language models and engineered by Varun Bikkumalla (sole developer)."
+		"Stratax AI is an interview preparation assistant. For information about its development or ownership, "
+		"please refer to official documentation."
 	)
 
 	# Server

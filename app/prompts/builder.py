@@ -7,6 +7,7 @@ from app.prompts.policies import (
 	DEPTH_BUDGET,
     ALGO_DIAGRAM,
     BASE_PERSONA,
+    ABUSE_BOUNDARIES,
     BEHAVIORAL_STAR,
     CODE_QUALITY,
     CONCEPT_QUALITY,
@@ -66,6 +67,7 @@ def build_default_system_prompt(
         OUTPUT_GUARDS,
         BASE_PERSONA,
         IDENTITY_AND_ATTRIBUTION,
+        ABUSE_BOUNDARIES,
         UX_CONVERSATION,
         OUTPUT_HYGIENE,
         RESPONSE_CONTRACT,
@@ -78,6 +80,7 @@ def build_default_system_prompt(
         modules = [
             BASE_PERSONA,
             IDENTITY_AND_ATTRIBUTION,
+            ABUSE_BOUNDARIES,
             OUTPUT_HYGIENE,
             ACCURACY_AND_CALIBRATION,
             MIRROR_MODE,

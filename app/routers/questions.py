@@ -41,6 +41,7 @@ from app.utils.mermaid_sanitizer import MermaidSanitizer
 from app.database import get_db_context
 from app.utils.usage_tracking import track_api_usage, track_session
 from app.utils.event_logging import track_event
+from app.utils.abuse_guard import classify_abuse
 
 logger = logging.getLogger(__name__)
 
@@ -521,6 +522,93 @@ async def submit_question(
 					original_question = last_qna.question
 					logger.info(f"📝 Retrieved original question from history: {original_question[:100]}")
 					payload.question = original_question
+
+	# Abuse/defamation guard (deterministic, reputation safety).
+	# After repeated abusive turns, we disengage and require respectful re-try.
+	abuse = classify_abuse(
+		payload.question,
+		app_name=getattr(settings, "app_name", "") or "",
+		developer_name=getattr(settings, "app_developer_name", "") or "",
+	)
+	prior_strikes = int(getattr(state, "abuse_strikes", 0) or 0)
+	if abuse.is_abusive:
+		strikes = prior_strikes + 1
+		await manager.set_abuse_strikes(payload.session_id, strikes)
+		if getattr(settings, "enable_event_logging", True):
+			try:
+				with get_db_context() as db:
+					track_event(
+						db,
+						user_id=user_id,
+						session_id=payload.session_id,
+						event_type="chat_abuse_guard",
+						question_text=payload.question,
+						extra={"strikes": strikes, "reason": abuse.reason, "stream": bool(payload.stream)},
+					)
+			except Exception:
+				pass
+
+		locked_out = strikes >= 3
+		guard = "abuse_lockout" if locked_out else "abuse"
+		response.headers["X-Stratax-Guard"] = guard
+		response.headers["X-Stratax-App"] = getattr(settings, "app_name", "Stratax AI")
+		response.headers["X-Stratax-Chat-Mode"] = "answer"
+
+		boundary = (
+			"I can’t continue this conversation while it remains abusive or defamatory. "
+			"If you’d like help with interview preparation, please rephrase respectfully and tell me the role and topic."
+			if locked_out
+			else "I’m here to help with interview preparation, but I can’t engage in abusive or defamatory conversations. "
+			"If you’d like interview help, tell me the role and the topic you want to practice."
+		)
+
+		if payload.stream:
+			async def _abuse_event_gen():
+				safe = boundary.replace("\n", "\ndata: ")
+				yield f"data: {safe}\n\n"
+				await auditor.log(
+					{
+						"type": "qna",
+						"session_id": payload.session_id,
+						"question": payload.question,
+						"answer": boundary,
+						"saved_to_history": False,
+						"guard": guard,
+						"abuse_strikes": strikes,
+					}
+				)
+				yield "event: end\n\n"
+			return StreamingResponse(
+				_abuse_event_gen(),
+				media_type="text/event-stream",
+				headers={
+					"X-Stratax-Guard": guard,
+					"X-Stratax-App": getattr(settings, "app_name", "Stratax AI"),
+					"X-Stratax-Chat-Mode": "answer",
+					"X-Stratax-Session-Id": payload.session_id,
+					**(
+						{"X-Stratax-Session-Recovered": "1", "X-Stratax-Old-Session-Id": recovered_from_session_id}
+						if recovered_from_session_id and recovered_from_session_id != payload.session_id
+						else {}
+					),
+				},
+			)
+
+		await auditor.log(
+			{
+				"type": "qna",
+				"session_id": payload.session_id,
+				"question": payload.question,
+				"answer": boundary,
+				"saved_to_history": False,
+				"guard": guard,
+				"abuse_strikes": strikes,
+			}
+		)
+		return AnswerOut(answer=boundary, session_id=payload.session_id, mode="answer", created_at=utcnow(), truncated=False)
+	elif prior_strikes:
+		# Reset strike counter once the user resumes normal conversation.
+		await manager.set_abuse_strikes(payload.session_id, 0)
 
 	# Deterministic identity/developer attribution answers (never call an LLM)
 	# This is a belt-and-suspenders guard in addition to the LLMService short-circuit.
