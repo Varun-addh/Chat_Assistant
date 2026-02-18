@@ -1810,7 +1810,9 @@ async def get_session_chat(session_id: str, request: Request, response: Response
 		if user is None:
 			# Backward compatibility: earlier builds stored guest sessions under "guest_unknown".
 			# After introducing stable guest IDs or client-provided IDs, old tabs may still
-			# reference a legacy session_id. Try legacy first, then auto-create.
+			# reference a legacy session_id. Try legacy first, then return 404.
+			# IMPORTANT: Do NOT silently create an empty session here — that would cause a
+			# clicked previous session to appear blank and mix with the current session.
 			if user_id != "guest_unknown":
 				legacy = get_session_manager("guest_unknown")
 				legacy_state = await legacy.get(session_id)
@@ -1822,11 +1824,18 @@ async def get_session_chat(session_id: str, request: Request, response: Response
 					response.headers["X-Stratax-Session-Legacy-Migrated"] = "1"
 					state = legacy_state
 				else:
-					state = await manager.ensure_session(session_id)
-					response.headers["X-Stratax-Session-AutoCreated"] = "1"
+					# Session truly not found — return 404 so the frontend can handle it
+					# cleanly (e.g., show empty state or redirect to new session).
+					raise HTTPException(
+						status_code=404,
+						detail="Session not found.",
+					)
 			else:
-				state = await manager.ensure_session(session_id)
-				response.headers["X-Stratax-Session-AutoCreated"] = "1"
+				# Session truly not found — return 404.
+				raise HTTPException(
+					status_code=404,
+					detail="Session not found.",
+			)
 		else:
 			# For authenticated users, keep strict behavior to avoid silent session-spam,
 			# but do NOT bubble KeyError (would become a 500).

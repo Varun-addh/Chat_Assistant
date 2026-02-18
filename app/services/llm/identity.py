@@ -60,8 +60,8 @@ def identity_response_text(settings, question: str) -> str:
 
 	def _attribution_fallback() -> str:
 		return (
-			f"{app_name} is an interview preparation assistant application. "
-			"For information about its development, ownership, or affiliations, please refer to official documentation."
+			f"{app_name} is an independently developed platform. For official information about its development or ownership, "
+			f"please refer to {app_name}’s documentation or website."
 		)
 
 	def _base() -> str:
@@ -83,9 +83,21 @@ def identity_response_text(settings, question: str) -> str:
 	# Founder/creator/owner questions should be deterministic and concise.
 	# This branch is intentionally distinct from the generic identity branch so the UI
 	# doesn't show identical answers for different user intents.
-	if any(w in q for w in ["founder", "creator", "owner", "built", "made", "developed"]):
+	if any(w in q for w in ["founder", "creator", "owner", "built", "made", "developed", "develop"]):
 		app_targets = app_name_targets(settings)
+		# Only treat as product attribution when the user is clearly referring to the app/this application.
+		# Do NOT match generic identity questions like "who are you?".
 		if any(t in q for t in app_targets) or "this app" in q or "this application" in q:
+			if not developer:
+				return _attribution_fallback()
+			return (
+				f"{app_name} is an interview-prep assistant application built and maintained by {developer}. "
+				"It helps candidates practice smarter, get structured feedback, and track progress."
+			)
+
+		# Also handle direct assistant-addressed phrasing (e.g., "who developed you") without
+		# accidentally catching "who are you".
+		if "you" in q and ("develop" in q or "created" in q or "built" in q or "made" in q or "founder" in q or "owner" in q):
 			if not developer:
 				return _attribution_fallback()
 			return (

@@ -42,8 +42,8 @@ class Settings(BaseSettings):
 	# If you want public attribution, set these explicitly via environment variables.
 	app_developer_name: str = ""
 	app_developer_attribution: str = (
-		"Stratax AI is an interview preparation assistant. For information about its development or ownership, "
-		"please refer to official documentation."
+		"Stratax AI is an independently developed platform. For official information about its development or ownership, "
+		"please refer to Stratax AI’s documentation or website."
 	)
 
 	# Server
