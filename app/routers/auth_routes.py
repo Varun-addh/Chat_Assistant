@@ -11,6 +11,7 @@ from typing import Optional
 from urllib.parse import urlencode
 import secrets
 import httpx
+import time
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -30,6 +31,25 @@ import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+# ---------------------------------------------------------------------------
+# Server-side OAuth state store (replaces cookies which fail behind HF proxy)
+# ---------------------------------------------------------------------------
+_OAUTH_STATE_TTL = 600  # 10 minutes
+_oauth_states: dict[str, float] = {}
+
+
+def _store_oauth_state(state: str) -> None:
+    now = time.time()
+    # prune expired entries
+    for k in [k for k, v in _oauth_states.items() if v < now]:
+        _oauth_states.pop(k, None)
+    _oauth_states[state] = now + _OAUTH_STATE_TTL
+
+
+def _consume_oauth_state(state: str) -> bool:
+    expiry = _oauth_states.pop(state, None)
+    return expiry is not None and time.time() <= expiry
 
 
 def _frontend_callback_url(params: dict) -> str:
@@ -512,17 +532,10 @@ async def google_login():
         "state": state,
     }
 
+    _store_oauth_state(state)
+
     url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(query)
-    response = RedirectResponse(url=url, status_code=302)
-    # Store state in an httpOnly cookie to protect against CSRF.
-    response.set_cookie(
-        key="oauth_state",
-        value=state,
-        httponly=True,
-        samesite="lax",
-        secure=True,
-    )
-    return response
+    return RedirectResponse(url=url, status_code=302)
 
 
 @router.get("/google/callback")
@@ -540,8 +553,8 @@ async def google_callback(
     if not code:
         return RedirectResponse(_frontend_callback_url({"error": "no_code"}))
 
-    expected_state = request.cookies.get("oauth_state")
-    if not expected_state or not state or not hmac.compare_digest(state, expected_state):
+    if not state or not _consume_oauth_state(state):
+        logger.warning("OAuth state mismatch – state=%s, known=%d", state, len(_oauth_states))
         return RedirectResponse(_frontend_callback_url({"error": "invalid_state"}))
 
     if not settings.google_client_id or not settings.google_client_secret:
@@ -642,10 +655,7 @@ async def google_callback(
             "full_name": user.full_name or "",
             "tier": user.tier,
         }
-        response = RedirectResponse(_frontend_callback_url(params))
-        # Clear state cookie
-        response.delete_cookie("oauth_state")
-        return response
+        return RedirectResponse(_frontend_callback_url(params))
 
     except Exception as e:
         logger.error("Google OAuth callback failed: %s", e, exc_info=True)
