@@ -1,15 +1,19 @@
-from fastapi import APIRouter, HTTPException, Query, Depends, Header
-from typing import Optional
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query, Depends, Header, Request, UploadFile, File
+from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field
 import logging
 
-from app.services.mock_interview_service import (
+from app.services.interview.mock_interview_service import (
     InterviewType,
     DifficultyLevel,
     UserAnswer,
     InterviewSession,
     EvaluationResult,
 )
+from app.schemas import ResumeContext
+
+from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
+from app.utils.demo_mode import resolve_effective_api_key
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -18,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Dependency to get the mock interview service
 def get_mock_service():
     """Dependency to ensure mock service is available"""
-    from app.services.mock_interview_service import mock_interview_service
+    from app.services.interview.mock_interview_service import mock_interview_service
     
     if not mock_interview_service:
         logger.error("Mock interview service not available - check main.py lifespan initialization")
@@ -35,8 +39,9 @@ class StartSessionRequest(BaseModel):
     user_id: str
     interview_type: InterviewType
     difficulty: DifficultyLevel
-    num_questions: int = 5
+    num_questions: int = Field(default=5, ge=1, le=30)
     topic: Optional[str] = None
+    resume_context: Optional[Dict[str, Any]] = None
 
 
 class StartSessionResponse(BaseModel):
@@ -58,38 +63,127 @@ class SubmitAnswerRequest(BaseModel):
 
 class SubmitAnswerResponse(BaseModel):
     evaluation: dict
+    evaluation_trace: Optional[dict] = None
+    trajectory: Optional[dict] = None
     next_question: Optional[dict] = None
     is_last_question: bool
     progress: dict
 
 
+# ── Resume Upload for Mock Interview ─────────────────────────────────────
+
+@router.post("/upload-resume")
+async def upload_resume_for_mock_interview(
+    file: UploadFile = File(...),
+    http_request: Request = None,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
+    """
+    📄 Upload resume for resume-based mock interview.
+    
+    Returns structured resume_context to pass into /sessions/start request body.
+    """
+    try:
+        from app.services.core.resume_parser import parse_resume
+        from pathlib import Path
+
+        allowed = {".txt", ".md", ".pdf", ".docx"}
+        ext = Path(file.filename).suffix.lower() if file.filename else ""
+        if ext not in allowed:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(allowed))}")
+
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        if len(content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+
+        # Resolve API key
+        groq_key = x_api_key
+        gemini_key = x_gemini_key
+        if not groq_key and authorization and authorization.startswith("Bearer "):
+            bearer_value = authorization.split(" ", 1)[1].strip()
+            if bearer_value.count(".") != 2:
+                groq_key = bearer_value
+        api_key = gemini_key if gemini_key else groq_key
+        if not api_key:
+            from app.config import settings
+            if settings.require_user_api_key:
+                raise HTTPException(status_code=401, detail="No active API key.")
+            api_key = (settings.groq_api_key if settings.llm_provider != "gemini" else settings.gemini_api_key) or settings.groq_api_key
+
+        result = await parse_resume(content, file.filename, api_key=api_key)
+        return {
+            "status": "ok",
+            "resume_context": result.to_dict(),
+            "message": "Pass resume_context in /sessions/start to enable resume-based mock interviews.",
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Mock interview resume upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Resume parsing failed: {str(e)}")
+
+
 @router.post("/sessions/start", response_model=StartSessionResponse)
 async def start_mock_interview(
     request: StartSessionRequest,
-    service = Depends(get_mock_service)
+    http_request: Request,
+    service = Depends(get_mock_service),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """
     Start a new mock interview session
-    
-    **Example Request:**
-    ```json
-    {
-        "user_id": "user123",
-        "interview_type": "coding",
-        "difficulty": "medium",
-        "num_questions": 5,
-        "topic": "python"
-    }
-    ```
     """
     try:
+        # Resolve key + user type using the shared demo utilities.
+        # IMPORTANT: Demo traffic must use Groq (cost-capped) and should not
+        # accidentally pick up an invalid GEMINI_API_KEY in hosted environments.
+        user_type, api_key, needs_key = resolve_effective_api_key(
+            http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+        )
+
+        from app.config import settings
+        if user_type == "demo":
+            # In demo, force Groq. If demo pool is disabled (local dev), fall back
+            # to GROQ_API_KEY. Never fall back to Gemini for demo.
+            if not api_key:
+                api_key = settings.groq_api_key
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
+        else:
+            if needs_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
+
+        # Demo-mode clamp: mock interview demo is capped to 1 question.
+        effective_num_questions = request.num_questions
+        if user_type == "demo":
+            effective_num_questions = 1
+
         # Start session
         session = await service.start_session(
             user_id=request.user_id,
             interview_type=request.interview_type,
             difficulty=request.difficulty,
-            num_questions=request.num_questions,
-            topic=request.topic
+            num_questions=effective_num_questions,
+            topic=request.topic,
+            api_key=api_key,
+            resume_context=request.resume_context,
         )
         
         # Get first question
@@ -115,15 +209,17 @@ async def start_mock_interview(
         raise
     except Exception as e:
         logger.error(f"Failed to start session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/sessions/submit-answer", response_model=SubmitAnswerResponse)
 async def submit_answer(
     request: SubmitAnswerRequest,
+    http_request: Request,
     service = Depends(get_mock_service),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    authorization: Optional[str] = Header(None)
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """
     Submit answer and get AI evaluation
@@ -148,10 +244,28 @@ async def submit_answer(
     - Next question (if available)
     """
     try:
-        # Extract API key from headers
-        api_key = x_api_key
-        if not api_key and authorization and authorization.startswith("Bearer "):
-            api_key = authorization.removeprefix("Bearer ")
+        user_type, api_key, needs_key = resolve_effective_api_key(
+            http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+        )
+
+        from app.config import settings
+        if user_type == "demo":
+            if not api_key:
+                api_key = settings.groq_api_key
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
+        else:
+            if needs_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
 
         # Create UserAnswer object
         answer = UserAnswer(
@@ -195,10 +309,26 @@ async def submit_answer(
             "total": session.total_questions if session else 0,
             "percentage": round(
                 (session.current_question_index / session.total_questions * 100)
-                if session else 0
+                if session and session.total_questions > 0 else 0
             )
         }
         
+        # Premium (post-hoc only): deterministic trajectory + aggregation trace.
+        evaluation_trace = None
+        trajectory = None
+        try:
+            from app.services.interview.mock_interview_analytics import (
+                build_mock_evaluation_trace,
+                compute_mock_session_trajectory,
+            )
+
+            if session is not None:
+                trajectory = compute_mock_session_trajectory(session=session)
+                evaluation_trace = build_mock_evaluation_trace(session=session)
+        except Exception:
+            evaluation_trace = None
+            trajectory = None
+
         return SubmitAnswerResponse(
             evaluation={
                 "overall_score": evaluation.overall_score,
@@ -247,6 +377,8 @@ async def submit_answer(
                 "recommended_resources": evaluation.recommended_resources,
                 "key_takeaways": evaluation.key_takeaways
             },
+            evaluation_trace=evaluation_trace,
+            trajectory=trajectory,
             next_question=next_question,
             is_last_question=is_last,
             progress=progress
@@ -258,7 +390,7 @@ async def submit_answer(
         raise
     except Exception as e:
         logger.error(f"Failed to submit answer: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/sessions/{session_id}")
@@ -284,6 +416,7 @@ async def get_session_status(
                 "total": session.total_questions,
                 "percentage": round(
                     (session.current_question_index / session.total_questions * 100)
+                    if session.total_questions > 0 else 0
                 )
             },
             "current_question": {
@@ -297,7 +430,7 @@ async def get_session_status(
         raise
     except Exception as e:
         logger.error(f"Failed to get session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/sessions/{session_id}/summary")
@@ -324,7 +457,7 @@ async def get_session_summary(
         raise
     except Exception as e:
         logger.error(f"Failed to get summary: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/sessions/{session_id}/end")
@@ -332,13 +465,34 @@ async def end_session(
     session_id: str,
     service = Depends(get_mock_service)
 ):
-    """End interview session and get final summary"""
+    """
+    End interview session and get final summary.
+
+    Users can call this at any point – even before all questions have been
+    answered – to gracefully terminate the interview early.
+
+    **Response includes:**
+    - `status`: always `"completed"`
+    - `ended_early`: `true` when the user ends before answering every question
+    - `questions_answered` / `questions_skipped`: counts
+    - `evaluations[]`: per-question feedback **with `model_answer`** and `user_answer`
+    - `skipped_questions[]`: questions that were not reached
+    - Full summary statistics (scores, timing, trajectory, etc.)
+    """
     try:
         summary = await service.end_session(session_id)
-        
+
+        # Provide both shapes:
+        # - Flat fields (what many UIs expect)
+        # - Nested `summary` (older clients / debugging)
+        flat: dict = {}
+        if isinstance(summary, dict):
+            flat.update(summary)
+
         return {
             "status": "completed",
-            "summary": summary
+            **flat,
+            "summary": summary,
         }
     
     except ValueError as e:
@@ -347,7 +501,7 @@ async def end_session(
         raise
     except Exception as e:
         logger.error(f"Failed to end session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/sessions/{session_id}")
@@ -388,7 +542,7 @@ async def delete_session(
         raise
     except Exception as e:
         logger.error(f"Failed to delete session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/history/{user_id}/sessions/{session_id}")
@@ -432,7 +586,7 @@ async def delete_user_session(
         raise
     except Exception as e:
         logger.error(f"Failed to delete user session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/history/{user_id}")
@@ -478,14 +632,14 @@ async def clear_user_history(
     
     except Exception as e:
         logger.error(f"Failed to clear user history: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/health")
 async def health_check():
     """Check if mock interview service is available"""
     try:
-        from app.services.mock_interview_service import mock_interview_service
+        from app.services.interview.mock_interview_service import mock_interview_service
         
         return {
             "status": "healthy" if mock_interview_service else "unavailable",
@@ -553,7 +707,7 @@ async def get_hint(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to get hint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/sessions/{session_id}/progress")
@@ -597,7 +751,7 @@ async def get_progress(
         raise
     except Exception as e:
         logger.error(f"Failed to get progress: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/history/{user_id}")
@@ -751,4 +905,4 @@ async def get_user_history(
     
     except Exception as e:
         logger.error(f"Failed to get user history: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

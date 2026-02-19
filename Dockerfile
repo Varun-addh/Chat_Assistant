@@ -1,18 +1,18 @@
-# Optimized for deployment
-FROM python:3.12-slim
+FROM python:3.11-slim
 
-# Avoid .pyc files, ensure clean logs
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
     curl \
+    ffmpeg \
+    espeak-ng \
+    libsndfile1 \
     pkg-config \
     libxml2-dev \
     libxslt-dev \
@@ -20,38 +20,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first
-COPY requirements.txt /app/requirements.txt
+# Upgrade pip early
+RUN pip install --upgrade pip setuptools wheel
 
-# Install dependencies using cache
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r /app/requirements.txt
+# -------- CRITICAL LAYER CACHING --------
+# Install heavy ML deps first
+RUN pip install \
+    torch==2.2.2 \
+    torchvision==0.17.2 \
+    --index-url https://download.pytorch.org/whl/cpu
 
-# Copy project files
-COPY . /app
+# Copy and install rest
+COPY requirements.txt .
+RUN pip install -r requirements.txt
 
-# Ensure data directories exist and have correct permissions for appuser.
-# We create all potential subdirectories used by services to avoid PermissionDenied on mkdir.
-RUN mkdir -p /app/data/history \
-             /app/data/models \
-             /app/data/curated \
-             /app/data/vector_db \
-             /app/data/interview_intelligence_v2 \
-             /app/data/qdrant \
-    && chmod -R 777 /app/data
+# Safety net: ensure critical runtime deps are present (HF build caches can be tricky).
+RUN pip install --no-cache-dir email-validator \
+    && python -c "import email_validator; import jwt; print('deps ok')"
 
-# Create and use non-root user for security (Hugging Face requires UID 1000)
-RUN useradd -m -u 1000 user
-RUN chown -R user:user /app
+# Copy application
+COPY . .
+
+# Runtime folders & permissions
+RUN mkdir -p /app/data/{history,models,curated,vector_db,interview_intelligence_v2,qdrant} \
+    && useradd -m -u 1000 user \
+    && chown -R user:user /app
+
 USER user
 ENV PATH="/home/user/.local/bin:$PATH"
 
 EXPOSE 7860
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:7860/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=300s --retries=5 \
+  CMD curl -f http://localhost:7860/health || exit 1
 
-# Production server command
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]
+ENV UVICORN_WORKERS=1
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 7860 --workers ${UVICORN_WORKERS}"]

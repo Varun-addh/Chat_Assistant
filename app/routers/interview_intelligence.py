@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, Query, Header
-from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Query, Header, Request
+from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 import logging
 import asyncio
@@ -11,14 +11,36 @@ from app.schemas import (
     SearchQuestionsResponse,
     InterviewSearchRequest,
 )
-from app.services.interview_intelligence_service import interview_intelligence_service, enhanced_interview_service
 from app.utils.audit import auditor
 
-from app.services.interview_intelligence_service import ultra_production_service
-from app.services.history_manager import default_history_manager
+from app.services.core.history_manager import default_history_manager
 from fastapi import WebSocket, WebSocketDisconnect
 import time
 from app.config import settings
+from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
+
+# NOTE: app.services.interview_intelligence_service imports heavy ML dependencies.
+# To keep router import fast (especially in tests), we lazily load the service singletons.
+interview_intelligence_service = None
+enhanced_interview_service = None
+ultra_production_service = None
+
+
+def _ensure_intelligence_services_loaded() -> None:
+    global interview_intelligence_service, enhanced_interview_service, ultra_production_service
+    if (
+        interview_intelligence_service is None
+        or enhanced_interview_service is None
+        or ultra_production_service is None
+    ):
+        from app.services.interview.interview_intelligence_service import (
+            interview_intelligence_service as _interview_intelligence_service,
+            enhanced_interview_service as _enhanced_interview_service,
+            ultra_production_service as _ultra_production_service,
+        )
+        interview_intelligence_service = _interview_intelligence_service
+        enhanced_interview_service = _enhanced_interview_service
+        ultra_production_service = _ultra_production_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -375,6 +397,35 @@ def _detect_language_from_code(line: str) -> str:
     # Default to Python (most common in data science/ML)
     return 'python'
 
+
+def _unescape_common_whitespace_sequences(text: str) -> str:
+    """Convert common escaped whitespace sequences into real whitespace.
+
+    Some upstream providers return code/explanations with literal "\\n" and "\\t"
+    characters instead of actual newlines/tabs. That breaks markdown rendering.
+
+    Heuristic: only unescape when the string contains escaped newlines but no real
+    newlines (i.e., it looks like a single-line payload).
+    """
+
+    s = text or ""
+    if not s:
+        return s
+
+    # Only convert when it appears to be an escaped single-line blob.
+    if "\\n" in s and "\n" not in s:
+        # Handle common variants first
+        s = s.replace("\\r\\n", "\n")
+        s = s.replace("\\n", "\n")
+        # Occasionally strings contain escaped carriage returns too
+        s = s.replace("\\r", "")
+
+    # Convert tabs only when there are now real newlines (typical code formatting)
+    if "\\t" in s and "\t" not in s and "\n" in s:
+        s = s.replace("\\t", "\t")
+
+    return s
+
 def format_coding_answer_for_interview_tab(
     answer: str,
     code_solution: Optional[str],
@@ -389,10 +440,11 @@ def format_coding_answer_for_interview_tab(
     """
     if not is_coding:
         # For non-coding questions, still apply auto-formatting for any code examples
-        formatted = auto_format_code_blocks(answer or "")
+        formatted = auto_format_code_blocks(_unescape_common_whitespace_sequences(answer or ""))
         return formatted
     
-    text = (answer or "").strip()
+    text = _unescape_common_whitespace_sequences((answer or "").strip())
+    code_solution = _unescape_common_whitespace_sequences((code_solution or "").strip()) or None
     if not text and not code_solution:
         return ""
     
@@ -771,9 +823,12 @@ async def _search_and_build_response(
     query: str,
     limit: int,
     refresh: bool = False,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    save_to_history: bool = True,
+    request: Optional[Any] = None  # FastAPI Request object for user context
 ) -> SearchQuestionsResponse:
     """Helper to search and format response"""
+    _ensure_intelligence_services_loaded()
     results = await interview_intelligence_service.search_questions(
         query,
         limit=limit,
@@ -812,26 +867,14 @@ async def _search_and_build_response(
         "refresh": refresh,
     })
 
-    # SAVE TO HISTORY: Ensure search is persisted for the history sidebar
-    try:
-        from app.services.history_manager import default_history_manager
-        await default_history_manager.initialize()
-        
-        # Convert Pydantic objects to dicts for storage
-        history_questions = [q.dict() for q in question_objects]
-        
-        tab_id = await default_history_manager.save_search(
-            query=query,
-            questions=history_questions,
-            metadata={
-                "search_type": "standard",
-                "refresh": refresh,
-                "count": len(history_questions)
-            }
+    # HISTORY SAVE: Disabled here to prevent duplicates.
+    # The frontend now controls history save via POST /api/history/ after receiving results.
+    # This gives the UI full control and avoids double-saving.
+    if save_to_history and len(question_objects) > 0:
+        logger.debug(
+            f"⏭️ Skipping backend auto-save for Interview Intelligence (frontend will save via /api/history/): query='{query}'"
         )
-        logger.info(f"💾 Standard search saved to history: tab_id={tab_id}")
-    except Exception as e:
-        logger.error(f"Failed to save standard search to history: {e}")
+
 
     return SearchQuestionsResponse(
         query=query,
@@ -847,6 +890,7 @@ async def get_topics():
     Returns topics that have been generated or curated in the system.
     """
     try:
+        _ensure_intelligence_services_loaded()
         topics = await interview_intelligence_service.get_all_topics()
         return TopicListResponse(topics=topics)
     except Exception as e:
@@ -858,19 +902,54 @@ async def get_topics():
 
 @router.get("/questions/{topic}", response_model=InterviewQuestionsResponse)
 async def get_questions_by_topic(
+    request: Request,
     topic: str,
-
     limit: int = Query(default=50, ge=1, le=100),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """Get interview questions for a specific topic."""
-    api_key = x_api_key
-    if not api_key and authorization:
-        if authorization.startswith("Bearer "):
-            api_key = authorization.split(" ")[1]
+    # API key selection (Bridge Settings / BYOK)
+    # Accept any non-empty bridge header key as "provided" (don't over-validate
+    # key shapes here; tests and future providers may not match known prefixes).
+    def _clean(v: Optional[str]) -> Optional[str]:
+        t = (v or "").strip()
+        if not t:
+            return None
+        if t.lower() in {"null", "undefined", "none"}:
+            return None
+        return t
+
+    x_api_key = _clean(x_api_key)
+    x_gemini_key = _clean(x_gemini_key)
+    provided_key = x_gemini_key or x_api_key
+    # Authorization may be a JWT; only accept it as a provider key via strict parsing.
+    auth_key = extract_user_provided_api_key(
+        request,
+        x_api_key=None,
+        x_gemini_key=None,
+        authorization=authorization,
+    )
+    user_key = provided_key or auth_key
+    if settings.require_user_api_key and not user_key:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "API key required for Interview Intelligence. "
+                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
+                "or Authorization: Bearer <key>."
+            ),
+        )
+
+    api_key = user_key
+
+    # Fallback to server keys only when BYOK is not required.
+    if not api_key:
+        api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
+        _ensure_intelligence_services_loaded()
         questions = await interview_intelligence_service.get_questions_by_topic(
             topic,
             limit=limit,
@@ -926,6 +1005,7 @@ async def get_questions_by_topic(
 
 @router.get("/search", response_model=SearchQuestionsResponse)
 async def search_questions(
+    request: Request,  # For user context
     q: str = Query(
         ...,
         description="Search query (e.g., 'python coding questions', 'system design for netflix')"
@@ -940,7 +1020,12 @@ async def search_questions(
         default=False,
         description="Generate fresh questions instead of using cache"
     ),
+    save_to_history: bool = Query(
+        default=True,
+        description="Save this search to history (set to false to prevent duplicates)"
+    ),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """
@@ -973,13 +1058,84 @@ async def search_questions(
             detail="Search query cannot be empty"
         )
     
-    api_key = x_api_key
-    if not api_key and authorization:
-        if authorization.startswith("Bearer "):
-            api_key = authorization.split(" ")[1]
+    # API Key selection (Bridge Settings / BYOK)
+    # Treat any non-empty bridge header key as "provided".
+    def _clean(v: Optional[str]) -> Optional[str]:
+        t = (v or "").strip()
+        if not t:
+            return None
+        if t.lower() in {"null", "undefined", "none"}:
+            return None
+        return t
+
+    x_api_key = _clean(x_api_key)
+    x_gemini_key = _clean(x_gemini_key)
+    provided_key = x_gemini_key or x_api_key
+    # Authorization may be a JWT; only accept it as a provider key via strict parsing.
+    auth_key = extract_user_provided_api_key(
+        request,
+        x_api_key=None,
+        x_gemini_key=None,
+        authorization=authorization,
+    )
+    user_key = provided_key or auth_key
+
+    api_key = user_key
+    is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
+
+    # If the server is configured to require user API keys, do NOT fall back to server keys.
+    # Use the stricter extractor here so accidental values (e.g. 'undefined') don't bypass the guard.
+    if settings.require_user_api_key and not user_key:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "API key required for Interview Intelligence. "
+                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
+                "or Authorization: Bearer <key>."
+            ),
+        )
+
+    # Prefer the user-provided key when present.
+    api_key = user_key or api_key
+
+    # Fallback to server keys only when user provided no keys.
+    if not api_key:
+        if is_demo:
+            # DEMO PATH: always prefer Groq (cost-capped) and never fall back to Gemini.
+            if settings.is_demo_key_pool_enabled():
+                try:
+                    from app.services.chat.demo_key_pool import demo_key_pool
+                    demo_key = demo_key_pool.get_key()
+                    if demo_key and demo_key.startswith("gsk_"):
+                        api_key = demo_key
+                except Exception:
+                    # Fall back to env Groq key below
+                    pass
+
+            if not api_key and settings.groq_api_key:
+                api_key = settings.groq_api_key
+
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
+        else:
+            # REGISTERED PATH: use effective provider selection
+            effective = settings.get_effective_provider(feature="default")
+            if effective == "gemini" and settings.gemini_api_key:
+                api_key = settings.gemini_api_key
+            elif effective == "groq" and settings.groq_api_key:
+                api_key = settings.groq_api_key
+            else:
+                api_key = settings.gemini_api_key or settings.groq_api_key
+
+    # Demo-mode clamp: keep demo responses small/cost-capped.
+    if is_demo:
+        limit = min(int(limit or 20), 2)
 
     try:
-        return await _search_and_build_response(q, limit, refresh, api_key=api_key)
+        return await _search_and_build_response(q, limit, refresh, api_key=api_key, save_to_history=save_to_history, request=request)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -989,15 +1145,14 @@ async def search_questions(
 
 @router.post("/search", response_model=SearchQuestionsResponse)
 async def search_questions_post(
+    request: Request,
     payload: InterviewSearchRequest,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """
     Search endpoint accepting JSON payload.
-    
-    Same functionality as GET /search but accepts POST for complex queries.
-    Useful for frontend integration and when query parameters get too long.
     """
     query = (payload.query or "").strip()
     if not query:
@@ -1008,14 +1163,84 @@ async def search_questions_post(
 
     limit = payload.limit or 20
     refresh = bool(payload.refresh)
+    save_to_history = payload.save_to_history if payload.save_to_history is not None else True
 
-    api_key = x_api_key
-    if not api_key and authorization:
-        if authorization.startswith("Bearer "):
-            api_key = authorization.split(" ")[1]
+    # API Key selection (Bridge Settings / BYOK)
+    def _clean(v: Optional[str]) -> Optional[str]:
+        t = (v or "").strip()
+        if not t:
+            return None
+        if t.lower() in {"null", "undefined", "none"}:
+            return None
+        return t
+
+    x_api_key = _clean(x_api_key)
+    x_gemini_key = _clean(x_gemini_key)
+    provided_key = x_gemini_key or x_api_key
+    auth_key = extract_user_provided_api_key(
+        request,
+        x_api_key=None,
+        x_gemini_key=None,
+        authorization=authorization,
+    )
+    user_key = provided_key or auth_key
+
+    api_key = user_key
+    is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
+
+    # If the server is configured to require user API keys, do NOT fall back to server keys.
+    # Use the stricter extractor here so accidental values (e.g. 'undefined') don't bypass the guard.
+    if settings.require_user_api_key and not user_key:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "API key required for Interview Intelligence. "
+                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
+                "or Authorization: Bearer <key>."
+            ),
+        )
+
+    # Prefer the user-provided key when present.
+    api_key = user_key or api_key
+
+    # Fallback to server keys only when user provided no keys.
+    if not api_key:
+        if is_demo:
+            # DEMO PATH: always prefer Groq (cost-capped) and never fall back to Gemini.
+            if settings.is_demo_key_pool_enabled():
+                try:
+                    from app.services.chat.demo_key_pool import demo_key_pool
+                    demo_key = demo_key_pool.get_key()
+                    if demo_key and demo_key.startswith("gsk_"):
+                        api_key = demo_key
+                except Exception:
+                    # Fall back to env Groq key below
+                    pass
+
+            if not api_key and settings.groq_api_key:
+                api_key = settings.groq_api_key
+
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
+        else:
+            # REGISTERED PATH: use effective provider selection
+            effective = settings.get_effective_provider(feature="default")
+            if effective == "gemini" and settings.gemini_api_key:
+                api_key = settings.gemini_api_key
+            elif effective == "groq" and settings.groq_api_key:
+                api_key = settings.groq_api_key
+            else:
+                api_key = settings.gemini_api_key or settings.groq_api_key
+
+    # Demo-mode clamp: keep demo responses small/cost-capped.
+    if is_demo:
+        limit = min(int(limit or 20), 2)
 
     try:
-        return await _search_and_build_response(query, limit, refresh, api_key=api_key)
+        return await _search_and_build_response(query, limit, refresh, api_key=api_key, save_to_history=save_to_history, request=request)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1047,7 +1272,8 @@ async def add_curated_question(question: dict):
     ```
     """
     try:
-        from app.services.interview_intelligence_service import InterviewQuestion
+        _ensure_intelligence_services_loaded()
+        from app.services.interview.interview_intelligence_service import InterviewQuestion
         
         # Validate and create question object
         q = InterviewQuestion(**question)
@@ -1077,15 +1303,25 @@ async def search_with_verification(
     company: Optional[str] = Query(default=None),
     refresh: bool = Query(default=False),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """Enhanced search with verification."""
-    api_key = x_api_key
-    if not api_key and authorization:
-        if authorization.startswith("Bearer "):
-            api_key = authorization.split(" ")[1]
+    # API Key selection (Bridge Settings)
+    groq_key = x_api_key
+    gemini_key = x_gemini_key
+    if not groq_key and authorization and authorization.startswith("Bearer "):
+        groq_key = authorization.split(" ")[1]
+        
+    api_key = gemini_key if gemini_key else groq_key
+    
+    # Fallback to dev keys
+    if not api_key:
+        from app.config import settings
+        api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
+        _ensure_intelligence_services_loaded()
         logger.info(f"Enhanced search: q={q}, limit={limit}")
         
         questions = await enhanced_interview_service.search_questions(
@@ -1121,20 +1357,23 @@ async def search_with_verification(
         })
         
         # Save to history
-        await default_history_manager.initialize()
-        tab_id = await default_history_manager.save_search(
-            query=q,
-            questions=formatted_questions,
-            metadata=clean_history_metadata({
-                'limit': limit,
-                'verified_only': verified_only,
-                'min_credibility': min_credibility,
-                'company': company,
-                'refresh': refresh,
-                'enhanced': True
-            })
-        )
-        logger.info(f"💾 Enhanced search saved to history: tab_id={tab_id}")
+        if formatted_questions:
+            await default_history_manager.initialize()
+            tab_id = await default_history_manager.save_search(
+                query=q,
+                questions=formatted_questions,
+                metadata=clean_history_metadata({
+                    'limit': limit,
+                    'verified_only': verified_only,
+                    'min_credibility': min_credibility,
+                    'company': company,
+                    'refresh': refresh,
+                    'enhanced': True
+                })
+            )
+            logger.info(f"💾 Enhanced search saved to history: tab_id={tab_id}")
+        else:
+            logger.info(f"⏭️ Skipping history save (0 results) for enhanced search: '{q}'")
         
         return EnhancedSearchResponse(
             query=q,
@@ -1146,22 +1385,32 @@ async def search_with_verification(
         
     except Exception as e:
         logger.error(f"Enhanced search failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/search/enhanced", response_model=EnhancedSearchResponse)
 async def search_with_verification_post(
     request: EnhancedSearchRequest,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """POST version of enhanced search."""
-    api_key = x_api_key
-    if not api_key and authorization:
-        if authorization.startswith("Bearer "):
-            api_key = authorization.split(" ")[1]
+    # API Key selection (Bridge Settings)
+    groq_key = x_api_key
+    gemini_key = x_gemini_key
+    if not groq_key and authorization and authorization.startswith("Bearer "):
+        groq_key = authorization.split(" ")[1]
+        
+    api_key = gemini_key if gemini_key else groq_key
+    
+    # Fallback to dev keys
+    if not api_key:
+        from app.config import settings
+        api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
+        _ensure_intelligence_services_loaded()
         questions = await enhanced_interview_service.search_questions(
             query=request.query,
             limit=request.limit,
@@ -1183,20 +1432,23 @@ async def search_with_verification_post(
         metadata = SearchMetadata(**metadata_dict)
         
         # Save to history
-        await default_history_manager.initialize()
-        tab_id = await default_history_manager.save_search(
-            query=request.query,
-            questions=formatted_questions,
-            metadata=clean_history_metadata({
-                'limit': request.limit,
-                'verified_only': request.verified_only,
-                'min_credibility': request.min_credibility,
-                'company': request.company,
-                'refresh': request.refresh,
-                'enhanced': True
-            })
-        )
-        logger.info(f"💾 Enhanced search (POST) saved to history: tab_id={tab_id}")
+        if formatted_questions:
+            await default_history_manager.initialize()
+            tab_id = await default_history_manager.save_search(
+                query=request.query,
+                questions=formatted_questions,
+                metadata=clean_history_metadata({
+                    'limit': request.limit,
+                    'verified_only': request.verified_only,
+                    'min_credibility': request.min_credibility,
+                    'company': request.company,
+                    'refresh': request.refresh,
+                    'enhanced': True
+                })
+            )
+            logger.info(f"💾 Enhanced search (POST) saved to history: tab_id={tab_id}")
+        else:
+            logger.info(f"⏭️ Skipping history save (0 results) for enhanced search (POST): '{request.query}'")
         
         return EnhancedSearchResponse(
             query=request.query,
@@ -1206,45 +1458,46 @@ async def search_with_verification_post(
             tips=[]
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/sources/stats")
 async def get_source_statistics():
-	"""Get statistics about available question sources"""
-	try:
-		stats = await enhanced_interview_service.source_manager.get_question_stats()
-		return {
-			"status": "ok",
-			"statistics": stats,
-			"source_info": {
-				"leetcode": {
-					"name": "LeetCode",
-					"credibility": 0.95,
-					"description": "Company-tagged coding questions",
-					"verified": True
-				},
-				"glassdoor": {
-					"name": "Glassdoor",
-					"credibility": 0.85,
-					"description": "Interview experiences and questions",
-					"verified": True
-				},
-				"community": {
-					"name": "Community Submitted",
-					"credibility": 0.60,
-					"description": "User-submitted questions with votes",
-					"verified": "partial"
-				},
-				"llm_generated": {
-					"name": "AI-Generated",
-					"credibility": 0.30,
-					"description": "Practice questions generated by AI",
-					"verified": False
-				}
-			}
-		}
-	except Exception as e:
-		raise HTTPException(status_code=500, detail=str(e))
+    """Get statistics about available question sources"""
+    try:
+        _ensure_intelligence_services_loaded()
+        stats = await enhanced_interview_service.source_manager.get_question_stats()
+        return {
+            "status": "ok",
+            "statistics": stats,
+            "source_info": {
+                "leetcode": {
+                    "name": "LeetCode",
+                    "credibility": 0.95,
+                    "description": "Company-tagged coding questions",
+                    "verified": True,
+                },
+                "glassdoor": {
+                    "name": "Glassdoor",
+                    "credibility": 0.85,
+                    "description": "Interview experiences and questions",
+                    "verified": True,
+                },
+                "community": {
+                    "name": "Community Submitted",
+                    "credibility": 0.60,
+                    "description": "User-submitted questions with votes",
+                    "verified": "partial",
+                },
+                "llm_generated": {
+                    "name": "AI-Generated",
+                    "credibility": 0.30,
+                    "description": "Practice questions generated by AI",
+                    "verified": False,
+                },
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/companies")
@@ -1276,40 +1529,61 @@ async def get_supported_companies():
 
 @router.post("/community/submit")
 async def submit_community_question(
-	question: dict,
-	submitted_by: str = Query(..., description="Anonymous user ID")
+    question: dict,
+    submitted_by: str = Query(..., description="Anonymous user ID")
 ):
-	"""Submit a real interview question from the community"""
-	try:
-		from app.services.interview_sources import VerifiedQuestion as VQ, SourceType as ST, VerificationStatus as VS
-		vq = VQ(
-			question=question.get("question"),
-			answer=question.get("answer", ""),
-			topic=question.get("topic", "general"),
-			difficulty=question.get("difficulty", "medium"),
-			question_type=question.get("question_type", "technical"),
-			source_type=ST.COMMUNITY_VERIFIED,
-			verification_status=VS.LIKELY_REAL,
-			company=question.get("company"),
-			position=question.get("position"),
-			level=question.get("level"),
-			interview_round=question.get("interview_round"),
-			reported_count=1,
-			credibility_score=0.5
-		)
-		success = await enhanced_interview_service.source_manager.community.submit_question(vq, submitted_by)
-		if success:
-			return {
-				"status": "success",
-				"message": "Thank you for contributing! Your question will be reviewed.",
-				"question": question.get("question")[:100],
-				"credibility": 0.5,
-				"note": "Credibility will increase as others verify this question"
-			}
-		else:
-			raise HTTPException(status_code=500, detail="Failed to submit question")
-	except Exception as e:
-		raise HTTPException(status_code=400, detail=str(e))
+    """Submit a real interview question from the community"""
+    try:
+        _ensure_intelligence_services_loaded()
+        from app.services.chat.dynamic_interview_sources import (
+            VerifiedQuestion as VQ,
+            SourceType as ST,
+            VerificationStatus as VS,
+            QuestionDomain,
+        )
+
+        # Minimal domain mapping; defaults to general.
+        domain = QuestionDomain.GENERAL_TECHNICAL
+        question_type = (question.get("question_type") or "technical").lower()
+        topic = (question.get("topic") or "general").lower()
+        if "system" in question_type or "design" in question_type or "system" in topic:
+            domain = QuestionDomain.SYSTEM_DESIGN
+        elif "behavior" in question_type:
+            domain = QuestionDomain.BEHAVIORAL
+        elif "devops" in question_type or "docker" in topic or "kubernetes" in topic:
+            domain = QuestionDomain.DEVOPS
+        elif "ml" in question_type or "ai" in question_type or "ml" in topic or "ai" in topic:
+            domain = QuestionDomain.ML_AI
+
+        vq = VQ(
+            question=question.get("question"),
+            answer=question.get("answer", ""),
+            topic=question.get("topic", "general"),
+            difficulty=question.get("difficulty", "medium"),
+            question_type=question.get("question_type", "technical"),
+            domain=domain,
+            source_type=ST.COMMUNITY_VERIFIED,
+            verification_status=VS.LIKELY_REAL,
+            company=question.get("company"),
+            position=question.get("position"),
+            level=question.get("level"),
+            interview_round=question.get("interview_round"),
+            reported_count=1,
+            credibility_score=0.5,
+            submitted_by=submitted_by,
+        )
+        success = await enhanced_interview_service.source_manager.community.submit_question(vq, submitted_by)
+        if success:
+            return {
+                "status": "success",
+                "message": "Thank you for contributing! Your question will be reviewed.",
+                "question": (question.get("question") or "")[:100],
+                "credibility": 0.5,
+                "note": "Credibility will increase as others verify this question",
+            }
+        raise HTTPException(status_code=500, detail="Failed to submit question")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/transparency")
@@ -1368,29 +1642,31 @@ async def get_transparency_info():
 
 @router.get("/health/enhanced")
 async def health_check_enhanced():
-	"""Health check for enhanced service with source integration"""
-	try:
-		service = enhanced_interview_service
-		checks = {
-			"vector_db": service.vector_client is not None,
-			"embedding_model": service.embed_model is not None,
-			"source_manager": service.source_manager is not None,
-			"leetcode_integration": True,
-			"community_db": True,
-		}
-		all_healthy = all(checks.values())
-		return {
-			"status": "healthy" if all_healthy else "degraded",
-			"components": checks,
-			"features": {
-				"verified_sources": True,
-				"llm_generation": True,
-				"community_submissions": True,
-				"source_transparency": True
-			}
-		}
-	except Exception as e:
-		return {"status": "unhealthy", "error": str(e)}
+    """Health check for enhanced service with source integration"""
+    try:
+        _ensure_intelligence_services_loaded()
+        service = enhanced_interview_service
+        checks = {
+            "vector_db": service.vector_client is not None,
+            "embedding_model": service.embed_model is not None,
+            "source_manager": service.source_manager is not None,
+            "leetcode_integration": True,
+            "community_db": True,
+        }
+        all_healthy = all(checks.values())
+        return {
+            "status": "healthy" if all_healthy else "degraded",
+            "components": checks,
+            "features": {
+                "verified_sources": True,
+                "llm_generation": True,
+                "community_submissions": True,
+                "source_transparency": True,
+            },
+        }
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
+
 @router.post("/update")
 async def trigger_update():
     """
@@ -1400,6 +1676,7 @@ async def trigger_update():
     so there's no traditional "update" process. This endpoint exists
     for backward compatibility but is essentially a no-op.
     """
+    _ensure_intelligence_services_loaded()
     await interview_intelligence_service.force_update()
     return {
         "status": "ok",
@@ -1419,6 +1696,7 @@ async def get_statistics():
     - Recent activity
     """
     try:
+        _ensure_intelligence_services_loaded()
         topics = await interview_intelligence_service.get_all_topics()
         
         # Get collection stats from vector DB
@@ -1451,6 +1729,7 @@ async def get_statistics():
 async def health_check():
     """Check if the service is healthy and ready"""
     try:
+        _ensure_intelligence_services_loaded()
         # Verify components are initialized
         service = interview_intelligence_service
         
@@ -1503,15 +1782,25 @@ async def ultra_production_search(
     user_id: Optional[str] = Query(default=None),
     refresh: bool = Query(default=False),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """🚀 Ultra Production Search."""
-    api_key = x_api_key
-    if not api_key and authorization:
-        if authorization.startswith("Bearer "):
-            api_key = authorization.split(" ")[1]
+    # API Key selection (Bridge Settings)
+    groq_key = x_api_key
+    gemini_key = x_gemini_key
+    if not groq_key and authorization and authorization.startswith("Bearer "):
+        groq_key = authorization.split(" ")[1]
+        
+    api_key = gemini_key if gemini_key else groq_key
+    
+    # Fallback to dev keys
+    if not api_key:
+        from app.config import settings
+        api_key = settings.gemini_api_key or settings.groq_api_key
 
     try:
+        _ensure_intelligence_services_loaded()
         start_time = time.time()
         
         questions = await ultra_production_service.search_questions(
@@ -1539,19 +1828,22 @@ async def ultra_production_search(
         elapsed = time.time() - start_time
         
         # Save to history
-        await default_history_manager.initialize()
-        tab_id = await default_history_manager.save_search(
-            query=q,
-            questions=formatted_questions,
-            metadata=clean_history_metadata({
-                'verified_only': verified_only,
-                'min_credibility': min_credibility,
-                'company': company,
-                'total_results': len(formatted_questions),
-                **metadata
-            })
-        )
-        logger.info(f"💾 Ultra-production search saved to history: tab_id={tab_id}")
+        if formatted_questions:
+            await default_history_manager.initialize()
+            tab_id = await default_history_manager.save_search(
+                query=q,
+                questions=formatted_questions,
+                metadata=clean_history_metadata({
+                    'verified_only': verified_only,
+                    'min_credibility': min_credibility,
+                    'company': company,
+                    'total_results': len(formatted_questions),
+                    **metadata
+                })
+            )
+            logger.info(f"💾 Ultra-production search saved to history: tab_id={tab_id}")
+        else:
+            logger.info(f"⏭️ Skipping history save (0 results) for ultra-production search: '{q}'")
         
         return {
             "query": q,
@@ -1565,12 +1857,13 @@ async def ultra_production_search(
         }
     except Exception as e:
         logger.error(f"Ultra search failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/code/execute")
 async def execute_code(request: CodeExecutionRequest):
     """🔥 Execute and validate code"""
     try:
+        _ensure_intelligence_services_loaded()
         result = await ultra_production_service.execute_and_validate_code(
             code=request.code,
             language=request.language,
@@ -1578,7 +1871,7 @@ async def execute_code(request: CodeExecutionRequest):
         )
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/questions/{question_id}/vote")
@@ -1590,17 +1883,19 @@ async def vote_question(
 ):
     """👍👎 Vote on question quality"""
     try:
+        _ensure_intelligence_services_loaded()
         await ultra_production_service.record_user_feedback(
             question_id, user_id, vote, feedback
         )
         return {"status": "ok", "message": "Vote recorded"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/features")
 async def get_features():
     """🎯 List available features"""
+    _ensure_intelligence_services_loaded()
     return {
         "features": {
             "hybrid_search": {"available": True, "impact": "30-50% better relevance"},
@@ -1651,6 +1946,7 @@ async def websocket_search(websocket: WebSocket):
     logger.info("WebSocket connection accepted for real-time search")
     
     try:
+        _ensure_intelligence_services_loaded()
         # Wait for search request
         request_data = await websocket.receive_json()
         
@@ -1674,7 +1970,7 @@ async def websocket_search(websocket: WebSocket):
         logger.info(f"Streaming search: query='{query}', limit={limit}")
         
         # Stream results
-        from app.services.ai_native_enhancements import RealTimeSearchStream
+        from app.services.chat.ai_native_enhancements import RealTimeSearchStream
         
         # Create search sources (these will run in parallel)
         sources = []
@@ -1776,28 +2072,31 @@ async def websocket_search(websocket: WebSocket):
             )
             
             # Save to history using global singleton
-            await default_history_manager.initialize()
-            
-            tab_id = await default_history_manager.save_search(
-                query=query,
-                questions=formatted_questions,
-                metadata=clean_history_metadata({
-                    'verified_only': verified_only,
-                    'min_credibility': min_credibility,
-                    'company': company,
-                    'total_results': len(formatted_questions),
-                    'enhanced': True,  # Mark WebSocket searches as enhanced
-                    **metadata
-                })
-            )
-            
-            logger.info(f"💾 Saved to history: tab_id={tab_id}")
+            tab_id = None
+            if formatted_questions:
+                await default_history_manager.initialize()
+
+                tab_id = await default_history_manager.save_search(
+                    query=query,
+                    questions=formatted_questions,
+                    metadata=clean_history_metadata({
+                        'verified_only': verified_only,
+                        'min_credibility': min_credibility,
+                        'company': company,
+                        'total_results': len(formatted_questions),
+                        'enhanced': True,  # Mark WebSocket searches as enhanced
+                        **metadata
+                    })
+                )
+                logger.info(f"💾 Saved to history: tab_id={tab_id}")
+            else:
+                logger.info(f"⏭️ Skipping history save (0 results) for websocket search: '{query}'")
             
             await websocket.send_json({
                 'type': 'search_complete',
                 'total_results': len(formatted_questions),
                 'metadata': metadata,
-                'tab_id': tab_id,  # Include tab_id for frontend
+                'tab_id': tab_id,  # null when not saved (e.g., 0 results)
                 'timestamp': time.time()
             })
             
@@ -1821,10 +2120,10 @@ async def websocket_search(websocket: WebSocket):
                 'error': str(e),
                 'timestamp': time.time()
             })
-        except:
+        except Exception:
             pass
     finally:
         try:
             await websocket.close()
-        except:
+        except Exception:
             pass

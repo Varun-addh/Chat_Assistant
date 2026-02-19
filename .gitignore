@@ -5,6 +5,7 @@
 /.pnp
 .pnp.js
 .env
+.env.docker
 # testing
 /coverage
 
@@ -40,21 +41,41 @@ pip-wheel-metadata/
 # Application data (runtime-generated)
 data/
 
+# Documentation & generated files (PDFs, HTML exports, etc.)
+docs/
+
+# PDF files (binary files not allowed on Hugging Face)
+*.pdf
+
 # Logs
 debug.log
 *.log
 
+# Pytest
+.pytest_cache/
+
 # Test/Demo files
-test_*.py
+# NOTE: Python unit tests live under /tests and should be committed for CI.
 *_demo.html
 *_tester.html
 *_integration.html
 
-# Backups and Diagrams
+# Generated diagrams and backups
+*.svg
 *.zip
 *.backup
 *.tmp
-diagram.svg
+
+# Local databases (binary files not allowed on Hugging Face)
+*.db
+*.sqlite
+*.sqlite3
+
+# Binary executables
+*.exe
+*.dll
+*.so
+*.dylib
 
 # IDEs
 .vscode/
@@ -66,10 +87,7 @@ test_request.json
 quick_test.py
 demo_comparison.py
 
-# Local docker/env overrides
-.env.docker
-
-# Generated PDFs
-*_A4.pdf
+# Local secret helpers
+keys.py
 
 

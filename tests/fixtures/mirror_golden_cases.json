@@ -1,0 +1,92 @@
+[
+  {
+    "name": "definition_good_caching",
+    "question": "What is caching?",
+    "user_answer": "Caching stores computed results so repeated requests are faster. I’d use TTL plus invalidation on writes, and mitigate cache stampedes with request coalescing.",
+    "ontology": {
+      "topic": "Caching",
+      "primitives": ["ttl", "invalidation", "eviction", "cache stampede"],
+      "senior_signals": [],
+      "red_flags": [],
+      "likely_followups": []
+    },
+    "llm_confidence": 0.55,
+    "strengths": ["Mentions TTL", "Mentions invalidation"],
+    "gaps": ["No eviction policy detail"],
+    "schema_drift": false,
+    "expect_confidence_min": 0.4,
+    "expect_confidence_max": 0.85
+  },
+  {
+    "name": "definition_short_but_ok",
+    "question": "Define API",
+    "user_answer": "An API is a contract that defines how clients request capabilities from a system, typically via endpoints and schemas.",
+    "ontology": {
+      "topic": "API",
+      "primitives": ["contract", "endpoint", "request/response", "schema"],
+      "senior_signals": [],
+      "red_flags": [],
+      "likely_followups": []
+    },
+    "llm_confidence": 0.7,
+    "strengths": ["Mentions contract"],
+    "gaps": ["No versioning/auth mention"],
+    "schema_drift": false,
+    "expect_confidence_min": 0.4,
+    "expect_confidence_max": 0.9
+  },
+  {
+    "name": "design_vague_overconfident",
+    "question": "Design a URL shortener",
+    "user_answer": "Use microservices and make it scalable.",
+    "ontology": {
+      "topic": "System Design",
+      "primitives": ["latency", "throughput", "data model", "cache", "queue"],
+      "senior_signals": [],
+      "red_flags": [],
+      "likely_followups": []
+    },
+    "llm_confidence": 0.95,
+    "strengths": [],
+    "gaps": ["No scale assumptions", "No data model", "No trade-offs"],
+    "schema_drift": false,
+    "expect_confidence_min": 0.0,
+    "expect_confidence_max": 0.39
+  },
+  {
+    "name": "schema_drift_caps_confidence",
+    "question": "What is caching?",
+    "user_answer": "Caching makes it faster.",
+    "ontology": {
+      "topic": "Caching",
+      "primitives": ["ttl", "invalidation"],
+      "senior_signals": [],
+      "red_flags": [],
+      "likely_followups": []
+    },
+    "llm_confidence": 0.9,
+    "strengths": [],
+    "gaps": ["No correctness story"],
+    "schema_drift": true,
+    "expect_confidence_min": 0.0,
+    "expect_confidence_max": 0.35
+  },
+  {
+    "name": "non_definition_short_answer_penalized",
+    "question": "Explain how you would handle retries and idempotency",
+    "user_answer": "Add retries with backoff.",
+    "ontology": {
+      "topic": "Reliability",
+      "primitives": ["timeout", "retry", "backoff", "idempotency", "dedupe"],
+      "senior_signals": [],
+      "red_flags": [],
+      "likely_followups": []
+    },
+    "llm_confidence": 0.8,
+    "strengths": ["Mentions backoff"],
+    "gaps": ["No idempotency key", "No timeout", "No retry budget"],
+    "schema_drift": false,
+    "expect_confidence_min": 0.0,
+    "expect_confidence_max": 0.5
+  }
+]

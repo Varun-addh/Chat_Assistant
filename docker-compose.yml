@@ -8,16 +8,85 @@ services:
       - "7860:7860"
     env_file:
       - .env
+    environment:
+      # Secrets note:
+      # - Keep JWT_SECRET_KEY / COOKIE_SECRET / STRATAX_SECRETS_ENCRYPTION_KEY out of git.
+      # - Provide them via the env_file above (recommended) or host env vars.
+      # - For real production, set APP_ENV=production so the app enforces required secrets.
+      # Prefer local Kroki renderer if available (avoids relying on external services)
+      - KROKI_URL=http://kroki:8000/mermaid/svg
+      # Database selection (single source of truth at runtime):
+      # - Production: set DATABASE_URL to your Neon connection string.
+      # - Docker local dev (optional): set DATABASE_URL_DOCKER to point at the compose Postgres.
+      # - Fallback: defaults to the compose Postgres URL.
+      - DATABASE_URL=${DATABASE_URL_DOCKER:-${DATABASE_URL:-postgresql+psycopg://stratax:stratax@postgres:5432/stratax}}
+      # Use Qdrant as a service (fixes local file-lock issues and enables multi-worker)
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+      # Redis (distributed rate limiting + shared caches)
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - REDIS_KEY_PREFIX=${REDIS_KEY_PREFIX:-stratax}
+      # Multi-worker
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-2}
+    depends_on:
+      - qdrant
+      - redis
+      - postgres
     volumes:
       - ./app:/app/app
       - ./data/history:/app/data/history
       - ./data/models:/app/data/models
       - ./data/curated:/app/data/curated            
       - ./data/vector_db:/app/data/vector_db        
-      - ./data/qdrant:/app/data/qdrant              # only if Qdrant is used
+      # NOTE: Qdrant now runs as its own service; no local qdrant data mount needed here.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      start_period: 300s
+      retries: 5
+
+  kroki:
+    image: yuzutech/kroki:latest
+    container_name: interview_ast_kroki
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+
+  postgres:
+    image: postgres:16
+    container_name: interview_ast_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-stratax}
+      - POSTGRES_USER=${POSTGRES_USER:-stratax}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-stratax}
+    ports:
+      # Use 5433 on host to avoid clashing with a local Postgres install.
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: interview_ast_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  redis:
+    image: redis:7-alpine
+    container_name: interview_ast_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:
 

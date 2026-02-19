@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "fresh-start", "develop"]
+  pull_request:
+    branches: ["main", "fresh-start"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest-cov
+
+      - name: Create data directories
+        run: |
+          mkdir -p data/history data/sessions data/practice_audio
+
+      - name: Run tests with coverage
+        env:
+          APP_ENV: test
+          FAST_STARTUP: "true"
+          DISABLE_INTERVIEW_INTELLIGENCE: "true"
+          ENABLE_CODE_EXECUTION: "false"
+          REQUIRE_USER_API_KEY: "false"
+          JWT_SECRET_KEY: "ci-test-jwt-secret-key-must-be-at-least-32-chars"
+          COOKIE_SECRET: "ci-test-cookie-secret-must-be-long-enough"
+          DATABASE_URL: "sqlite:///./test_ci.db"
+          ANALYTICS_STORE_RAW_TEXT: "false"
+        run: |
+          pytest --cov=app --cov-report=xml --cov-report=term-missing -v
+
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      
+      - name: Install linting tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+      
+      - name: Run ruff check
+        run: ruff check app/ --output-format=github
+        continue-on-error: true
+      
+      - name: Run ruff format check
+        run: ruff format --check app/
+        continue-on-error: true
+
+  security:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install safety bandit[toml]
+      
+      - name: Run safety check
+        run: safety check --json
+        continue-on-error: true
+      
+      - name: Run bandit security scan
+        run: bandit -r app/ -ll -f txt
+        continue-on-error: true
