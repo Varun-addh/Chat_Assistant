@@ -515,15 +515,12 @@ async def google_login():
     url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(query)
     response = RedirectResponse(url=url, status_code=302)
     # Store state in an httpOnly cookie to protect against CSRF.
-    # Use secure=True only when the backend itself is served over HTTPS so the
-    # browser will actually include the cookie on the OAuth callback redirect.
-    is_https = settings.backend_base_url.startswith("https://")
     response.set_cookie(
         key="oauth_state",
         value=state,
         httponly=True,
         samesite="lax",
-        secure=is_https,
+        secure=True,
     )
     return response
 
