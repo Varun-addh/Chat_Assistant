@@ -43,6 +43,8 @@ else:
         pool_pre_ping=True,
         pool_size=10,
         max_overflow=20,
+        pool_timeout=10,
+        connect_args={"connect_timeout": 5},
         echo=False,
     )
 

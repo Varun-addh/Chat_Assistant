@@ -1,0 +1,165 @@
+{
+    "info": {
+        "name": "Multi-View Architecture API",
+        "description": "API endpoints for generating professional, multi-view architecture diagrams",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Generate Architecture",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    },
+                    {
+                        "key": "X-API-Key",
+                        "value": "{{API_KEY}}",
+                        "description": "Your API key"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"system_description\": \"Event management platform with real-time notifications and ticket sales\",\n  \"user_level\": \"mid\",\n  \"style\": \"modern\",\n  \"include_explanations\": true\n}"
+                },
+                "url": {
+                    "raw": "{{BASE_URL}}/api/diagrams/generate_architecture",
+                    "host": [
+                        "{{BASE_URL}}"
+                    ],
+                    "path": [
+                        "api",
+                        "diagrams",
+                        "generate_architecture"
+                    ]
+                },
+                "description": "Generate complete multi-view architecture package. Returns 4-7 coordinated views based on system complexity and user level."
+            },
+            "response": []
+        },
+        {
+            "name": "Get Available Views",
+            "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                    "raw": "{{BASE_URL}}/api/diagrams/architecture/available_views",
+                    "host": [
+                        "{{BASE_URL}}"
+                    ],
+                    "path": [
+                        "api",
+                        "diagrams",
+                        "architecture",
+                        "available_views"
+                    ]
+                },
+                "description": "Get list of all available architecture view types with metadata."
+            },
+            "response": []
+        },
+        {
+            "name": "Get Recommended Views",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"system_description\": \"E-commerce platform with payment processing\",\n  \"user_level\": \"senior\"\n}"
+                },
+                "url": {
+                    "raw": "{{BASE_URL}}/api/diagrams/architecture/recommend_views",
+                    "host": [
+                        "{{BASE_URL}}"
+                    ],
+                    "path": [
+                        "api",
+                        "diagrams",
+                        "architecture",
+                        "recommend_views"
+                    ]
+                },
+                "description": "Get AI-recommended views for a system description based on complexity and user level."
+            },
+            "response": []
+        },
+        {
+            "name": "Render Mermaid Diagram",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"code\": \"flowchart TD\\n  A[User] --> B[API Gateway]\\n  B --> C[Services]\\n  C --> D[(Database)]\",\n  \"theme\": \"default\",\n  \"style\": \"modern\"\n}"
+                },
+                "url": {
+                    "raw": "{{BASE_URL}}/api/diagrams/render_mermaid",
+                    "host": [
+                        "{{BASE_URL}}"
+                    ],
+                    "path": [
+                        "api",
+                        "diagrams",
+                        "render_mermaid"
+                    ]
+                },
+                "description": "Render Mermaid diagram code to SVG. Returns SVG image."
+            },
+            "response": []
+        },
+        {
+            "name": "Export to Markdown",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"system_name\": \"Event management platform\",\n  \"description\": \"Event management platform with notifications\",\n  \"views\": [],\n  \"view_order\": [],\n  \"total_views\": 0,\n  \"generated_at\": \"2025-12-31T10:00:00\",\n  \"metadata\": {},\n  \"how_to_use\": \"\",\n  \"interview_tips\": []\n}"
+                },
+                "url": {
+                    "raw": "{{BASE_URL}}/api/diagrams/architecture/export_markdown",
+                    "host": [
+                        "{{BASE_URL}}"
+                    ],
+                    "path": [
+                        "api",
+                        "diagrams",
+                        "architecture",
+                        "export_markdown"
+                    ]
+                },
+                "description": "Export architecture package to markdown file. Pass full package from generate_architecture response."
+            },
+            "response": []
+        }
+    ],
+    "variable": [
+        {
+            "key": "BASE_URL",
+            "value": "http://localhost:8000",
+            "type": "string"
+        },
+        {
+            "key": "API_KEY",
+            "value": "your-api-key-here",
+            "type": "string"
+        }
+    ]
+}

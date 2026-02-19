@@ -1,3 +1,4 @@
+import asyncio
 import warnings
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query
@@ -38,42 +39,44 @@ warnings.filterwarnings(
 
 logger = logging.getLogger(__name__)
 
-# Interview Intelligence depends on optional vector-db packages (qdrant_client).
-# We load it lazily so the rest of the app (incl. architecture generation) can
-# run even when those optional deps are not installed.
+# Interview Intelligence depends on optional vector-db packages (qdrant_client)
+# and heavy ML libraries (torch, sentence_transformers).
+# When fast_startup is enabled, skip these imports entirely for quick dev startup.
 INTERVIEW_INTELLIGENCE_AVAILABLE = True
-try:
-    from app.routers.interview_intelligence import router as interview_intelligence
-    from app.services.interview.interview_intelligence_service import (
-        interview_intelligence_service,
-        base_interview_service,
-        enhanced_interview_service,
-        ultra_production_service,
-    )
-except ModuleNotFoundError as e:
-    # Typical in local/dev setups that haven't installed all optional deps.
-    if "qdrant_client" in str(e):
-        INTERVIEW_INTELLIGENCE_AVAILABLE = False
-        interview_intelligence = None  # type: ignore[assignment]
-        interview_intelligence_service = None  # type: ignore[assignment]
-        base_interview_service = None  # type: ignore[assignment]
-        enhanced_interview_service = None  # type: ignore[assignment]
-        ultra_production_service = None  # type: ignore[assignment]
-        logging.getLogger(__name__).warning(
-            "Interview Intelligence disabled: optional dependency missing (%s).",
-            e,
-        )
-    else:
-        raise
 
-# Allow explicitly disabling heavy subsystems (useful for tests/CI)
 if settings.fast_startup or settings.disable_interview_intelligence:
+    # Skip heavy imports entirely — keeps startup fast for local dev
     INTERVIEW_INTELLIGENCE_AVAILABLE = False
     interview_intelligence = None  # type: ignore[assignment]
     interview_intelligence_service = None  # type: ignore[assignment]
     base_interview_service = None  # type: ignore[assignment]
     enhanced_interview_service = None  # type: ignore[assignment]
     ultra_production_service = None  # type: ignore[assignment]
+    logger.info("Interview Intelligence imports skipped (fast_startup or disable_interview_intelligence)")
+else:
+    try:
+        from app.routers.interview_intelligence import router as interview_intelligence
+        from app.services.interview.interview_intelligence_service import (
+            interview_intelligence_service,
+            base_interview_service,
+            enhanced_interview_service,
+            ultra_production_service,
+        )
+    except ModuleNotFoundError as e:
+        # Typical in local/dev setups that haven't installed all optional deps.
+        if "qdrant_client" in str(e):
+            INTERVIEW_INTELLIGENCE_AVAILABLE = False
+            interview_intelligence = None  # type: ignore[assignment]
+            interview_intelligence_service = None  # type: ignore[assignment]
+            base_interview_service = None  # type: ignore[assignment]
+            enhanced_interview_service = None  # type: ignore[assignment]
+            ultra_production_service = None  # type: ignore[assignment]
+            logging.getLogger(__name__).warning(
+                "Interview Intelligence disabled: optional dependency missing (%s).",
+                e,
+            )
+        else:
+            raise
 
 from app.routers.mock_interview import router as mock_interview_router
 from app.services.interview.mock_interview_service import initialize_mock_interview_service
@@ -120,7 +123,8 @@ async def lifespan(app: FastAPI):
     if INTERVIEW_INTELLIGENCE_AVAILABLE:
         try:
             # Startup - initialize enhanced service first, then share its resources with base
-            await enhanced_interview_service.initialize()
+            # Timeout prevents hanging when Qdrant lock is held by another process (e.g. --reload)
+            await asyncio.wait_for(enhanced_interview_service.initialize(), timeout=30)
 
             # Share vector client and embed model to avoid Qdrant lock conflicts
             base_interview_service.vector_client = enhanced_interview_service.vector_client
@@ -133,7 +137,13 @@ async def lifespan(app: FastAPI):
             ultra_production_service.collection_name = enhanced_interview_service.collection_name
 
             # Initialize ultra production service (will skip creating new vector client since we shared it)
-            await ultra_production_service.initialize()
+            await asyncio.wait_for(ultra_production_service.initialize(), timeout=30)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Interview Intelligence disabled: initialization timed out (Qdrant lock likely held by another process). "
+                "Try running without --reload or set FAST_STARTUP=true."
+            )
+            INTERVIEW_INTELLIGENCE_AVAILABLE = False
         except RuntimeError as e:
             msg = str(e).lower()
             if "qdrant" in msg and ("locked" in msg or "already accessed" in msg or "storage folder" in msg):

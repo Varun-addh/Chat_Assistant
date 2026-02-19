@@ -48,19 +48,34 @@ def identity_response_text(settings, question: str) -> str:
 	provider-specific identity hallucinations (e.g., claiming Google/OpenAI).
 	"""
 	app_name, developer, attribution = get_app_identity(settings)
+	developer = (developer or "").strip()
+	attribution = (attribution or "").strip()
 	q = (question or "").lower()
 	# NOTE: uses deterministic template; do not call LLM here.
 	# If the user asks for the assistant/app name, answer directly.
 	if re.search(r"\b(what\s*(?:'s| is)\s+your\s+name|whats\s+your\s+name|what\s+is\s+you\s+name)\b", q):
 		return f"My name is {app_name}.\n\n{attribution}"
 
-	developer_first = (developer.split()[0] if (developer or "").strip() else developer).strip() or developer
+	developer_first = (developer.split()[0] if developer else "").strip()
+
+	def _attribution_fallback() -> str:
+		return (
+			f"{app_name} is an independently developed platform. For official information about its development or ownership, "
+			f"please refer to {app_name}’s documentation or website."
+		)
 
 	def _base() -> str:
 		# Keep this concise, deterministic, and accurate.
 		# First sentence is intentionally product-style for the UI.
+		if not developer_first:
+			return (
+				f"I’m {app_name} — an interview preparation assistant application that helps candidates practice smarter, "
+				"get structured feedback, and track progress. "
+				"I use AI language models via API providers and add app-specific orchestration to produce interview-ready outputs. "
+				"For information about development or ownership, please refer to official documentation."
+			)
 		return (
-			f"I’m {app_name} — an interview preparation assistant application designed and developed by {developer_first} "
+			f"I’m {app_name} — an interview preparation assistant application built and maintained by {developer_first} "
 			"to help candidates practice smarter, get structured feedback, and track real progress. "
 			"I use AI language models via API providers and add app-specific orchestration to produce interview-ready outputs."
 		)
@@ -68,20 +83,35 @@ def identity_response_text(settings, question: str) -> str:
 	# Founder/creator/owner questions should be deterministic and concise.
 	# This branch is intentionally distinct from the generic identity branch so the UI
 	# doesn't show identical answers for different user intents.
-	if any(w in q for w in ["founder", "creator", "owner", "built", "made", "developed"]):
+	if any(w in q for w in ["founder", "creator", "owner", "built", "made", "developed", "develop"]):
 		app_targets = app_name_targets(settings)
+		# Only treat as product attribution when the user is clearly referring to the app/this application.
+		# Do NOT match generic identity questions like "who are you?".
 		if any(t in q for t in app_targets) or "this app" in q or "this application" in q:
+			if not developer:
+				return _attribution_fallback()
 			return (
-				f"{app_name} was designed and developed by {developer}. "
-				"It’s an interview-prep assistant application that helps candidates practice smarter, get structured feedback, and track progress."
+				f"{app_name} is an interview-prep assistant application built and maintained by {developer}. "
+				"It helps candidates practice smarter, get structured feedback, and track progress."
+			)
+
+		# Also handle direct assistant-addressed phrasing (e.g., "who developed you") without
+		# accidentally catching "who are you".
+		if "you" in q and ("develop" in q or "created" in q or "built" in q or "made" in q or "founder" in q or "owner" in q):
+			if not developer:
+				return _attribution_fallback()
+			return (
+				f"{app_name} is an interview-prep assistant application built and maintained by {developer}. "
+				"It helps candidates practice smarter, get structured feedback, and track progress."
 			)
 
 	# If the user asks who the configured developer is, keep it scoped to product attribution.
 	dev_parts = developer_name_targets(settings)
 	if dev_parts and all(p in q for p in dev_parts) and ("who is" in q or "tell me about" in q):
+		# Even if a developer name is configured, avoid employment/ownership assertions.
 		return (
-			f"{developer} is the creator and maintainer of {app_name}. "
-			"It uses AI language models via API providers and adds app-specific orchestration for interview preparation."
+			f"{developer} is listed in the app configuration for {app_name}. "
+			"For official details about development or ownership, please refer to official documentation."
 		)
 
 	# If the user asks about ownership/creator, answer succinctly.
@@ -89,15 +119,18 @@ def identity_response_text(settings, question: str) -> str:
 	if ("owner" in q or "owns" in q or "creator" in q or "developer" in q or "built" in q or "made" in q) and (
 		any(t in q for t in app_targets) or "you" in q or "this app" in q or "this application" in q
 	):
+		if not developer:
+			return _attribution_fallback()
 		return (
-			f"{app_name} is an interview preparation assistant application built and maintained by {developer}. "
-			"It uses AI language models via API providers and adds app-specific orchestration for interview preparation."
+			f"{app_name} is an interview preparation assistant application. "
+			f"For development/ownership details, refer to official documentation. "
+			f"(Configured attribution: {developer}.)"
 		)
 
 	# If the user explicitly asks about ChatGPT/OpenAI, clarify relationship safely.
 	if "chatgpt" in q or "openai" in q:
 		return (
-			f"I’m {app_name}, designed and developed by {developer_first}. "
+			f"I’m {app_name}. "
 			"ChatGPT is a product from OpenAI. "
 			f"{app_name} is a separate interview-prep application that may use AI model APIs (depending on configuration)."
 		)
@@ -105,7 +138,7 @@ def identity_response_text(settings, question: str) -> str:
 	# If the user mentions Google/Gemini, avoid misattribution while staying accurate.
 	if "google" in q or "gemini" in q:
 		return (
-			f"I’m {app_name}, designed and developed by {developer_first}. "
+			f"I’m {app_name}. "
 			"I may use different AI model providers depending on your settings (for example, Gemini), "
 			f"but {app_name} itself is not an official Google product."
 		)
@@ -182,11 +215,15 @@ def is_identity_question(settings, question: str) -> bool:
 def identity_overrides(settings) -> str:
 	"""Overrides for identity/attribution questions."""
 	app_name, developer, attribution = get_app_identity(settings)
+	developer = (developer or "").strip()
+	attribution = (attribution or "").strip()
 	return (
 		"\n\nIdentity/Attribution Overrides (apply only to identity/ownership questions):\n"
 		"- Respond in 1–3 short sentences. No long templates, no headings, no bullet lists.\n"
-		f"- Identify the product: '{app_name}' is an application/platform built by {developer}.\n"
-		"- Be accurate: it uses AI language models via API providers; avoid implying the app itself is a standalone model.\n"
+		f"- Identify the product: '{app_name}' is an application/platform (not a standalone model).\n"
+		"- Do NOT make claims about creator employment, ownership, or affiliations unless explicitly provided by official documentation or configuration.\n"
+		"- If attribution details are missing or uncertain, say you can’t verify and refer to official documentation.\n"
+		"- Be accurate: it may use AI language models via API providers; avoid implying the app itself is a standalone model.\n"
 		"- If asked about ChatGPT/OpenAI/Google: clarify those are separate companies/products; do not claim affiliation.\n"
-		f"- If needed, include attribution: {attribution}\n"
+		f"- If needed, include configured attribution verbatim: {attribution or 'Refer to official documentation.'}\n"
 	)

@@ -1,0 +1,243 @@
+\documentclass[10pt, letterpaper]{article}
+
+% ================= PAGE GEOMETRY =================
+\usepackage[
+    ignoreheadfoot,
+    top=1.2cm,
+    bottom=1.2cm,
+    left=1.2cm,
+    right=1.2cm,
+    footskip=0.6cm
+]{geometry}
+
+% ================= PACKAGES =================
+\usepackage{titlesec}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+\usepackage{eso-pic}
+\usepackage{calc}
+\usepackage{bookmark}
+\usepackage{lastpage}
+\usepackage{changepage}
+\usepackage{paracol}
+\usepackage{ifthen}
+\usepackage{needspace}
+\usepackage{iftex}
+
+% ================= COLORS =================
+\definecolor{primaryColor}{RGB}{0,79,144}
+
+% ================= ATS SAFE =================
+\ifPDFTeX
+  \input{glyphtounicode}
+  \pdfgentounicode=1
+  \usepackage[utf8]{inputenc}
+  \usepackage{lmodern}
+\fi
+
+% ================= GLOBAL LAYOUT =================
+\pagestyle{empty}
+\setcounter{secnumdepth}{0}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\setlength{\topskip}{0pt}
+\setlength{\columnsep}{0cm}
+
+% Fix bottom gap bug
+\raggedbottom
+\clubpenalty=10000
+\widowpenalty=10000
+
+% ================= SECTION STYLE =================
+\titleformat{\section}{\bfseries\large}{}{0pt}{}[\vspace{1pt}\titlerule]
+\titlespacing{\section}{0pt}{6pt}{4pt}
+
+% ================= BULLET CONTROL =================
+\renewcommand\labelitemi{-}
+
+\newenvironment{highlights}{
+\begin{itemize}[leftmargin=0.35cm, itemsep=1pt, topsep=1pt, parsep=0pt]
+}{
+\end{itemize}
+}
+
+\newenvironment{highlightsforbulletentries}{
+\begin{itemize}[leftmargin=10pt, itemsep=1pt, topsep=1pt]
+}{
+\end{itemize}
+}
+
+% ================= COLUMN LAYOUT =================
+\newenvironment{onecolentry}{
+\begin{adjustwidth}{0.15cm}{0.15cm}
+}{
+\end{adjustwidth}
+}
+
+\newenvironment{twocolentry}[2][]{
+\onecolentry
+\def\secondColumn{#2}
+\setcolumnwidth{\fill,4.2cm}
+\begin{paracol}{2}
+}{
+\switchcolumn \raggedleft \secondColumn
+\end{paracol}
+\endonecolentry
+}
+
+% ================= HEADER =================
+\newenvironment{header}{
+\centering\linespread{1.15}\selectfont
+}{}
+
+% ================= LINKS =================
+\let\hrefWithoutArrow\href
+\renewcommand{\href}[2]{\hrefWithoutArrow{#1}{#2}}
+
+% ================= START DOCUMENT =================
+\begin{document}
+
+
+% ================= HEADER =================
+\begin{header}
+{\fontsize{24pt}{24pt}\selectfont\textbf{Varun Bikkumalla}}
+
+\vspace{6pt}
+
+\centerline{\small Hyderabad, India\quad\textbar\quad \href{mailto:varunbikkumalla968@gmail.com}{varunbikkumalla968@gmail.com}\quad\textbar\quad \href{tel:+919121411567}{+91 9121411567}\quad\textbar\quad \href{https://www.linkedin.com/in/varunc9}{LinkedIn}\quad\textbar\quad \href{https://github.com/Varun-addh}{GitHub}}
+\end{header}
+
+% ================= CONTENT =================
+\section{Professional Summary}
+\begin{onecolentry}
+AI / Data Engineer with approximately 2 years of experience building SQL-driven data platforms, streamlining ETL pipelines, and integrating Artificial Intelligence/Machine Learning (AI/ML)-driven solutions. Recognized for enhancing data reliability by 25\%, reducing analytics turnaround by 30\%, and deploying production-grade AWS cloud infrastructure.
+\end{onecolentry}
+
+\section{Experience}
+
+\begin{twocolentry}{\textit{Hyderabad, India}\\\textit{Jul 2024--Present}}
+\textbf{Associate Data Engineer} \\ \textit{AionOS}
+\end{twocolentry}
+\begin{onecolentry}
+\begin{highlights}
+\item Led the design and development of \textbf{IntelliStream}, an internal AI-powered data intelligence platform used across business units to improve data accessibility, data trust, and real-time decision-making.
+\item Architected scalable data ingestion and transformation pipelines, achieving \textbf{10--15s query latency} on enterprise-scale datasets and improving ingestion reliability by \textbf{25\%} for cross-functional analytics (finance \& ops).
+\item Engineered \textbf{LLM-driven data quality and monitoring} systems, increasing anomaly detection accuracy by \textbf{30\%} while reducing false positives and manual triage effort.
+\item Designed and automated cloud-native deployment pipelines on \textbf{AWS} (Docker, Kubernetes), reducing release cycles by \textbf{15\%} and ensuring high-availability, fault-tolerant infrastructure.
+\item Partnered across teams to translate business requirements into production-grade data systems adopted at enterprise scale.
+\end{highlights}
+\end{onecolentry}
+
+
+\vspace{0.2 cm}
+
+\begin{twocolentry}{\textit{India, Remote}\\\textit{Jul--Dec 2023}}
+\textbf{Frontend Developer Intern} \\
+\textit{S7Works}
+\end{twocolentry}
+\begin{onecolentry}
+\begin{highlights}
+\item Enhanced production-grade platforms \textbf{Bitwork.ai} and \textbf{Workahub}, improving customer engagement.  
+\item Developed responsive interfaces in \textbf{React.js}, leveraging dynamic routing and performance optimization.
+\item Diagnosed and fixed cross-browser issues, ensuring stability and consistency across major platforms.  
+\item Integrated third-party tools such as \textbf{HubSpot} to capture analytics and personalize user workflows.  
+\item Coordinated with backend teams to refine API integrations and deliver pixel-perfect, interactive designs.  
+\end{highlights}
+\end{onecolentry}
+
+\vspace{0.2 cm}
+
+\begin{twocolentry}{\textit{India}\\\textit{May--Jul 2023}}
+\textbf{AI-ML Virtual Internship} \\
+\textit{Sponsored by Amazon Web Services (AWS)}
+\end{twocolentry}
+\begin{onecolentry}
+\begin{highlights}
+\item Acquired solid expertise in \textbf{AI/ML}, including supervised/unsupervised learning and deep learning methods.  
+\item Designed and trained ML models in \textbf{Python (scikit-learn, TensorFlow)} using real-world datasets.  
+\item Deployed predictive models via \textbf{AWS SageMaker, Lambda, and S3}, enabling cloud-scale inference.  
+\item Presented solutions to industry mentors, incorporating MLOps best practices for maintainable pipelines.  
+\end{highlights}
+\end{onecolentry}
+
+
+
+\section{Projects}
+
+\begin{onecolentry}
+	\textbf{Stratax AI --- AI Interview \& Engineering Intelligence Platform}\\
+{\small\textit{Personal Application | FastAPI, Qdrant, Docker, Multi-LLM Orchestration (Groq, Gemini), STT/TTS}}
+\end{onecolentry}
+\begin{onecolentry}
+\begin{highlights}
+\item Built a production-grade AI interview platform on \textbf{FastAPI} with multi-LLM orchestration (\textbf{Groq, Gemini}), delivering \textbf{40--60\% faster latency} vs a single-model baseline and powering \textbf{5+ workflows}.
+\item Designed a \textbf{modular service architecture} that reduced feature development time by about 35\% and improved maintainability across \textbf{12+ core backend modules}.
+\item Implemented an AI-native \textbf{Practice Mode} with cooperating agents, increasing session completion rate by about 30\% and reducing repeated-question occurrences by about 45\% through adaptive sequencing.
+\item Built a hybrid \textbf{Interview Intelligence} engine using vector search (\textbf{Qdrant}) and LLM reranking, improving question relevance by about 50\% and lowering empty-result queries by about 70\%.
+\item Built real-time speech analytics (\textbf{STT/TTS} + delivery metrics), delivering feedback in \textbf{under 10 seconds} and improving practice effectiveness signals by about 40\%.
+\item Instrumented structured telemetry \& learning loops to enable explainable personalization; improved next-session accuracy by about 25\% via adaptive focus recommendations.
+\item Containerized and deployed the platform with \textbf{Docker} \& \textbf{Docker Compose}, reducing environment setup time by about 60\% and deployment failures by about 40\%.
+\end{highlights}
+\end{onecolentry}
+
+\vspace{0.2 cm}
+
+\begin{onecolentry}
+    \textbf{IntelliStream -- AI-Powered Data Intelligence Platform}\\
+{\small\textit{AionOS | React, Firebase, Python, HuggingFace, Supabase, Snowflake, Zuplo, Edge Functions, AWS}}
+\end{onecolentry}
+\begin{onecolentry}
+\begin{highlights}
+\item \textbf{TrustMate:} An AI-driven data quality and catalog system using LLMs (Gemini, DeepSeek), enabling anomaly detection, PII monitoring, and remediation alerts, cutting resolution time by 20\%.  
+\item \textbf{InsightsMate:} Built a conversational analytics assistant with multi-route orchestration (Gemini, LLaMA) for dataset exploration, chat-based querying, and auto-insights.
+\item \textbf{IngestMate:} Developed schema validation–driven ingestion pipelines with LLM agents, improving ingestion reliability by 25\% and enforcing consistent schema compliance across datasets.  
+\item Deployed production-ready infrastructure across \textbf{Firebase, HuggingFace, and AWS}, ensuring scalability and enterprise adoption. 
+\end{highlights}
+\end{onecolentry}
+
+\vspace{0.2 cm}
+
+\section{Technical Skills}
+\begin{onecolentry}
+\begin{tabular}{@{}l l}
+\textbf{Languages:} & Python, JavaScript, SQL\\
+\textbf{Frontend:} & HTML, Tailwind CSS, React.js\\
+\textbf{Backend:} & Node.js, FastAPI, GraphQL, REST, Hugging Face, OAuth2\\
+\textbf{DevOps:} & Docker, GitHub, AWS, Firebase, Supabase\\
+\textbf{Packages:} & NumPy, Pandas, scikit-learn, TensorFlow, PyTorch, Matplotlib, Seaborn\\
+\textbf{AI/LLMs:} & Groq, Gemini, OpenAI, LangChain, LLM Agents\\
+\end{tabular}
+\end{onecolentry}
+
+\section{Certifications}
+\begin{onecolentry}
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Databricks Certified Data Engineer Professional} – (2024)
+    \item \textbf{Databricks Certified Data Analyst Associate} – (2024)
+    \item \textbf{EDW Migration Delivery Specialization Lab} – Databricks (2025)
+    \item \textbf{CDW Migration Delivery Specialization Lab} – Databricks (2025)
+\end{itemize}
+\end{onecolentry}
+
+\section{Achievements}
+\begin{onecolentry}
+\begin{itemize}[leftmargin=*]
+    \item Served as the team leader for a group of six members during the prestigious Manthan event, organized by the Bureau of Research and Development (BPR\&D), a nationally recognized platform encompassing colleges from across the country.
+    \item Mentored 3 junior devs and performed 10+ code reviews, improving team-wide best practices.
+    \item Achieved 3 stars in CODECHEF with the highest rating of 1624
+\end{itemize}
+\end{onecolentry}
+
+\section{Education}
+\begin{twocolentry}{\textit{2020--2024}}
+\textbf{CMR Institute of Technology, Hyderabad} \\
+    \textit{Bachelor of Technology (B.Tech.)} -- GPA: 8.96 / 10
+\end{twocolentry}
+
+
+
+\end{document}

@@ -32,6 +32,8 @@ class SessionState:
 	last_update: datetime = field(default_factory=utcnow)
 	profile_text: str = ""
 	custom_title: Optional[str] = None
+	# Reputation/safety: count consecutive abusive/defamatory user turns.
+	abuse_strikes: int = 0
 
 
 # Regex for safe identifiers (alphanumeric, hyphens, underscores)
@@ -120,7 +122,18 @@ class SessionManager:
 			last_update=last_dt,
 			profile_text=data.get("profile_text", ""),
 			custom_title=data.get("custom_title"),
+			abuse_strikes=int(data.get("abuse_strikes", 0) or 0),
 		)
+
+	async def set_abuse_strikes(self, session_id: str, strikes: int) -> None:
+		state = await self.get_required(session_id)
+		try:
+			v = int(strikes)
+		except Exception:
+			v = 0
+		state.abuse_strikes = max(0, min(20, v))
+		state.last_update = utcnow()
+		self._save(state)
 
 	def _load_all(self) -> None:
 		"""Load all persisted sessions for THIS user and sync with disk."""

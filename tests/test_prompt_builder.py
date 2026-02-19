@@ -13,7 +13,7 @@ def test_builder_renders_identity_and_ux_modules():
 
     # Identity text is rendered (placeholders replaced)
     assert "You are Stratax AI" in out
-    assert "developed by Varun Bikkumalla" in out
+    assert "Stratax AI was developed by Varun Bikkumalla." in out
 
     # UX and hygiene rules present
     assert "Conversation-first UX" in out
