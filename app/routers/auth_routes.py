@@ -533,6 +533,7 @@ async def google_login():
     }
 
     _store_oauth_state(state)
+    logger.info("[OAUTH] Stored state=%s, total_states=%d", state, len(_oauth_states))
 
     url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(query)
     return RedirectResponse(url=url, status_code=302)
@@ -547,15 +548,27 @@ async def google_callback(
     db: Session = Depends(get_db),
 ):
     """Handle Google OAuth callback, create/link user, and redirect to frontend with JWT."""
+    logger.info("[OAUTH-CB] Entering callback. state=%s, code=%s, error=%s, frontend_url=%s",
+                state, bool(code), error, settings.frontend_url)
+    logger.info("[OAUTH-CB] Known states: %s", list(_oauth_states.keys()))
+
     if error:
-        return RedirectResponse(_frontend_callback_url({"error": error}))
+        url = _frontend_callback_url({"error": error})
+        logger.warning("[OAUTH-CB] Google returned error=%s, redirecting to %s", error, url)
+        return RedirectResponse(url)
 
     if not code:
-        return RedirectResponse(_frontend_callback_url({"error": "no_code"}))
+        url = _frontend_callback_url({"error": "no_code"})
+        logger.warning("[OAUTH-CB] No code, redirecting to %s", url)
+        return RedirectResponse(url)
 
     if not state or not _consume_oauth_state(state):
-        logger.warning("OAuth state mismatch – state=%s, known=%d", state, len(_oauth_states))
-        return RedirectResponse(_frontend_callback_url({"error": "invalid_state"}))
+        url = _frontend_callback_url({"error": "invalid_state"})
+        logger.warning("[OAUTH-CB] State mismatch! state=%s, remaining_states=%s, redirecting to %s",
+                       state, list(_oauth_states.keys()), url)
+        return RedirectResponse(url)
+
+    logger.info("[OAUTH-CB] State validated OK, proceeding with token exchange")
 
     if not settings.google_client_id or not settings.google_client_secret:
         return RedirectResponse(_frontend_callback_url({"error": "oauth_not_configured"}))
@@ -655,8 +668,12 @@ async def google_callback(
             "full_name": user.full_name or "",
             "tier": user.tier,
         }
-        return RedirectResponse(_frontend_callback_url(params))
+        url = _frontend_callback_url(params)
+        logger.info("[OAUTH-CB] SUCCESS! Redirecting user %s to %s", user.email, url)
+        return RedirectResponse(url)
 
     except Exception as e:
-        logger.error("Google OAuth callback failed: %s", e, exc_info=True)
-        return RedirectResponse(_frontend_callback_url({"error": "oauth_failed"}))
+        logger.error("[OAUTH-CB] Exception: %s", e, exc_info=True)
+        url = _frontend_callback_url({"error": "oauth_failed"})
+        logger.error("[OAUTH-CB] Redirecting to %s", url)
+        return RedirectResponse(url)
