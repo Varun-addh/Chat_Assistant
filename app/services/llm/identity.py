@@ -189,10 +189,16 @@ def is_identity_question(settings, question: str) -> bool:
 	# Product-definition style queries should use deterministic identity answers
 	# (prevents the definition fallback from injecting rigid bullet labels).
 	app_targets = app_name_targets(settings)
-	if app_targets and any(t in q_clean for t in app_targets):
+	if app_targets:
 		# e.g. "what is stratax", "what is stratax meant to be", "tell me about stratax"
-		if re.search(r"\b(what\s+is|meaning\s+of|define|definition\s+of|meant\s+to\s+be|purpose\s+of|about)\b", q_clean):
-			return True
+		for t in app_targets:
+			pattern = rf"\b(what\s+is|meaning\s+of|define|definition\s+of|meant\s+to\s+be|purpose\s+of|about)\s+(the\s+)?(app\s+)?{re.escape(t)}\b"
+			if re.search(pattern, q_clean):
+				return True
+			# Also match "what [target] is"
+			pattern_2 = rf"\bwhat\s+(the\s+)?(app\s+)?{re.escape(t)}\s+is\b"
+			if re.search(pattern_2, q_clean):
+				return True
 
 	# Regex: handle punctuation/extra whitespace around name questions
 	if re.search(r"\b(what\s*(?:'s| is)\s+your\s+name|whats\s+your\s+name|what\s+is\s+you\s+name)\b", q_clean):
