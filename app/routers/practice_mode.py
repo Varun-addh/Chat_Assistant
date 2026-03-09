@@ -179,9 +179,22 @@ def _get_media_and_proctoring_summary(session_id: str) -> dict[str, Any]:
             .all()
         )
 
-    violation_events = [e.event_type for e in events if e.event_type in violation_types]
+    violation_events = [e for e in events if e.event_type in violation_types]
     proctoring_summary["violation_count"] = int(len(violation_events))
-    proctoring_summary["events"] = sorted(set(violation_events))
+
+    # Keep a unique set of event objects so the frontend can display them properly.
+    seen_types = set()
+    unique_events = []
+    for e in violation_events:
+        if e.event_type not in seen_types:
+            seen_types.add(e.event_type)
+            unique_events.append({
+                "event_type": e.event_type,
+                "timestamp": e.event_ts.isoformat() if e.event_ts else None,
+                "details": e.extra_data.get("reason", "") if e.extra_data else ""
+            })
+
+    proctoring_summary["events"] = unique_events
 
     return {"media": media, "proctoring_summary": proctoring_summary}
 

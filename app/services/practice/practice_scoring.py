@@ -103,8 +103,17 @@ def score_answer(*, answer: AnswerSubmission) -> PracticeAnswerScoreResult:
     conf = float(getattr(metrics, "confidence_score", 0.0) or 0.0)
     overtalked = bool(getattr(metrics, "overtalked", False))
 
-    # Delivery
-    delivery = conf * 10.0
+    # Delivery scoring
+    # conf is 0-1 scale from speech metrics. When no speech metrics are
+    # available (text input), conf and wpm will both be 0.  In that case
+    # we use a generous baseline so text-based answers are not penalised
+    # for something that was never measured.
+    has_speech_metrics = conf > 0.0 or wpm > 0.0
+    if has_speech_metrics:
+        delivery = conf * 100.0
+    else:
+        # No speech data — assume average-good delivery (70/100)
+        delivery = 70.0
     delivery -= min(20.0, fillers * 2.5)
     if overtalked:
         delivery -= 10.0
@@ -299,8 +308,8 @@ def score_session(*, session: PracticeSession) -> PracticeScoreResult:
         if overtalked:
             overtalked_count += 1
 
-        # Start from confidence
-        delivery = conf * 10.0
+        # Start from confidence (confidence_score is 0-1 scale, convert to 0-100)
+        delivery = conf * 100.0
         # Penalize fillers (small)
         delivery -= min(20.0, fillers * 2.5)
         # Penalize overtalking

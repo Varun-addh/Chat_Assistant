@@ -1,0 +1,9 @@
+faiss-cpu 1.8.0.post1 has requirement numpy<2.0,>=1.0, but you have numpy 2.4.2.
+google-adk 0.2.0 has requirement uvicorn>=0.34.0, but you have uvicorn 0.30.6.
+google-cloud-bigquery 3.31.0 has requirement packaging>=24.2.0, but you have packaging 23.2.
+langchain 0.3.2 has requirement numpy<2.0.0,>=1.26.0; python_version >= "3.12", but you have numpy 2.4.2.
+langchain-community 0.3.1 has requirement numpy<2.0.0,>=1.26.0; python_version >= "3.12", but you have numpy 2.4.2.
+langchain-google-genai 1.0.1 has requirement google-generativeai<0.5.0,>=0.4.1, but you have google-generativeai 0.7.2.
+langchain-google-genai 1.0.1 has requirement langchain-core<0.2,>=0.1, but you have langchain-core 0.3.63.
+python-jose 3.4.0 has requirement pyasn1<0.5.0,>=0.4.1, but you have pyasn1 0.6.1.
+sse-starlette 2.2.1 has requirement starlette>=0.41.3, but you have starlette 0.40.0.

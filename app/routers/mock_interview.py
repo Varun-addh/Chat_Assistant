@@ -734,6 +734,9 @@ async def get_progress(
         scores = [e.overall_score for e in session.evaluations]
         avg_score = sum(scores) / len(scores) if scores else None
         
+        total_time_seconds = sum(session.time_per_question.values())
+        hints_used_total = sum(session.hints_used.values())
+        
         return {
             "session_id": session_id,
             "current_question": session.current_question_index + 1,
@@ -743,6 +746,8 @@ async def get_progress(
             "scores": scores,
             "time_per_question": session.time_per_question,
             "hints_used": session.hints_used,
+            "total_time_seconds": total_time_seconds,
+            "hints_used_total": hints_used_total,
             "started_at": session.started_at.isoformat(),
             "is_complete": session.current_question_index >= session.total_questions
         }
