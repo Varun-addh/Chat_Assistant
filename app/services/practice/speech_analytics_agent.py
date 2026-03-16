@@ -211,7 +211,9 @@ class SpeechAnalyticsAgent:
         hesitations = []
         
         # Pattern 1: Single letters standing alone (often transcribed hesitations)
-        single_letter_pattern = r'\b[a-zA-Z]\b'
+        # Use negative lookbehind/lookahead for apostrophe to avoid false positives
+        # from contractions like "I'm" (→ m) or "that's" (→ s)
+        single_letter_pattern = r"(?<!')\b[a-zA-Z]\b(?!')"
         matches = re.finditer(single_letter_pattern, transcript)
         for match in matches:
             word = match.group()
