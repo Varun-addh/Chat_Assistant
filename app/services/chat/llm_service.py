@@ -51,6 +51,10 @@ from app.services.llm import response_postprocess
 logger = logging.getLogger(__name__)
 
 
+class LLMAuthenticationError(Exception):
+	"""Raised when an upstream LLM provider rejects the configured credentials."""
+
+
 def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 	msg = str(exc).lower()
 	return any(
@@ -63,6 +67,21 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 			"resource_exhausted",
 			"exceeded",
 			"too many requests",
+		]
+	)
+
+
+def _is_authentication_error(exc: Exception) -> bool:
+	msg = str(exc).lower()
+	return any(
+		x in msg
+		for x in [
+			"401",
+			"unauthorized",
+			"invalid_api_key",
+			"invalid api key",
+			"authentication_error",
+			"authentication failed",
 		]
 	)
 
@@ -117,7 +136,8 @@ class LLMService:
 		json_mode: bool = False,
 		temperature: float = 0.3,
 		max_tokens: int = 2000,
-		model: Optional[str] = None
+		model: Optional[str] = None,
+		raise_on_auth_error: bool = False,
 	) -> str:
 		"""
 		🚀 UNIVERSAL GENERATOR - One method to rule them all.
@@ -228,6 +248,10 @@ class LLMService:
 				result = await anyio.to_thread.run_sync(_call, attempt_key)
 				return (result or "").strip()
 			except Exception as e:
+				if _is_authentication_error(e):
+					logger.error(f"Generate text authentication failed: {e}")
+					if raise_on_auth_error:
+						raise LLMAuthenticationError(str(e)) from e
 				if attempt == 0 and attempt_key and attempt_key in pool_keys and _is_quota_or_rate_limit_error(e):
 					demo_key_pool.mark_exhausted(attempt_key, reason=str(e)[:200])
 					attempt_key = demo_key_pool.get_key()  # rotate

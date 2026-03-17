@@ -380,6 +380,8 @@ CONTENT_RELEVANCE: <assessment>"""
         Returns:
             List of contextually relevant questions
         """
+        from app.services.chat.llm_service import LLMAuthenticationError
+
         if not user_profile:
             # Fallback to generic questions if no profile
             return await self._generate_generic_questions(difficulty, count, round_type)
@@ -462,6 +464,10 @@ CONTENT_RELEVANCE: <assessment>"""
             )
 
             return questions[:count]
+
+        except LLMAuthenticationError:
+            logger.error("Adaptive question generation failed due to LLM authentication error", exc_info=True)
+            raise
 
         except Exception as e:
             logger.error(f"Adaptive question generation failed: {e}", exc_info=True)
@@ -992,22 +998,27 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
     
     async def _call_llm(self, prompt: str, api_key: Optional[str] = None) -> str:
         """Call LLM with JSON mode for structured output."""
-        from app.services.chat.llm_service import llm_service
-        
+        from app.services.chat.llm_service import LLMAuthenticationError, llm_service
+
         try:
             text = await llm_service.generate_text(
                 prompt=prompt,
                 api_key=api_key,
                 json_mode=True,
                 temperature=0.8,
-                max_tokens=4000
+                max_tokens=4000,
+                raise_on_auth_error=True,
             )
-            
+
             if not text:
                 raise ValueError("LLM response empty")
-                
+
             return text
-            
+
+        except LLMAuthenticationError:
+            logger.error("Error in LLM question generation: invalid upstream credentials")
+            raise
+
         except Exception as e:
             logger.error(f"Error in LLM question generation: {e}")
             raise

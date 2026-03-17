@@ -45,6 +45,9 @@ from app.schemas import (
     PracticeSessionMediaOut,
     PracticeSessionProctoringEventIn,
     PracticeSessionProctoringEventOut,
+    PracticeSessionProctoringHeartbeatIn,
+    PracticeSessionProctoringHeartbeatOut,
+    PracticeSessionProctoringStatusOut,
     CodeTestResult,
     CodeEvaluationFeedback,
     PracticeConfidenceOutcomeIn,
@@ -59,7 +62,7 @@ from app.database import get_db_context
 from app.middleware.auth import get_user_id_from_request
 from app.utils.event_logging import track_event, stable_question_id, stable_hash
 from app.services.practice.learning_loops import compute_practice_insights, merge_focus_areas, get_previously_asked_questions
-from app.models import PracticeAttemptRecord, PracticeSessionMedia, PracticeProctoringEvent
+from app.models import PracticeAttemptRecord, PracticeSessionMedia, PracticeProctoringEvent, PracticeProctoringSession
 from app.services.practice.practice_learning import upsert_practice_session_metrics
 from app.services.practice.practice_learning import upsert_practice_session_outcome_confidence
 from app.services.practice.practice_progress import (
@@ -69,6 +72,17 @@ from app.services.practice.practice_progress import (
     save_completed_attempt,
 )
 from app.services.practice.practice_scoring import evaluation_report_to_json, score_session
+from app.services.practice.proctoring import (
+    build_proctoring_status_payload,
+    canonicalize_proctoring_event_type,
+    ensure_proctoring_session_state,
+    get_proctoring_session_state,
+    ingest_proctoring_signal,
+    is_serious_violation_event,
+    is_violation_event,
+    process_proctoring_heartbeat,
+)
+from app.services.chat.llm_service import LLMAuthenticationError
 from app.services.chat.ai_native_enhancements import CodeExecutionSandbox
 
 logger = logging.getLogger(__name__)
@@ -81,6 +95,18 @@ router = APIRouter(
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _normalize_realtime_proctoring_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(snapshot or {})
+    if (
+        normalized.get("status") == "WARNING"
+        and normalized.get("action") == "none"
+        and not normalized.get("heartbeat_stale")
+        and not normalized.get("terminated_reason")
+    ):
+        normalized["status"] = "ACTIVE"
+    return normalized
 
 
 def _media_root_dir() -> Path:
@@ -138,20 +164,88 @@ def _insert_practice_proctoring_event(
     event_type: str,
     metadata: Optional[dict[str, Any]] = None,
     event_ts: Optional[datetime] = None,
-) -> None:
+    user_id: Optional[str] = None,
+    severity: Optional[str] = None,
+    source: str = "server",
+) -> Optional[dict[str, Any]]:
     """Insert a proctoring event row (best-effort, never raises)."""
     try:
         with get_db_context() as db:
-            row = PracticeProctoringEvent(
+            snapshot = ingest_proctoring_signal(
+                db,
                 session_id=session_id,
+                user_id=user_id,
                 event_type=event_type,
-                event_ts=event_ts or _utcnow(),
-                extra_data=metadata or {},
+                metadata=metadata,
+                severity_hint=severity,
+                source=source,
+                reference_time=event_ts or _utcnow(),
             )
-            db.add(row)
             db.commit()
+            return snapshot
     except Exception:
-        pass
+        return None
+
+
+def _ensure_practice_proctoring_state(
+    *,
+    session_id: str,
+    user_id: Optional[str] = None,
+    monitoring_metadata: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    try:
+        with get_db_context() as db:
+            state = ensure_proctoring_session_state(
+                db,
+                session_id=session_id,
+                user_id=user_id,
+                reference_time=_utcnow(),
+                monitoring_metadata=monitoring_metadata,
+            )
+            snapshot = build_proctoring_status_payload(state, reference_time=_utcnow())
+            db.commit()
+            return snapshot
+    except Exception:
+        return None
+
+
+def _practice_session_exists(*, db, session_id: str) -> bool:
+    if practice_service and practice_service.get_session(session_id):
+        return True
+
+    if (
+        db.query(PracticeProctoringSession.id)
+        .filter(PracticeProctoringSession.session_id == session_id)
+        .first()
+        is not None
+    ):
+        return True
+
+    if (
+        db.query(PracticeAttemptRecord.id)
+        .filter(PracticeAttemptRecord.session_id == session_id)
+        .first()
+        is not None
+    ):
+        return True
+
+    if (
+        db.query(PracticeSessionMedia.id)
+        .filter(PracticeSessionMedia.session_id == session_id)
+        .first()
+        is not None
+    ):
+        return True
+
+    if (
+        db.query(PracticeProctoringEvent.id)
+        .filter(PracticeProctoringEvent.session_id == session_id)
+        .first()
+        is not None
+    ):
+        return True
+
+    return False
 
 
 def _get_media_and_proctoring_summary(session_id: str) -> dict[str, Any]:
@@ -162,14 +256,18 @@ def _get_media_and_proctoring_summary(session_id: str) -> dict[str, Any]:
     }
     proctoring_summary: dict[str, Any] = {
         "violation_count": 0,
+        "total_violation_count": 0,
+        "serious_violation_count": 0,
+        "status": "ACTIVE",
+        "risk_level": "LOW",
+        "terminated_reason": None,
+        "heartbeat_stale": False,
+        "last_heartbeat_at": None,
+        "remaining_total_before_termination": 5,
+        "remaining_serious_before_termination": 3,
         "events": [],
-    }
-
-    violation_types = {
-        "SCREEN_STOPPED",
-        "CAMERA_STOPPED",
-        "TAB_SWITCH",
-        "WINDOW_MINIMIZED",
+        "recent_events": [],
+        "event_counts": {},
     }
 
     with get_db_context() as db:
@@ -198,23 +296,108 @@ def _get_media_and_proctoring_summary(session_id: str) -> dict[str, Any]:
             .order_by(PracticeProctoringEvent.event_ts.asc())
             .all()
         )
+        event_rows = [
+            {
+                "event_type": event.event_type,
+                "event_ts": event.event_ts,
+                "extra_data": dict(event.extra_data or {}),
+            }
+            for event in events
+        ]
 
-    violation_events = [e for e in events if e.event_type in violation_types]
-    proctoring_summary["violation_count"] = int(len(violation_events))
+        state = get_proctoring_session_state(db, session_id=session_id)
+        if state:
+            snapshot = build_proctoring_status_payload(state, reference_time=_utcnow())
+            db.commit()
+        else:
+            total_violations = 0
+            serious_violations = 0
+            for event in event_rows:
+                canonical = canonicalize_proctoring_event_type(event["event_type"])
+                if not is_violation_event(canonical):
+                    continue
+                counted = None
+                if isinstance(event["extra_data"], dict):
+                    counted = event["extra_data"].get("counted")
+                if counted is None:
+                    counted = True
+                if not counted:
+                    continue
+                total_violations += 1
+                if is_serious_violation_event(canonical):
+                    serious_violations += 1
+            risk_level = "LOW"
+            if serious_violations >= 2 or total_violations >= 4:
+                risk_level = "HIGH"
+            elif serious_violations >= 1 or total_violations >= 2:
+                risk_level = "MEDIUM"
+            snapshot = {
+                "session_id": session_id,
+                "status": "WARNING" if total_violations else "ACTIVE",
+                "risk_level": risk_level,
+                "total_violations": total_violations,
+                "serious_violations": serious_violations,
+                "remaining_total_before_termination": max(0, 5 - total_violations),
+                "remaining_serious_before_termination": max(0, 3 - serious_violations),
+                "heartbeat_stale": False,
+                "last_heartbeat_at": None,
+                "terminated_reason": None,
+                "action": "none",
+                "message": None,
+                "monitoring_metadata": {},
+            }
 
-    # Keep a unique set of event objects so the frontend can display them properly.
-    seen_types = set()
-    unique_events = []
-    for e in violation_events:
-        if e.event_type not in seen_types:
-            seen_types.add(e.event_type)
-            unique_events.append({
-                "event_type": e.event_type,
-                "timestamp": e.event_ts.isoformat() if e.event_ts else None,
-                "details": e.extra_data.get("reason", "") if e.extra_data else ""
-            })
+    event_counts: dict[str, int] = {}
+    unique_events: dict[str, dict[str, Any]] = {}
+    recent_events: list[dict[str, Any]] = []
 
-    proctoring_summary["events"] = unique_events
+    for event in event_rows:
+        canonical = canonicalize_proctoring_event_type(event["event_type"])
+        raw_extra = event["extra_data"] if isinstance(event["extra_data"], dict) else {}
+        nested_metadata = raw_extra.get("metadata") if isinstance(raw_extra.get("metadata"), dict) else None
+        event_metadata = nested_metadata or raw_extra
+        counted = raw_extra.get("counted")
+        if counted is None:
+            counted = is_violation_event(canonical)
+
+        details = ""
+        if isinstance(event_metadata, dict):
+            details = str(event_metadata.get("reason") or event_metadata.get("message") or "")
+
+        event_row = {
+            "event_type": canonical,
+            "timestamp": event["event_ts"].isoformat() if event["event_ts"] else None,
+            "details": details,
+            "counted": bool(counted),
+        }
+        recent_events.append(event_row)
+
+        if not is_violation_event(canonical) or not counted:
+            continue
+
+        event_counts[canonical] = int(event_counts.get(canonical, 0)) + 1
+        unique_events[canonical] = {
+            "event_type": canonical,
+            "timestamp": event["event_ts"].isoformat() if event["event_ts"] else None,
+            "details": details,
+            "count": event_counts[canonical],
+        }
+
+    proctoring_summary["violation_count"] = int(snapshot["total_violations"])
+    proctoring_summary["total_violation_count"] = int(snapshot["total_violations"])
+    proctoring_summary["serious_violation_count"] = int(snapshot["serious_violations"])
+    proctoring_summary["status"] = snapshot["status"]
+    proctoring_summary["risk_level"] = snapshot["risk_level"]
+    proctoring_summary["terminated_reason"] = snapshot["terminated_reason"]
+    proctoring_summary["heartbeat_stale"] = bool(snapshot["heartbeat_stale"])
+    proctoring_summary["last_heartbeat_at"] = (
+        snapshot["last_heartbeat_at"].isoformat() if snapshot.get("last_heartbeat_at") else None
+    )
+    proctoring_summary["remaining_total_before_termination"] = int(snapshot["remaining_total_before_termination"])
+    proctoring_summary["remaining_serious_before_termination"] = int(snapshot["remaining_serious_before_termination"])
+    proctoring_summary["events"] = list(unique_events.values())
+    proctoring_summary["recent_events"] = recent_events[-25:]
+    proctoring_summary["event_counts"] = event_counts
 
     return {"media": media, "proctoring_summary": proctoring_summary}
 
@@ -289,14 +472,24 @@ async def ingest_proctoring_event(payload: ProctoringEventIn, http_request: Requ
 
     user_id = get_user_id_from_request(http_request) or "guest_unknown"
 
-    if not practice_service:
-        raise HTTPException(status_code=503, detail="Practice Mode is not initialized")
+    with get_db_context() as db:
+        if not _practice_session_exists(db=db, session_id=payload.session_id):
+            raise HTTPException(status_code=404, detail="Practice session not found")
 
-    sess = practice_service.get_session(payload.session_id)
-    if not sess:
-        raise HTTPException(status_code=404, detail="Practice session not found")
+        snapshot = ingest_proctoring_signal(
+            db,
+            session_id=payload.session_id,
+            user_id=user_id,
+            event_type=payload.event_type.value,
+            metadata=payload.metadata,
+            client_timestamp=payload.client_timestamp,
+            severity_hint=payload.severity,
+            source="legacy_api",
+            reference_time=_utcnow(),
+        )
+        db.commit()
 
-    event_type = f"practice_proctoring_{payload.event_type.value}"
+    event_type = f"practice_proctoring_{canonicalize_proctoring_event_type(payload.event_type.value).lower()}"
     _track_practice_event(
         user_id=user_id,
         session_id=payload.session_id,
@@ -305,10 +498,15 @@ async def ingest_proctoring_event(payload: ProctoringEventIn, http_request: Requ
             "severity": payload.severity,
             "metadata": payload.metadata,
             "client_timestamp": payload.client_timestamp.isoformat() if payload.client_timestamp else None,
+            "status": snapshot["status"],
+            "risk_level": snapshot["risk_level"],
+            "action": snapshot["action"],
+            "total_violations": snapshot["total_violations"],
+            "serious_violations": snapshot["serious_violations"],
         },
     )
 
-    return ProctoringEventOut(ok=True)
+    return ProctoringEventOut(ok=True, **snapshot)
 
 
 @router.post("/session/{session_id}/start", response_model=PracticeSessionStartOut)
@@ -332,6 +530,8 @@ async def start_session_with_proctoring_gate(
             session_id=session_id,
             event_type="SESSION_STARTED_WITHOUT_PROCTORING",
             metadata={"screen_shared": bool(payload.screen_shared), "camera_enabled": bool(payload.camera_enabled)},
+            user_id=user_id,
+            source="session_start_gate",
         )
         raise HTTPException(status_code=403, detail="Screen share + camera are required to start")
 
@@ -339,6 +539,8 @@ async def start_session_with_proctoring_gate(
         session_id=session_id,
         event_type="SESSION_STARTED_WITH_PROCTORING",
         metadata={"screen_shared": True, "camera_enabled": True},
+        user_id=user_id,
+        source="session_start_gate",
     )
     _track_practice_event(
         user_id=user_id,
@@ -455,28 +657,113 @@ async def ingest_session_proctoring_event(
     """Insert a DB-backed proctoring event for audit + reporting."""
     user_id = get_user_id_from_request(http_request) or "guest_unknown"
 
-    if not practice_service:
-        raise HTTPException(status_code=503, detail="Practice Mode is not initialized")
+    with get_db_context() as db:
+        if not _practice_session_exists(db=db, session_id=session_id):
+            raise HTTPException(status_code=404, detail="Practice session not found")
 
-    sess = practice_service.get_session(session_id)
-    if not sess:
-        raise HTTPException(status_code=404, detail="Practice session not found")
+        snapshot = ingest_proctoring_signal(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+            event_type=payload.event_type.value,
+            metadata=payload.metadata,
+            client_timestamp=payload.client_timestamp,
+            severity_hint=payload.severity,
+            source="session_api",
+            reference_time=_utcnow(),
+        )
+        db.commit()
 
-    _insert_practice_proctoring_event(
-        session_id=session_id,
-        event_type=payload.event_type.value,
-        metadata={
-            "metadata": payload.metadata,
-            "client_timestamp": payload.client_timestamp.isoformat() if payload.client_timestamp else None,
-        },
-    )
     _track_practice_event(
         user_id=user_id,
         session_id=session_id,
-        event_type=f"practice_proctoring_{payload.event_type.value.lower()}",
-        extra={"metadata": payload.metadata},
+        event_type=f"practice_proctoring_{canonicalize_proctoring_event_type(payload.event_type.value).lower()}",
+        extra={
+            "metadata": payload.metadata,
+            "status": snapshot["status"],
+            "risk_level": snapshot["risk_level"],
+            "action": snapshot["action"],
+            "total_violations": snapshot["total_violations"],
+            "serious_violations": snapshot["serious_violations"],
+        },
     )
-    return PracticeSessionProctoringEventOut(ok=True)
+    return PracticeSessionProctoringEventOut(ok=True, **snapshot)
+
+
+@router.post("/session/{session_id}/proctoring/heartbeat", response_model=PracticeSessionProctoringHeartbeatOut)
+async def ingest_session_proctoring_heartbeat(
+    session_id: str,
+    payload: PracticeSessionProctoringHeartbeatIn,
+    http_request: Request,
+) -> PracticeSessionProctoringHeartbeatOut:
+    """Update backend-authoritative proctoring state from a client heartbeat."""
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+
+    with get_db_context() as db:
+        if not _practice_session_exists(db=db, session_id=session_id):
+            raise HTTPException(status_code=404, detail="Practice session not found")
+
+        snapshot = process_proctoring_heartbeat(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+            camera_active=payload.camera_active,
+            screen_active=payload.screen_active,
+            tab_active=payload.tab_active,
+            window_focused=payload.window_focused,
+            detection_active=payload.detection_active,
+            display_surface=payload.display_surface,
+            metadata=payload.metadata,
+            client_timestamp=payload.client_timestamp,
+            reference_time=_utcnow(),
+        )
+        snapshot = _normalize_realtime_proctoring_snapshot(snapshot)
+        db.commit()
+
+    _track_practice_event(
+        user_id=user_id,
+        session_id=session_id,
+        event_type="practice_proctoring_heartbeat",
+        extra={
+            "camera_active": payload.camera_active,
+            "screen_active": payload.screen_active,
+            "tab_active": payload.tab_active,
+            "window_focused": payload.window_focused,
+            "detection_active": payload.detection_active,
+            "display_surface": payload.display_surface,
+            "status": snapshot["status"],
+            "risk_level": snapshot["risk_level"],
+            "action": snapshot["action"],
+        },
+    )
+    return PracticeSessionProctoringHeartbeatOut(ok=True, **snapshot)
+
+
+@router.get("/session/{session_id}/proctoring/status", response_model=PracticeSessionProctoringStatusOut)
+async def get_session_proctoring_status(
+    session_id: str,
+    http_request: Request,
+) -> PracticeSessionProctoringStatusOut:
+    """Fetch the backend-authoritative proctoring status for a session."""
+    user_id = get_user_id_from_request(http_request) or "guest_unknown"
+
+    with get_db_context() as db:
+        if not _practice_session_exists(db=db, session_id=session_id):
+            raise HTTPException(status_code=404, detail="Practice session not found")
+
+        state = get_proctoring_session_state(db, session_id=session_id)
+        if not state:
+            state = ensure_proctoring_session_state(
+                db,
+                session_id=session_id,
+                user_id=user_id,
+                reference_time=_utcnow(),
+            )
+        snapshot = build_proctoring_status_payload(state, reference_time=_utcnow())
+        snapshot = _normalize_realtime_proctoring_snapshot(snapshot)
+        db.commit()
+
+    return PracticeSessionProctoringStatusOut(ok=True, **snapshot)
 
 # Service instance (will be initialized in main.py)
 practice_service: Optional[PracticeModeService] = None
@@ -518,6 +805,27 @@ def _safe_enum_value(v: Any) -> Any:
         return v.value  # type: ignore[attr-defined]
     except Exception:
         return v
+
+
+def _extract_non_jwt_bearer_api_key(authorization: Optional[str]) -> Optional[str]:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    bearer_value = authorization.split(" ", 1)[1].strip()
+    if bearer_value.count(".") == 2:
+        return None
+    return bearer_value or None
+
+
+def _raise_http_for_llm_auth_failure(*, user_supplied_api_key: bool) -> None:
+    if user_supplied_api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key. Please update your Groq or Gemini API key in Bridge Settings.",
+        )
+    raise HTTPException(
+        status_code=503,
+        detail="Server AI provider credentials are invalid. Configure a valid Groq or Gemini API key.",
+    )
 
 
 def _track_practice_event(
@@ -961,8 +1269,10 @@ async def start_round_based_interview(
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
         gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization.split(" ")[1]
+        if not groq_key:
+            groq_key = _extract_non_jwt_bearer_api_key(authorization)
+
+        user_supplied_api_key = bool(groq_key or gemini_key)
             
         api_key = gemini_key if gemini_key else groq_key
         
@@ -1015,6 +1325,8 @@ async def start_round_based_interview(
             session_id=session_id,
             event_type="SESSION_STARTED_WITH_PROCTORING",
             metadata={"screen_shared": True, "camera_enabled": True, "flow": "round_based"},
+            user_id=user_id,
+            source="start_round",
         )
 
         _track_practice_event(
@@ -1062,6 +1374,8 @@ async def start_round_based_interview(
         
     except HTTPException:
         raise
+    except LLMAuthenticationError:
+        _raise_http_for_llm_auth_failure(user_supplied_api_key=user_supplied_api_key)
     except Exception as e:
         logger.error(f"Error starting round-based interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1120,11 +1434,10 @@ async def quick_start_interview(
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
         gemini_key = x_gemini_key
-        # Only treat Authorization as an API key if it does NOT look like a JWT.
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            bearer_value = authorization.split(" ", 1)[1].strip()
-            if bearer_value.count(".") != 2:  # Not a JWT
-                groq_key = bearer_value
+        if not groq_key:
+            groq_key = _extract_non_jwt_bearer_api_key(authorization)
+
+        user_supplied_api_key = bool(groq_key or gemini_key)
             
         api_key = gemini_key if gemini_key else groq_key
         
@@ -1176,6 +1489,12 @@ async def quick_start_interview(
             if qs_session:
                 qs_session.user_id = user_id
 
+            _ensure_practice_proctoring_state(
+                session_id=result.session_id,
+                user_id=user_id,
+                monitoring_metadata={"flow": "quick_start", "proctoring_pending": True},
+            )
+
             profile = result.suggested_profile
             _track_practice_event(
                 user_id=user_id,
@@ -1209,6 +1528,8 @@ async def quick_start_interview(
         
     except HTTPException:
         raise
+    except LLMAuthenticationError:
+        _raise_http_for_llm_auth_failure(user_supplied_api_key=user_supplied_api_key)
     except Exception as e:
         logger.error(f"Error in Quick Start: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1239,8 +1560,10 @@ async def start_interview(
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
         gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization.split(" ")[1]
+        if not groq_key:
+            groq_key = _extract_non_jwt_bearer_api_key(authorization)
+
+        user_supplied_api_key = bool(groq_key or gemini_key)
             
         api_key = gemini_key if gemini_key else groq_key
         
@@ -1310,6 +1633,8 @@ async def start_interview(
             session_id=session_id,
             event_type="SESSION_STARTED_WITH_PROCTORING",
             metadata={"screen_shared": True, "camera_enabled": True, "flow": "standard"},
+            user_id=user_id,
+            source="start_interview",
         )
 
         _track_practice_event(
@@ -1354,6 +1679,8 @@ async def start_interview(
         
     except HTTPException:
         raise
+    except LLMAuthenticationError:
+        _raise_http_for_llm_auth_failure(user_supplied_api_key=user_supplied_api_key)
     except Exception as e:
         logger.error(f"Error starting interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1965,8 +2292,10 @@ async def get_conversational_response(
         # API Key selection (Bridge Settings)
         groq_key = x_api_key
         gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization.split(" ")[1]
+        if not groq_key:
+            groq_key = _extract_non_jwt_bearer_api_key(authorization)
+
+        user_supplied_api_key = bool(groq_key or gemini_key)
             
         api_key = gemini_key if gemini_key else groq_key
         
@@ -1990,7 +2319,10 @@ async def get_conversational_response(
             user_id=user_id,
         )
         return result
-        
+    except HTTPException:
+        raise
+    except LLMAuthenticationError:
+        _raise_http_for_llm_auth_failure(user_supplied_api_key=user_supplied_api_key)
     except Exception as e:
         logger.error(f"Error getting conversational response: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

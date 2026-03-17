@@ -414,6 +414,36 @@ class PracticeProctoringEvent(Base):
     extra_data = Column("metadata", JSON, nullable=True)
 
 
+class PracticeProctoringSession(Base):
+    """Backend-authoritative proctoring state for a practice session."""
+
+    __tablename__ = "practice_proctoring_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, nullable=False, unique=True, index=True)
+    user_id = Column(String, nullable=True, index=True)
+
+    status = Column(String, nullable=False, default="ACTIVE", index=True)
+    risk_level = Column(String, nullable=False, default="LOW", index=True)
+
+    total_violations = Column(Integer, nullable=False, default=0)
+    serious_violations = Column(Integer, nullable=False, default=0)
+
+    last_event_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    terminated_reason = Column(String, nullable=True)
+    monitoring_metadata = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+
+
 # Tier quotas (requests per day)
 TIER_QUOTAS = {
     UserTier.FREE: {

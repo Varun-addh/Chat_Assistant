@@ -33,6 +33,7 @@ from app.services.practice.evaluation_agent import EvaluationAgent
 from app.services.practice.local_stt_service import LocalSTTService
 from app.services.practice.local_tts_service import LocalTTSService
 from app.services.practice.conversational_agent import ConversationalAgent
+from app.services.chat.llm_service import LLMAuthenticationError
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +432,10 @@ class PracticeModeService:
                 total_questions=total_questions,
                 progress=f"1/{total_questions}"
             )
+
+        except LLMAuthenticationError:
+            logger.error("Error in quick start: invalid LLM credentials", exc_info=True)
+            raise
             
         except Exception as e:
             logger.error(f"Error in quick start: {e}", exc_info=True)

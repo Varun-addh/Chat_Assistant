@@ -43,13 +43,14 @@ class ConversationalAgent:
         try:
             prompt = self._build_inference_prompt(user_input, context)
 
-            from app.services.chat.llm_service import llm_service
+            from app.services.chat.llm_service import LLMAuthenticationError, llm_service
 
             text = await llm_service.generate_text(
                 prompt=prompt,
                 api_key=api_key,
                 temperature=0.3,
                 max_tokens=500,
+                raise_on_auth_error=True,
             )
 
             if not text:
@@ -58,6 +59,10 @@ class ConversationalAgent:
 
             profile, difficulty, count, message = self._parse_ai_response(text, user_input)
             return profile, message, difficulty, count
+
+        except LLMAuthenticationError:
+            logger.error("LLM authentication failed in profile inference")
+            raise
 
         except Exception as e:
             logger.error(f"Error inferring profile: {e}")

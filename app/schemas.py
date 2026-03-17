@@ -279,11 +279,15 @@ class ProctoringEventType(str, Enum):
 	CAMERA_STARTED = "camera_started"
 	CAMERA_STOPPED = "camera_stopped"
 	CAMERA_HEARTBEAT = "camera_heartbeat"
+	SCREEN_STOPPED = "screen_stopped"
 	TAB_SWITCH = "tab_switch"
+	WINDOW_MINIMIZED = "window_minimized"
 	WINDOW_BLUR = "window_blur"
 	FACE_MISSING = "face_missing"
 	MULTIPLE_FACES = "multiple_faces"
 	USER_LEFT_FRAME = "user_left_frame"
+	MONITORING_INTERRUPTED = "monitoring_interrupted"
+	DISPLAY_SURFACE_MISMATCH = "display_surface_mismatch"
 
 
 class ProctoringEventIn(BaseModel):
@@ -301,7 +305,35 @@ class ProctoringEventIn(BaseModel):
 	)
 
 
-class ProctoringEventOut(BaseModel):
+class PracticeProctoringStatus(str, Enum):
+	ACTIVE = "ACTIVE"
+	WARNING = "WARNING"
+	TERMINATED = "TERMINATED"
+
+
+class PracticeProctoringRiskLevel(str, Enum):
+	LOW = "LOW"
+	MEDIUM = "MEDIUM"
+	HIGH = "HIGH"
+
+
+class PracticeSessionProctoringSnapshot(BaseModel):
+	session_id: str
+	status: PracticeProctoringStatus = PracticeProctoringStatus.ACTIVE
+	risk_level: PracticeProctoringRiskLevel = PracticeProctoringRiskLevel.LOW
+	total_violations: int = 0
+	serious_violations: int = 0
+	remaining_total_before_termination: int = 5
+	remaining_serious_before_termination: int = 3
+	heartbeat_stale: bool = False
+	last_heartbeat_at: Optional[datetime] = None
+	terminated_reason: Optional[str] = None
+	action: Literal["none", "warn", "terminate"] = "none"
+	message: Optional[str] = None
+	monitoring_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProctoringEventOut(PracticeSessionProctoringSnapshot):
 	ok: bool = True
 
 
@@ -314,11 +346,20 @@ class PracticeSessionMediaType(str, Enum):
 
 class PracticeProctoringEventType(str, Enum):
 	"""DB-backed proctoring event types (MVP)."""
+	CAMERA_STARTED = "CAMERA_STARTED"
 	SCREEN_STOPPED = "SCREEN_STOPPED"
 	CAMERA_STOPPED = "CAMERA_STOPPED"
+	CAMERA_HEARTBEAT = "CAMERA_HEARTBEAT"
 	TAB_SWITCH = "TAB_SWITCH"
+	WINDOW_BLUR = "WINDOW_BLUR"
 	WINDOW_MINIMIZED = "WINDOW_MINIMIZED"
+	FACE_MISSING = "FACE_MISSING"
+	MULTIPLE_FACES = "MULTIPLE_FACES"
+	USER_LEFT_FRAME = "USER_LEFT_FRAME"
+	MONITORING_INTERRUPTED = "MONITORING_INTERRUPTED"
+	DISPLAY_SURFACE_MISMATCH = "DISPLAY_SURFACE_MISMATCH"
 	SESSION_STARTED_WITH_PROCTORING = "SESSION_STARTED_WITH_PROCTORING"
+	SESSION_STARTED_WITHOUT_PROCTORING = "SESSION_STARTED_WITHOUT_PROCTORING"
 
 
 class PracticeSessionStartIn(BaseModel):
@@ -341,11 +382,31 @@ class PracticeSessionMediaOut(BaseModel):
 
 class PracticeSessionProctoringEventIn(BaseModel):
 	event_type: PracticeProctoringEventType
+	severity: Optional[Literal["info", "warning", "violation"]] = Field(default=None)
 	metadata: Dict[str, Any] = Field(default_factory=dict)
 	client_timestamp: Optional[datetime] = Field(default=None)
 
 
-class PracticeSessionProctoringEventOut(BaseModel):
+class PracticeSessionProctoringEventOut(PracticeSessionProctoringSnapshot):
+	ok: bool = True
+
+
+class PracticeSessionProctoringHeartbeatIn(BaseModel):
+	camera_active: bool = Field(..., description="Client camera track is live")
+	screen_active: bool = Field(..., description="Client screen-share track is live")
+	tab_active: bool = Field(default=True, description="Interview tab is currently visible")
+	window_focused: bool = Field(default=True, description="Interview window currently has focus")
+	detection_active: bool = Field(default=True, description="Client-side monitoring loop is healthy")
+	display_surface: Optional[str] = Field(default=None, description="Browser displaySurface value when available")
+	metadata: Dict[str, Any] = Field(default_factory=dict)
+	client_timestamp: Optional[datetime] = Field(default=None)
+
+
+class PracticeSessionProctoringHeartbeatOut(PracticeSessionProctoringSnapshot):
+	ok: bool = True
+
+
+class PracticeSessionProctoringStatusOut(PracticeSessionProctoringSnapshot):
 	ok: bool = True
 
 
