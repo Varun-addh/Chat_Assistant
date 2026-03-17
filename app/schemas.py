@@ -595,6 +595,10 @@ class ConversationalResponse(BaseModel):
 	suggested_profile: Optional[UserProfile] = Field(default=None, description="Inferred user profile")
 	session_id: Optional[str] = Field(default=None, description="Session ID if started")
 	first_question: Optional[PracticeInterviewQuestion] = Field(default=None, description="First question if started")
+	auto_start_recording: Optional[bool] = Field(
+		default=None,
+		description="Client hint: if true, start mic recording automatically as soon as first_question is displayed (no manual Start Interview click).",
+	)
 	tts_audio_url: Optional[str] = Field(default=None, description="Audio URL if started")
 	total_questions: Optional[int] = Field(default=None, description="Total number of questions if started")
 	progress: Optional[str] = Field(default=None, description="Progress indicator if started (e.g., '1/5')")
@@ -607,6 +611,10 @@ class StartInterviewResponse(BaseModel):
 	tts_audio_url: str
 	total_questions: int = Field(..., description="Total number of questions in this interview")
 	progress: str = Field(..., description="Progress indicator (e.g., '1/5')")
+	auto_start_recording: bool = Field(
+		default=True,
+		description="Client hint: when true, start mic recording automatically as soon as the question is displayed (no manual Start Interview click).",
+	)
 	message: str = "Interview session started successfully"
 
 
@@ -703,6 +711,10 @@ class NextQuestionResponse(BaseModel):
 	"""Response with next question after feedback acknowledgment."""
 	next_question: Optional[PracticeInterviewQuestion] = Field(None, description="Next question if interview not complete")
 	tts_audio_url: Optional[str] = Field(None, description="Audio URL for next question")
+	auto_start_recording: bool = Field(
+		default=False,
+		description="Client hint: when true, start mic recording automatically as soon as next_question is displayed.",
+	)
 	complete: bool = Field(default=False, description="True if interview is complete")
 	evaluation_report: Optional[EvaluationReport] = Field(None, description="Final evaluation if complete")
 	pressure: Optional[Dict[str, Any]] = Field(

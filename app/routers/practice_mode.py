@@ -20,6 +20,7 @@ from app.schemas import (
     SubmitAnswerResponse,
     SubmitCodeRequest,
     SubmitCodeResponse,
+    QuestionType,
     QuestionDifficulty,
     PracticeModeConfig,
     UserProfile,
@@ -110,6 +111,25 @@ def _safe_ext_from_upload(upload: UploadFile) -> str:
     if "quicktime" in ctype:
         return ".mov"
     return ".bin"
+
+
+def _should_auto_start_recording(question: Any) -> bool:
+    """UI hint: auto-start recording only for VOICE questions."""
+    if not question:
+        return False
+    qt = getattr(question, "question_type", None)
+    if qt is None:
+        # Backward-compatible default: older questions are voice-based.
+        return True
+    try:
+        if qt == QuestionType.VOICE:
+            return True
+        # Be robust to string/enums.
+        if isinstance(qt, str):
+            return qt == "voice"
+        return getattr(qt, "value", None) == "voice"
+    except Exception:
+        return True
 
 
 def _insert_practice_proctoring_event(
@@ -1036,7 +1056,8 @@ async def start_round_based_interview(
             first_question=first_question,
             tts_audio_url=tts_audio_url,
             total_questions=total_questions,
-            progress=f"1/{total_questions}"
+            progress=f"1/{total_questions}",
+            auto_start_recording=_should_auto_start_recording(first_question),
         )
         
     except HTTPException:
@@ -1327,7 +1348,8 @@ async def start_interview(
             first_question=first_question,
             tts_audio_url=tts_audio_url,
             total_questions=total_questions,
-            progress=f"1/{total_questions}"
+            progress=f"1/{total_questions}",
+            auto_start_recording=_should_auto_start_recording(first_question),
         )
         
     except HTTPException:
@@ -1836,6 +1858,7 @@ async def acknowledge_feedback(
         else:
             # Next question available
             response.next_question = result["next_question"]
+            response.auto_start_recording = _should_auto_start_recording(response.next_question)
             if result.get("tts_audio_url"):
                 response.tts_audio_url = f"/api/practice/audio/{result['tts_audio_url']}"
             logger.info(f"➡️ Next question ready: Q{result['next_question'].id}")

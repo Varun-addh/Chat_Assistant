@@ -52,6 +52,8 @@ class Settings(BaseSettings):
 	# Environment name (development/staging/production). Used to toggle certain defaults.
 	app_env: str = "development"
 	cors_allow_origins: List[str] = ["*"]
+	max_request_body_bytes: int = 25 * 1024 * 1024  # 25 MB default ceiling for generic HTTP bodies
+	max_practice_media_upload_bytes: int = 100 * 1024 * 1024  # Keep media uploads aligned with Practice Mode route caps
 	# Public base URL used to build absolute redirect URIs (OAuth callbacks, etc.)
 	backend_base_url: str = "http://localhost:8000"
 	# Frontend URL for redirecting back after OAuth
@@ -97,7 +99,7 @@ class Settings(BaseSettings):
 	# Email (verification + password reset)
 	# If email_enabled is false, the API will still generate tokens and (in dev)
 	# can return URLs for manual testing, but it won't attempt SMTP.
-	email_enabled: bool = False  # env: EMAIL_ENABLED
+	email_enabled: bool | None = None  # env: EMAIL_ENABLED; auto-enables in production when SMTP is configured
 	email_from: str | None = Field(default=None, validation_alias=AliasChoices("EMAIL_FROM", "SMTP_FROM"))
 	smtp_host: str | None = Field(default=None, validation_alias=AliasChoices("SMTP_HOST", "EMAIL_SMTP_HOST"))
 	smtp_port: int = Field(default=587, validation_alias=AliasChoices("SMTP_PORT", "EMAIL_SMTP_PORT"))
@@ -163,6 +165,25 @@ class Settings(BaseSettings):
 			logging.warning("Using auto-generated cookie secret (dev only). Sessions will be invalid after restart.")
 			return secrets.token_urlsafe(32)
 		return v
+
+	@field_validator("email_enabled", mode="before")
+	@classmethod
+	def _default_email_enabled(cls, v):
+		if isinstance(v, bool):
+			return v
+		if isinstance(v, str) and v.strip():
+			value = v.strip().lower()
+			if value in {"1", "true", "yes", "on"}:
+				return True
+			if value in {"0", "false", "no", "off"}:
+				return False
+
+		env = os.getenv("APP_ENV", "development").strip().lower()
+		has_smtp_host = bool((os.getenv("SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST") or "").strip())
+		has_from_email = bool((os.getenv("EMAIL_FROM") or os.getenv("SMTP_FROM") or "").strip())
+		if env == "production" and has_smtp_host and has_from_email:
+			return True
+		return False
 
 	# LLM Provider Selection
 	llm_provider: str = "gemini"  # default global provider; Interview Intelligence overrides to Groq internally

@@ -31,8 +31,8 @@ RUN pip install \
     --index-url https://download.pytorch.org/whl/cpu
 
 # Copy and install rest
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY requirements.txt requirements.lock ./
+RUN pip install -r requirements.lock
 
 # Safety net: ensure critical runtime deps are present (HF build caches can be tricky).
 RUN pip install --no-cache-dir email-validator \

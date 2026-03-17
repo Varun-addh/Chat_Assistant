@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
 from app.config import settings
+from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.utils.logging import configure_logging
 from app.routers.questions import router as questions_router
 from app.routers.ws import router as ws_router
@@ -242,6 +243,11 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
     max_age=3600,
+)
+app.add_middleware(
+    RequestSizeLimitMiddleware,
+    default_limit_bytes=settings.max_request_body_bytes,
+    practice_media_limit_bytes=settings.max_practice_media_upload_bytes,
 )
 
 # User Authentication Middleware (for personalized history)

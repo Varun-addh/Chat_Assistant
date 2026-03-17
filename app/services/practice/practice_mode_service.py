@@ -409,6 +409,15 @@ class PracticeModeService:
             
             # Build audio URL
             tts_audio_url = f"/api/practice/audio/{audio_filename}" if audio_filename else None
+
+            # UI hint: only auto-start recording for VOICE questions.
+            auto_start_recording = True
+            try:
+                qt = getattr(first_question, "question_type", None)
+                if qt is not None:
+                    auto_start_recording = (getattr(qt, "value", qt) == "voice")
+            except Exception:
+                auto_start_recording = True
             
             return ConversationalResponse(
                 ai_message=f"{ai_message} Starting now...",
@@ -417,6 +426,7 @@ class PracticeModeService:
                 suggested_profile=profile,
                 session_id=session_id,
                 first_question=first_question,
+                auto_start_recording=auto_start_recording,
                 tts_audio_url=tts_audio_url,
                 total_questions=total_questions,
                 progress=f"1/{total_questions}"

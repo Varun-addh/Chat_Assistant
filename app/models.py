@@ -122,6 +122,33 @@ class SessionRecord(Base):
         return f"<SessionRecord {self.id} type={self.session_type}>"
 
 
+class MockInterviewSessionRecord(Base):
+    """Persisted mock interview session state.
+
+    The payload stores the full InterviewSession model so sessions survive
+    restarts and can be shared across multiple workers.
+    """
+
+    __tablename__ = "mock_interview_sessions"
+
+    session_id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="active", index=True)
+    session_payload = Column(JSON, nullable=False)
+
+    started_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<MockInterviewSessionRecord {self.session_id} status={self.status}>"
+
+
 class RateLimitRecord(Base):
     """In-database rate limiting (use Redis in production for better performance)"""
     __tablename__ = "rate_limit_records"

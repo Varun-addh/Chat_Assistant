@@ -39,5 +39,8 @@ async def ws_stt(websocket: WebSocket, session_id: str, _: None = Depends(websoc
 				"text": text,
 			})
 		await websocket.send_json({"type": "end"})
+	except RuntimeError as exc:
+		await websocket.send_json({"type": "error", "detail": str(exc)})
+		await websocket.close(code=1011)
 	except WebSocketDisconnect:
 		return

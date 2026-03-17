@@ -9,6 +9,8 @@ from enum import Enum
 import logging
 from pathlib import Path
 
+from app.database import get_db_context
+from app.models import MockInterviewSessionRecord
 from app.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -143,6 +145,54 @@ class InterviewSession(BaseModel):
     time_per_question: Dict[str, int] = Field(default_factory=dict, description="Time spent on each question in seconds")
 
 
+class MockInterviewSessionStore:
+    """Mapping-like facade backed by the database.
+
+    Routers already access `service.active_sessions` directly, so we preserve that
+    shape while moving persistence out of the JSON file.
+    """
+
+    def __init__(self, service: "MockInterviewService"):
+        self._service = service
+
+    def get(self, session_id: str, default: Optional[InterviewSession] = None) -> Optional[InterviewSession]:
+        session = self._service._load_session(session_id)
+        return session if session is not None else default
+
+    def __getitem__(self, session_id: str) -> InterviewSession:
+        session = self.get(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        return session
+
+    def __setitem__(self, session_id: str, session: InterviewSession) -> None:
+        if session.session_id != session_id:
+            session = session.model_copy(update={"session_id": session_id})
+        self._service._persist_session(session)
+
+    def __delitem__(self, session_id: str) -> None:
+        if not self._service._delete_session(session_id):
+            raise KeyError(session_id)
+
+    def __contains__(self, session_id: str) -> bool:
+        return self.get(session_id) is not None
+
+    def items(self):
+        return [(session.session_id, session) for session in self._service._list_sessions()]
+
+    def keys(self):
+        return [session.session_id for session in self._service._list_sessions()]
+
+    def values(self):
+        return self._service._list_sessions()
+
+    def __iter__(self):
+        return iter(self.keys())
+
+    def __len__(self) -> int:
+        return len(self._service._list_sessions())
+
+
 class MockInterviewService:
     """
     Service to manage mock interview sessions
@@ -151,105 +201,174 @@ class MockInterviewService:
     def __init__(self, llm_service, interview_intelligence_service):
         self.llm_service = llm_service
         self.interview_service = interview_intelligence_service
-        self.active_sessions: Dict[str, InterviewSession] = {}
-        
-        # Session persistence
+        self._session_cache: Dict[str, InterviewSession] = {}
+        self.active_sessions = MockInterviewSessionStore(self)
+
+        # One-time import path for legacy JSON sessions.
         self.sessions_file = Path("data/sessions/mock_interview_sessions.json")
         self.sessions_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Load existing sessions from disk
-        self._load_sessions()
-        
+        self._migrate_legacy_sessions_file()
+
         logger.info(f"Mock Interview Service initialized with {len(self.active_sessions)} active sessions")
-    
-    def _load_sessions(self):
-        """Load active sessions from disk"""
+
+    def _serialize_session(self, session: InterviewSession) -> Dict[str, Any]:
+        return session.model_dump(mode="json")
+
+    def _deserialize_session(self, payload: Dict[str, Any]) -> InterviewSession:
+        return InterviewSession.model_validate(payload)
+
+    def _list_sessions(self) -> List[InterviewSession]:
+        sessions: List[InterviewSession] = []
         try:
-            if self.sessions_file.exists():
+            with get_db_context() as db:
+                rows = (
+                    db.query(MockInterviewSessionRecord)
+                    .order_by(MockInterviewSessionRecord.updated_at.desc())
+                    .all()
+                )
+
+            seen_ids = set()
+            for row in rows:
                 try:
-                    with open(self.sessions_file, 'r') as f:
-                        data = json.load(f)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Corrupted sessions file, backing up and starting fresh: {e}")
-                    # Backup the corrupted file
-                    backup_file = self.sessions_file.with_suffix('.corrupted.json')
-                    self.sessions_file.rename(backup_file)
-                    logger.info(f"Backed up corrupted file to {backup_file}")
-                    return
-                
-                # Convert dict back to InterviewSession objects
-                for session_id, session_data in data.items():
-                    try:
-                        # Parse datetime strings
-                        session_data['started_at'] = datetime.fromisoformat(session_data['started_at'])
-                        if session_data.get('completed_at'):
-                            session_data['completed_at'] = datetime.fromisoformat(session_data['completed_at'])
-                        
-                        # Parse question_start_times datetime strings
-                        if 'question_start_times' in session_data and session_data['question_start_times']:
-                            converted_times = {}
-                            for k, v in session_data['question_start_times'].items():
-                                if isinstance(v, str):
-                                    try:
-                                        converted_times[k] = datetime.fromisoformat(v)
-                                    except Exception:
-                                        logger.warning(f"Failed to parse datetime: {v}")
-                                elif isinstance(v, datetime):
-                                    converted_times[k] = v
-                            session_data['question_start_times'] = converted_times
-                        
-                        # Reconstruct session
-                        session = InterviewSession(**session_data)
-                        self.active_sessions[session_id] = session
-                    except Exception as e:
-                        logger.warning(f"Failed to load session {session_id}: {e}")
-                        continue
-                
-                logger.info(f"Loaded {len(self.active_sessions)} sessions from disk")
-        except Exception as e:
-            logger.error(f"Failed to load sessions: {e}", exc_info=True)
-    
-    def _save_sessions(self):
-        """Save active sessions to disk"""
-        try:
-            # Convert sessions to JSON-serializable format
-            data = {}
-            for session_id, session in self.active_sessions.items():
-                try:
-                    session_dict = session.model_dump()
-                    # Convert datetime to ISO format strings
-                    session_dict['started_at'] = session.started_at.isoformat()
-                    if session.completed_at:
-                        session_dict['completed_at'] = session.completed_at.isoformat()
-                    
-                    # Convert question_start_times datetime values to ISO strings
-                    if 'question_start_times' in session_dict and session_dict['question_start_times']:
-                        converted_times = {}
-                        for k, v in session_dict['question_start_times'].items():
-                            if isinstance(v, datetime):
-                                converted_times[k] = v.isoformat()
-                            elif isinstance(v, str):
-                                converted_times[k] = v
-                            else:
-                                logger.warning(f"Unexpected type for question_start_time: {type(v)}")
-                        session_dict['question_start_times'] = converted_times
-                    
-                    data[session_id] = session_dict
+                    session = self._deserialize_session(row.session_payload or {})
+                    self._session_cache[session.session_id] = session
+                    sessions.append(session)
+                    seen_ids.add(session.session_id)
                 except Exception as e:
-                    logger.error(f"Failed to serialize session {session_id}: {e}")
-                    continue
-            
-            # Write to a temporary file first, then rename (atomic operation)
-            temp_file = self.sessions_file.with_suffix('.tmp')
-            with open(temp_file, 'w') as f:
-                json.dump(data, f, indent=2)
-            
-            # Atomic rename
-            temp_file.replace(self.sessions_file)
-            
-            logger.debug(f"Saved {len(data)} sessions to disk")
+                    logger.warning("Failed to deserialize mock interview session %s: %s", row.session_id, e)
+
+            stale_ids = [session_id for session_id in self._session_cache if session_id not in seen_ids]
+            for session_id in stale_ids:
+                self._session_cache.pop(session_id, None)
         except Exception as e:
-            logger.error(f"Failed to save sessions: {e}", exc_info=True)
+            logger.error("Failed to list mock interview sessions: %s", e, exc_info=True)
+            return list(self._session_cache.values())
+
+        return sessions
+
+    def _load_session(self, session_id: str) -> Optional[InterviewSession]:
+        try:
+            with get_db_context() as db:
+                row = (
+                    db.query(MockInterviewSessionRecord)
+                    .filter(MockInterviewSessionRecord.session_id == session_id)
+                    .first()
+                )
+
+            if not row:
+                self._session_cache.pop(session_id, None)
+                return None
+
+            session = self._deserialize_session(row.session_payload or {})
+            self._session_cache[session_id] = session
+            return session
+        except Exception as e:
+            logger.error("Failed to load mock interview session %s: %s", session_id, e, exc_info=True)
+            return self._session_cache.get(session_id)
+
+    def _persist_session(self, session: InterviewSession) -> None:
+        payload = self._serialize_session(session)
+        status = "completed" if session.completed_at else "active"
+
+        try:
+            with get_db_context() as db:
+                row = (
+                    db.query(MockInterviewSessionRecord)
+                    .filter(MockInterviewSessionRecord.session_id == session.session_id)
+                    .first()
+                )
+                if row is None:
+                    row = MockInterviewSessionRecord(session_id=session.session_id)
+                    db.add(row)
+
+                row.user_id = session.user_id
+                row.status = status
+                row.session_payload = payload
+                row.started_at = session.started_at
+                row.completed_at = session.completed_at
+                row.updated_at = utcnow()
+                db.commit()
+
+            self._session_cache[session.session_id] = session
+        except Exception as e:
+            logger.error("Failed to persist mock interview session %s: %s", session.session_id, e, exc_info=True)
+
+    def _save_sessions(self):
+        """Compatibility method to persist cached sessions."""
+        for session in list(self._session_cache.values()):
+            self._persist_session(session)
+
+    def _delete_session(self, session_id: str) -> bool:
+        deleted = False
+        try:
+            with get_db_context() as db:
+                row = (
+                    db.query(MockInterviewSessionRecord)
+                    .filter(MockInterviewSessionRecord.session_id == session_id)
+                    .first()
+                )
+                if row is not None:
+                    db.delete(row)
+                    db.commit()
+                    deleted = True
+        except Exception as e:
+            logger.error("Failed to delete mock interview session %s: %s", session_id, e, exc_info=True)
+
+        self._session_cache.pop(session_id, None)
+        return deleted
+
+    def _migrate_legacy_sessions_file(self) -> None:
+        """Import the old JSON session file into the database once."""
+        if not self.sessions_file.exists():
+            return
+
+        try:
+            with self.sessions_file.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except json.JSONDecodeError as e:
+            logger.error("Corrupted mock interview sessions file, backing up and skipping import: %s", e)
+            backup_file = self.sessions_file.with_suffix(".corrupted.json")
+            self.sessions_file.replace(backup_file)
+            logger.info("Backed up corrupted legacy sessions file to %s", backup_file)
+            return
+        except Exception as e:
+            logger.error("Failed to read legacy mock interview sessions file: %s", e, exc_info=True)
+            return
+
+        if not isinstance(data, dict):
+            logger.warning("Legacy mock interview sessions file has unexpected shape; leaving it in place")
+            return
+
+        migrated_or_present = 0
+        for session_id, session_payload in data.items():
+            try:
+                if self._load_session(session_id) is not None:
+                    migrated_or_present += 1
+                    continue
+
+                session = self._deserialize_session(session_payload)
+                if session.session_id != session_id:
+                    session = session.model_copy(update={"session_id": session_id})
+                self._persist_session(session)
+                migrated_or_present += 1
+            except Exception as e:
+                logger.warning("Failed to migrate legacy mock interview session %s: %s", session_id, e)
+
+        if migrated_or_present == len(data):
+            backup_name = f"{self.sessions_file.stem}.migrated.json"
+            backup_file = self.sessions_file.with_name(backup_name)
+            if backup_file.exists():
+                backup_file = self.sessions_file.with_name(
+                    f"{self.sessions_file.stem}.{utcnow().strftime('%Y%m%d%H%M%S')}.migrated.json"
+                )
+            self.sessions_file.replace(backup_file)
+            logger.info("Migrated %s legacy mock interview sessions into the database", migrated_or_present)
+        else:
+            logger.warning(
+                "Legacy mock interview session import only migrated %s/%s sessions; file retained for manual recovery",
+                migrated_or_present,
+                len(data),
+            )
     
     async def start_session(
         self,
@@ -300,9 +419,6 @@ class MockInterviewService:
         
         self.active_sessions[session_id] = session
         
-        # Persist to disk
-        self._save_sessions()
-        
         logger.info(f"Started mock interview session {session_id} for user {user_id}")
         
         return session
@@ -322,7 +438,7 @@ class MockInterviewService:
         question_id = current_question.question_id
         if question_id not in session.question_start_times:
             session.question_start_times[question_id] = utcnow()
-            self._save_sessions()
+            self._persist_session(session)
         
         return current_question
     
@@ -357,7 +473,7 @@ class MockInterviewService:
             session.hints_used[question_id] = 0
         
         session.hints_used[question_id] += 1
-        self._save_sessions()
+        self._persist_session(session)
         
         # If question has predefined hints, use them
         if current_question.hints and hint_level <= len(current_question.hints):
@@ -432,8 +548,7 @@ Keep it under 100 words."""
         if session.current_question_index >= session.total_questions:
             await self._complete_session(session)
         
-        # Persist to disk
-        self._save_sessions()
+        self._persist_session(session)
         
         logger.info(f"Evaluated answer for session {session_id}, score: {evaluation.overall_score}")
         
@@ -1445,12 +1560,10 @@ JSON:"""
         
         if not session.completed_at:
             await self._complete_session(session)
+            self._persist_session(session)
         
         summary = await self.get_session_summary(session_id)
-        
-        # Remove from active sessions
-        del self.active_sessions[session_id]
-        
+
         return summary
 
 

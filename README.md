@@ -73,6 +73,8 @@ Environment files (recommended workflow)
 
 ## Development
 
+For reproducible installs, prefer `pip install -r requirements.lock`. Use `requirements.txt` only when intentionally updating dependency versions.
+
 See [README_DOCKER.md](README_DOCKER.md) for Docker deployment instructions.
 
 ## Scaling on Hugging Face Spaces (CPU Basic)

@@ -121,7 +121,8 @@ def test_media_upload_and_proctoring_event_aggregate_into_score(monkeypatch):
     assert "proctoring_summary" in body
     assert body["media"]["screen_recording_url"] == media["storage_url"]
     assert body["proctoring_summary"]["violation_count"] == 1
-    assert "SCREEN_STOPPED" in body["proctoring_summary"]["events"]
+    events = body["proctoring_summary"]["events"]
+    assert any((e or {}).get("event_type") == "SCREEN_STOPPED" for e in (events or []))
 
     # Verify DB rows exist
     with get_db_context() as db:

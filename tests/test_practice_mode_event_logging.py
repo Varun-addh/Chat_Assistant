@@ -122,6 +122,7 @@ def test_practice_mode_emits_events(monkeypatch):
         },
     )
     assert start.status_code == 200
+    assert start.json().get("auto_start_recording") is True
     session_id = start.json()["session_id"]
 
     # Submit answer (multipart)
@@ -141,6 +142,7 @@ def test_practice_mode_emits_events(monkeypatch):
         json={"session_id": session_id, "question_id": 1, "feedback_read": True},
     )
     assert ack.status_code == 200
+    assert ack.json().get("auto_start_recording") is True
 
     # Phase 3: Rate feedback usefulness (human label)
     rated = client.post(
