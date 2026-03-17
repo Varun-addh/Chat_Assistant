@@ -33,6 +33,17 @@ def test_settings_auto_enable_email_in_production_when_smtp_is_configured(monkey
     assert cfg.email_enabled is True
 
 
+def test_env_files_include_dotenv_local_by_default(monkeypatch, tmp_path):
+    from app.config import _env_files
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ENV_FILE", raising=False)
+    (tmp_path / ".env").write_text("DATABASE_URL=postgresql+psycopg://example\n", encoding="utf-8")
+    (tmp_path / ".env.local").write_text("DATABASE_URL=sqlite:///./data/stratax.db\n", encoding="utf-8")
+
+    assert _env_files() == [".env", ".env.local"]
+
+
 def _make_request_size_app() -> FastAPI:
     from app.middleware.request_size import RequestSizeLimitMiddleware
 

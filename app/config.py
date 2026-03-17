@@ -15,9 +15,17 @@ def _env_files() -> list[str]:
 	- ENV_FILE=.env,.env.local
 	- ENV_FILE=.env,.env.docker
 
-	If ENV_FILE is not set, defaults to .env.
+	If ENV_FILE is not set, default to `.env` and automatically layer in
+	`.env.local` when present. This keeps machine-local overrides working for
+	local development without requiring shell setup.
 	"""
-	raw = (os.getenv("ENV_FILE", ".env") or ".env").strip()
+	raw = os.getenv("ENV_FILE")
+	if raw is None or not raw.strip():
+		files = [".env"]
+		if os.path.exists(".env.local"):
+			files.append(".env.local")
+		return files
+
 	files = [p.strip() for p in raw.split(",") if p.strip()]
 	return files or [".env"]
 
