@@ -14,9 +14,53 @@ from app.schemas import ResumeContext
 
 from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
 from app.utils.demo_mode import resolve_effective_api_key
+from app.config import settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _clean_header(val: Optional[str]) -> Optional[str]:
+    """Strip whitespace / 'null' / 'undefined' from header values."""
+    if not val:
+        return None
+    val = val.strip()
+    if val.lower() in ("", "null", "undefined", "none"):
+        return None
+    return val
+
+
+def _resolve_mock_api_key(
+    x_api_key: Optional[str],
+    x_gemini_key: Optional[str],
+    authorization: Optional[str],
+) -> str:
+    """Centralised API-key resolution for mock interview endpoints.
+
+    Returns a usable API key or raises HTTPException(401).
+    """
+    groq_key = _clean_header(x_api_key)
+    gemini_key = _clean_header(x_gemini_key)
+
+    # Extract non-JWT bearer token
+    if not groq_key and authorization:
+        auth = authorization.strip()
+        if auth.startswith("Bearer "):
+            bearer = auth.split(" ", 1)[1].strip()
+            if bearer.count(".") != 2:  # not a JWT
+                groq_key = bearer
+
+    api_key = gemini_key or groq_key
+    if api_key:
+        return api_key
+
+    if settings.require_user_api_key:
+        raise HTTPException(status_code=401, detail="No active API key.")
+
+    # Server-side fallback
+    if settings.llm_provider == "gemini" and settings.gemini_api_key:
+        return settings.gemini_api_key
+    return settings.groq_api_key or settings.gemini_api_key or ""
 
 
 # Dependency to get the mock interview service
@@ -100,19 +144,7 @@ async def upload_resume_for_mock_interview(
         if len(content) > 5 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File too large (max 5MB)")
 
-        # Resolve API key
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            bearer_value = authorization.split(" ", 1)[1].strip()
-            if bearer_value.count(".") != 2:
-                groq_key = bearer_value
-        api_key = gemini_key if gemini_key else groq_key
-        if not api_key:
-            from app.config import settings
-            if settings.require_user_api_key:
-                raise HTTPException(status_code=401, detail="No active API key.")
-            api_key = (settings.groq_api_key if settings.llm_provider != "gemini" else settings.gemini_api_key) or settings.groq_api_key
+        api_key = _resolve_mock_api_key(x_api_key, x_gemini_key, authorization)
 
         result = await parse_resume(content, file.filename, api_key=api_key)
         return {
@@ -126,7 +158,7 @@ async def upload_resume_for_mock_interview(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Mock interview resume upload failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Resume parsing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Resume parsing failed. Please try again or use a different file format.")
 
 
 @router.post("/sessions/start", response_model=StartSessionResponse)

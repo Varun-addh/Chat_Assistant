@@ -15,9 +15,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import EventRecord
+from app.models import EventRecord, PracticeAttemptRecord
 
 
 @dataclass(frozen=True)
@@ -285,6 +286,25 @@ def _collect_practice_feedback_ratings(
     }
 
 
+def _scored_attempt_count(
+    db: Session,
+    *,
+    user_id: str,
+    domain: Optional[str] = None,
+    lookback_days: int = 30,
+) -> int:
+    """Count scored attempts from PracticeAttemptRecord (fast SQL COUNT)."""
+    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    q = db.query(func.count(PracticeAttemptRecord.id)).filter(
+        PracticeAttemptRecord.user_id == user_id,
+        PracticeAttemptRecord.created_at >= since,
+    )
+    if domain:
+        q = q.filter(PracticeAttemptRecord.domain == domain)
+    result = q.scalar()
+    return int(result or 0)
+
+
 def compute_practice_insights(
     db: Session,
     *,
@@ -391,11 +411,18 @@ def compute_practice_insights(
     except Exception:
         human_feedback = None
 
+    # Cross-reference: scored attempt count from PracticeAttemptRecord (Fix #3)
+    # so consumers can detect if event-based and attempt-based counts diverge.
+    scored_attempt_count = _scored_attempt_count(
+        db, user_id=user_id, domain=domain, lookback_days=lookback_days,
+    )
+
     return {
         "user_id": user_id,
         "domain": domain,
         "lookback_days": int(lookback_days),
         "attempts": len(attempts),
+        "scored_attempts": scored_attempt_count,
         "overall": {
             "avg_correctness": overall_avg_correctness,
             "avg_confidence": overall_avg_confidence,

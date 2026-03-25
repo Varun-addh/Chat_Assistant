@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Header, Request
+from fastapi import APIRouter, HTTPException, Query, Header, Request, Depends
 from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 import logging
@@ -18,6 +18,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 import time
 from app.config import settings
 from app.utils.demo_mode import extract_user_provided_api_key, infer_user_type
+from app.auth import get_current_user
 
 # NOTE: app.services.interview_intelligence_service imports heavy ML dependencies.
 # To keep router import fast (especially in tests), we lazily load the service singletons.
@@ -45,736 +46,113 @@ def _ensure_intelligence_services_loaded() -> None:
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-import re
-from typing import Optional
+from app.utils.intelligence_formatting import (
+    auto_format_code_blocks,
+    format_coding_answer_for_interview_tab,
+    clean_history_metadata,
+    apply_formatting_to_questions,
+    _unescape_common_whitespace_sequences,
+    _has_interview_structure,
+    _answer_has_complexity,
+    _parse_markdown_sections,
+    _remove_all_code_aggressive,
+    _extract_explanation_only,
+    _extract_approach_summary,
+)
 
 
-def auto_format_code_blocks(text: str) -> str:
+# --- API key extraction helper ---------------------------------------------------
+
+def _clean_header_value(v: Optional[str]) -> Optional[str]:
+    """Sanitize a header value: strip whitespace and reject null-ish strings."""
+    t = (v or "").strip()
+    if not t or t.lower() in {"null", "undefined", "none"}:
+        return None
+    return t
+
+
+def _resolve_api_key(
+    request: Request,
+    x_api_key: Optional[str],
+    x_gemini_key: Optional[str],
+    authorization: Optional[str],
+) -> tuple:
+    """Return (api_key, is_demo) after applying BYOK / demo / server-key logic.
+
+    Centralises the API-key resolution duplicated across every endpoint.
     """
-    World-class code block formatter with precision detection.
-    Only wraps ACTUAL code, never regular text or explanations.
-    
-    Strategy:
-    1. Detect explicit code markers (standalone language names)
-    2. Identify continuous code blocks (multiple consecutive code lines)
-    3. Require minimum 2-3 lines of code to avoid false positives
-    4. Stop immediately when hitting regular text
-    5. Preserve existing markdown code blocks
-    """
-    if not text or not text.strip():
-        return text
-    
-    # Don't re-process if already has code blocks
-    if '```' in text:
-        return text
-    
-    lines = text.split('\n')
-    result = []
-    i = 0
-    
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip().lower()
-        
-        # CASE 1: Explicit standalone language marker (python, java, sql, etc.)
-        if _is_language_marker(stripped) and i + 1 < len(lines):
-            # Peek ahead - next line should be actual code
-            next_line = lines[i + 1].strip()
-            if next_line and _is_definite_code(next_line):
-                lang = _normalize_language(stripped)
-                result.append(f'```{lang}')
-                i += 1
-                
-                # Collect code lines
-                code_lines = []
-                while i < len(lines):
-                    current = lines[i]
-                    
-                    # Stop on blank line followed by text or another language marker
-                    if not current.strip():
-                        if i + 1 < len(lines):
-                            peek = lines[i + 1].strip()
-                            if peek and (_is_language_marker(peek.lower()) or _is_section_header(peek) or _is_prose(peek)):
-                                break
-                        code_lines.append(current)
-                        i += 1
-                        continue
-                    
-                    # Stop if we hit a section header or obvious prose
-                    if _is_section_header(current.strip()) or _is_prose(current.strip()):
-                        break
-                    
-                    code_lines.append(current)
-                    i += 1
-                
-                # Add code and close block
-                result.extend(code_lines)
-                result.append('```')
-                continue
-            else:
-                # False alarm - not actually a code block
-                result.append(line)
-                i += 1
-                continue
-        
-        # CASE 2: Multi-line code block (no explicit marker)
-        # Look ahead to see if we have 3+ consecutive code lines
-        if _is_definite_code(line.strip()):
-            # Count consecutive code lines
-            code_count = 0
-            temp_i = i
-            while temp_i < len(lines) and temp_i < i + 10:  # Look ahead max 10 lines
-                if _is_definite_code(lines[temp_i].strip()) or not lines[temp_i].strip():
-                    if lines[temp_i].strip():  # Don't count blank lines
-                        code_count += 1
-                    temp_i += 1
-                else:
-                    break
-            
-            # Only wrap if we have 3+ lines of code (avoid false positives)
-            if code_count >= 3:
-                lang = _detect_language_from_code(line)
-                result.append(f'```{lang}')
-                
-                # Collect the code block
-                while i < len(lines):
-                    current = lines[i]
-                    
-                    # Stop on blank line followed by non-code
-                    if not current.strip():
-                        if i + 1 < len(lines):
-                            peek = lines[i + 1].strip()
-                            if peek and not _is_definite_code(peek):
-                                result.append(current)
-                                i += 1
-                                break
-                        result.append(current)
-                        i += 1
-                        continue
-                    
-                    # Stop if we hit obvious non-code
-                    if _is_section_header(current.strip()) or _is_prose(current.strip()):
-                        break
-                    
-                    # Stop if not code anymore
-                    if not _is_definite_code(current.strip()):
-                        break
-                    
-                    result.append(current)
-                    i += 1
-                
-                result.append('```')
-                continue
-        
-        # CASE 3: Regular text - add as-is
-        result.append(line)
-        i += 1
-    
-    return '\n'.join(result)
+    x_api_key = _clean_header_value(x_api_key)
+    x_gemini_key = _clean_header_value(x_gemini_key)
+    provided_key = x_gemini_key or x_api_key
 
+    auth_key = extract_user_provided_api_key(
+        request,
+        x_api_key=None,
+        x_gemini_key=None,
+        authorization=authorization,
+    )
+    user_key = provided_key or auth_key
+    is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
 
-def _is_language_marker(text: str) -> bool:
-    """Check if text is a standalone language marker."""
-    language_markers = {
-        'python', 'java', 'javascript', 'typescript', 'sql', 
-        'cpp', 'c++', 'csharp', 'c#', 'bash', 'shell', 
-        'go', 'rust', 'ruby', 'php', 'swift', 'kotlin',
-        'r', 'matlab', 'scala', 'perl', 'html', 'css'
-    }
-    return text in language_markers
+    # Enforce BYOK when required
+    if settings.require_user_api_key and not user_key:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "API key required for Interview Intelligence. "
+                "Set your key in Bridge Settings (frontend) or send it via "
+                "X-API-Key / X-Gemini-Key header, or Authorization: Bearer <key>."
+            ),
+        )
 
+    api_key = user_key
 
-def _normalize_language(lang: str) -> str:
-    """Normalize language name for code block."""
-    lang_map = {
-        'c++': 'cpp',
-        'c#': 'csharp',
-        'shell': 'bash',
-        'typescript': 'typescript',
-        'javascript': 'javascript'
-    }
-    return lang_map.get(lang, lang)
-
-
-def _is_definite_code(line: str) -> bool:
-    """
-    STRICT check: Is this definitely a line of code?
-    Must have strong code indicators, not just any text.
-    """
-    if not line or len(line.strip()) < 2:
-        return False
-    
-    stripped = line.strip()
-    
-    # Definitely NOT code (prose indicators)
-    prose_indicators = [
-        'example ', 'this is', 'this function', 'the above', 'the code',
-        'you can', 'we can', 'to use', 'how to', 'what is',
-        'when you', 'if you', 'best practice', 'common mistake',
-        'note:', 'important:', 'tip:', 'warning:', 'output:',
-        'as mde', 'as shown', 'for example', 'such as',
-        'negative sampling', 'performance', 'real-world', 'follow-up'
-    ]
-    
-    for indicator in prose_indicators:
-        if indicator in stripped.lower():
-            return False
-    
-    # Definitely code (strong indicators)
-    definite_code_patterns = [
-        # Imports
-        r'^(import|from)\s+\w+(\.\w+)*',
-        r'^import\s+\w+\.\w+',
-        
-        # Function/class definitions
-        r'^def\s+\w+\s*\(',
-        r'^class\s+\w+[\s\(:]',
-        r'^function\s+\w+\s*\(',
-        r'^(public|private|protected|static)\s+(class|void|int|String|function)',
-        
-        # Variable assignments with clear syntax
-        r'^\w+\s*=\s*[{\[\(\'\"]',  # x = {, [, (, ', "
-        r'^\w+\s*=\s*\w+\(',  # x = func()
-        r'^\w+\s*=\s*\d+',  # x = 123
-        r'^\w+\s*=\s*[\'"]',  # x = "string"
-        r'^(const|let|var)\s+\w+\s*=',
-        
-        # Method calls
-        r'^\w+\.\w+\(',  # obj.method(
-        r'^\w+\[\s*[\'\"]',  # dict['key'] or array[0]
-        
-        # Control structures
-        r'^(if|for|while|switch|try|catch|except|finally)\s*[\(\:]',
-        r'^(return|yield|break|continue)\s+',
-        r'^(elif|else|endif)\s*:',
-        
-        # SQL
-        r'^(SELECT|FROM|WHERE|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\s+',
-        
-        # Special Python/R syntax
-        r'^@\w+',  # Decorators
-        r'^\w+\s*<-\s*',  # R assignment
-        
-        # TensorFlow/ML
-        r'^model\.',
-        r'^tf\.',
-        r'^np\.',
-        r'^pd\.',
-        r'^plt\.',
-        
-        # Print/output statements
-        r'^(print|console\.log|echo|printf)\s*\(',
-        
-        # Comments (only if they're inline with code structure)
-        r'^#\s*(TODO|FIXME|NOTE|HACK)',
-    ]
-    
-    for pattern in definite_code_patterns:
-        if re.match(pattern, stripped, re.IGNORECASE):
-            return True
-    
-    # Additional checks: Has typical code punctuation
-    # But exclude single words or short phrases
-    if len(stripped.split()) == 1:
-        return False
-    
-    # Check for code-like structure (operators, parentheses, brackets)
-    code_chars = ['(', ')', '{', '}', '[', ']', '=', ';', '::', '->', '=>', '::']
-    has_code_char = any(char in stripped for char in code_chars)
-    
-    # Must have both code chars AND look like assignment/call
-    if has_code_char:
-        # But not if it's just a sentence with parentheses
-        if ' = ' in stripped or '(' in stripped or '[' in stripped:
-            # Exclude prose-like patterns
-            if not re.search(r'\b(is|are|the|a|an|and|or|to|for|this|that|with|from)\b', stripped.lower()):
-                return True
-    
-    return False
-
-
-def _is_section_header(text: str) -> bool:
-    """Check if text is a section header (markdown or caps)."""
-    if not text:
-        return False
-    
-    # Markdown headers
-    if text.startswith('#'):
-        return True
-    
-    # All caps headers
-    if text.isupper() and len(text.split()) <= 6:
-        return True
-    
-    # Common section headers
-    headers = [
-        'example', 'output:', 'best practice', 'common mistake',
-        'real-world application', 'follow-up', 'explanation',
-        'how it works', 'summary', 'approach', 'solution',
-        'practical', 'note:', 'tip:', 'warning:'
-    ]
-    
-    text_lower = text.lower()
-    for header in headers:
-        if text_lower.startswith(header):
-            return True
-    
-    return False
-
-
-def _is_prose(text: str) -> bool:
-    """
-    Check if text is regular prose (explanation, not code).
-    Prose has normal sentence structure.
-    """
-    if not text or len(text.strip()) < 10:
-        return False
-    
-    text_lower = text.lower()
-    
-    # Prose indicators (words common in explanations but rare in code)
-    prose_words = [
-        'this is', 'this function', 'the above', 'the code', 'the model',
-        'you can', 'we can', 'we use', 'it is', 'they are',
-        'to use', 'to create', 'to calculate', 'to prevent',
-        'how to', 'what is', 'when you', 'if you', 'why',
-        'because', 'since', 'although', 'however', 'therefore',
-        'for example', 'such as', 'like', 'similar to',
-        'best practice', 'common mistake', 'important to',
-        'remember', 'always', 'never', 'should', 'must',
-        'negative sampling', 'gives auc', 'but model', 'versus',
-        'cold-start', 'pre-train', 'initial weights', 'embedding layers'
-    ]
-    
-    # Check if text contains prose indicators
-    for word in prose_words:
-        if word in text_lower:
-            return True
-    
-    # Check for sentence-like structure (ends with period, has articles)
-    if text.endswith('.') or text.endswith(':') or text.endswith('?'):
-        articles = ['the ', 'a ', 'an ', 'this ', 'that ', 'these ', 'those ']
-        if any(article in text_lower for article in articles):
-            return True
-    
-    return False
-
-
-def _detect_language_from_code(line: str) -> str:
-    """Detect programming language from a code line."""
-    line_lower = line.lower()
-    
-    # Python indicators
-    if any(x in line_lower for x in ['import ', 'def ', 'from ', 'print(', '__init__', 'self.', 'elif']):
-        return 'python'
-    
-    # JavaScript/TypeScript
-    if any(x in line_lower for x in ['const ', 'let ', 'var ', 'function ', '=>', 'console.log', 'require(']):
-        return 'javascript'
-    
-    # Java/C#
-    if any(x in line_lower for x in ['public class', 'private ', 'protected ', 'void ', 'static ', 'new ']):
-        if 'using system' in line_lower or 'namespace' in line_lower:
-            return 'csharp'
-        return 'java'
-    
-    # SQL
-    if any(x in line_lower for x in ['select ', 'from ', 'where ', 'insert ', 'update ', 'create table']):
-        return 'sql'
-    
-    # C/C++
-    if any(x in line_lower for x in ['#include', 'using namespace', 'std::', 'int main(']):
-        return 'cpp'
-    
-    # Bash/Shell
-    if any(x in line_lower for x in ['#!/bin/', 'echo ', 'cd ', 'ls ', 'grep ', 'awk ']):
-        return 'bash'
-    
-    # R
-    if '<-' in line or any(x in line_lower for x in ['library(', 'ggplot(', 'data.frame(']):
-        return 'r'
-    
-    # Default to Python (most common in data science/ML)
-    return 'python'
-
-
-def _unescape_common_whitespace_sequences(text: str) -> str:
-    """Convert common escaped whitespace sequences into real whitespace.
-
-    Some upstream providers return code/explanations with literal "\\n" and "\\t"
-    characters instead of actual newlines/tabs. That breaks markdown rendering.
-
-    Heuristic: only unescape when the string contains escaped newlines but no real
-    newlines (i.e., it looks like a single-line payload).
-    """
-
-    s = text or ""
-    if not s:
-        return s
-
-    # Only convert when it appears to be an escaped single-line blob.
-    if "\\n" in s and "\n" not in s:
-        # Handle common variants first
-        s = s.replace("\\r\\n", "\n")
-        s = s.replace("\\n", "\n")
-        # Occasionally strings contain escaped carriage returns too
-        s = s.replace("\\r", "")
-
-    # Convert tabs only when there are now real newlines (typical code formatting)
-    if "\\t" in s and "\t" not in s and "\n" in s:
-        s = s.replace("\\t", "\t")
-
-    return s
-
-def format_coding_answer_for_interview_tab(
-    answer: str,
-    code_solution: Optional[str],
-    is_coding: bool,
-    language: Optional[str],
-    time_complexity: Optional[str],
-    space_complexity: Optional[str]
-) -> str:
-    """
-    Format answer for Interview Intelligence tab.
-    ABSOLUTE FIX: Prevents ALL duplicate code blocks + auto-formats code examples.
-    """
-    if not is_coding:
-        # For non-coding questions, still apply auto-formatting for any code examples
-        formatted = auto_format_code_blocks(_unescape_common_whitespace_sequences(answer or ""))
-        return formatted
-    
-    text = _unescape_common_whitespace_sequences((answer or "").strip())
-    code_solution = _unescape_common_whitespace_sequences((code_solution or "").strip()) or None
-    if not text and not code_solution:
-        return ""
-    
-    # If answer already has good structure, apply auto-formatting and return
-    if _has_interview_structure(text):
-        return auto_format_code_blocks(text)
-    
-    # Parse sections
-    sections = _parse_markdown_sections(text)
-    
-    # Build formatted output
-    parts = []
-    
-    # 1. CODE SOLUTION SECTION (if exists)
-    # Always add code from code_solution parameter, never from answer text
-    if code_solution:
-        lang = (language or "python").lower()
-        parts.append(f"## Solution\n\n```{lang}\n{code_solution.strip()}\n```")
-
-        # Add complexity only if the original answer doesn't already include it
-        if (time_complexity or space_complexity) and not _answer_has_complexity(text):
-            complexity_parts = []
-            if time_complexity:
-                complexity_parts.append(f"**Time:** {time_complexity}")
-            if space_complexity:
-                complexity_parts.append(f"**Space:** {space_complexity}")
-            parts.append("\n" + " | ".join(complexity_parts))
-        
-        parts.append("")  # Blank line
-    
-    # 2. EXPLANATION - Format with bullet points and structure
-    if text:
-        # Parse markdown sections for explanation, approach, etc.
-        sections = _parse_markdown_sections(text)
-        explanation = sections.get('explanation', '')
-        approach = sections.get('approach', '')
-        summary = sections.get('summary', '')
-        # Format explanation with bullets if possible
-        formatted_explanation = ''
-        if explanation:
-            # Try to extract bullet points
-            bullets = re.findall(r'^[-*•]\s*(.+)$', explanation, re.MULTILINE)
-            if bullets:
-                formatted_explanation = '\n'.join([f'- {b.strip()}' for b in bullets])
-            else:
-                # Fallback: split into sentences as bullets
-                sentences = re.split(r'(?<=[.!?])\s+', explanation)
-                formatted_explanation = '\n'.join([f'- {s.strip()}' for s in sentences if len(s.strip()) > 10])
-        # Add summary and approach if present
-        if summary:
-            parts.append(f'**Summary:**\n{summary.strip()}')
-        if approach:
-            parts.append(f'**Approach:**\n{approach.strip()}')
-        if formatted_explanation:
-            parts.append(f'**Explanation:**\n{formatted_explanation}')
+    if not api_key:
+        if is_demo:
+            if settings.is_demo_key_pool_enabled():
+                try:
+                    from app.services.chat.demo_key_pool import demo_key_pool
+                    demo_key = demo_key_pool.get_key()
+                    if demo_key and demo_key.startswith("gsk_"):
+                        api_key = demo_key
+                except Exception:
+                    pass
+            if not api_key and settings.groq_api_key:
+                api_key = settings.groq_api_key
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Demo is temporarily unavailable (Groq is not configured).",
+                )
         else:
-            parts.append(text)
-    # CRITICAL: Apply auto-formatting to catch any remaining unformatted code
-    final_output = "\n".join(parts)
-    return auto_format_code_blocks(final_output)
-
-
-def _extract_explanation_only(sections: dict, full_text: str) -> str:
-    """
-    Extract ONLY the explanation text, NO CODE whatsoever.
-    This is the key to preventing duplicates.
-    """
-    explanation_text = ""
-    
-    # Try to get explanation from parsed sections
-    if sections.get('explanation'):
-        explanation_text = sections['explanation']
-    elif sections.get('other'):
-        explanation_text = sections['other']
-    else:
-        # Fallback: use full text
-        explanation_text = full_text
-    
-    # Now AGGRESSIVELY remove all code
-    cleaned = _remove_all_code_aggressive(explanation_text)
-    
-    return cleaned
-
-
-def _remove_all_code_aggressive(text: str) -> str:
-    """
-    AGGRESSIVELY remove ALL forms of code from text.
-    This prevents any code blocks from appearing in explanation.
-    """
-    if not text:
-        return ""
-    
-    # Step 1: Remove ALL fenced code blocks (```...```)
-    text = re.sub(r'```[\s\S]*?```', '', text, flags=re.DOTALL)
-    
-    # Step 2: Remove sections with "Code Solution" header
-    text = re.sub(r'#+\s*Code\s*Solution[\s\S]*?(?=\n##|\n#|\Z)', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'#+\s*Solution[\s\S]*?(?=\n##|\n#|\Z)', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'Code Solution[\s\S]*?(?=\n##|\n#|\Z)', '', text, flags=re.IGNORECASE)
-    
-    # Step 3: Remove indented code blocks (4+ spaces)
-    lines = text.split('\n')
-    filtered_lines = []
-    skip_until_blank = False
-    
-    for line in lines:
-        # If line starts with 4+ spaces and has content, it's code
-        if re.match(r'^\s{4,}\S', line):
-            skip_until_blank = True
-            continue
-        
-        # If we're in a code block, skip until blank line
-        if skip_until_blank:
-            if line.strip():
-                continue
+            effective = settings.get_effective_provider(feature="default")
+            if effective == "gemini" and settings.gemini_api_key:
+                api_key = settings.gemini_api_key
+            elif effective == "groq" and settings.groq_api_key:
+                api_key = settings.groq_api_key
             else:
-                skip_until_blank = False
-        
-        filtered_lines.append(line)
-    
-    text = '\n'.join(filtered_lines)
-    
-    # Step 4: Remove lines that look like code (def, function, var, etc.)
-    lines = text.split('\n')
-    filtered_lines = []
-    
-    for line in lines:
-        stripped = line.strip()
-        
-        # Skip lines that are clearly code
-        if any([
-            re.match(r'^def\s+\w+\s*\(', stripped),
-            re.match(r'^function\s+\w+\s*\(', stripped),
-            re.match(r'^var\s+\w+\s*=', stripped),
-            re.match(r'^const\s+\w+\s*=', stripped),
-            re.match(r'^let\s+\w+\s*=', stripped),
-            re.match(r'^class\s+\w+', stripped),
-            re.match(r'^public\s+\w+\s+\w+\s*\(', stripped),
-            re.match(r'^\w+\s*=\s*function\s*\(', stripped),
-            re.match(r'^if\s+.*:\s*$', stripped),
-            re.match(r'^for\s+.*:\s*$', stripped),
-            re.match(r'^while\s+.*:\s*$', stripped),
-            stripped.startswith('return '),
-            stripped.startswith('console.log'),
-            stripped.startswith('print('),
-        ]):
-            continue
-        
-        filtered_lines.append(line)
-    
-    text = '\n'.join(filtered_lines)
-    
-    # Step 5: Clean up multiple newlines
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    
-    # Step 6: Remove any remaining isolated code symbols
-    # Remove lines with just brackets, semicolons, etc.
-    lines = text.split('\n')
-    filtered_lines = []
-    
-    for line in lines:
-        stripped = line.strip()
-        # Skip lines that are just code symbols
-        if stripped in ['{', '}', '(', ')', ';', ':', ','] or re.match(r'^[\{\}\(\);:,\s]+$', stripped):
-            continue
-        filtered_lines.append(line)
-    
-    text = '\n'.join(filtered_lines)
-    
-    # Final cleanup
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = text.strip()
-    
-    return text
+                api_key = settings.gemini_api_key or settings.groq_api_key
+
+    return api_key, is_demo
 
 
-def _has_interview_structure(text: str) -> bool:
-    """Check if answer already has good interview structure."""
-    has_approach = bool(re.search(r'\*\*Approach:\*\*|\n## Approach', text))
-    has_solution = bool(re.search(r'## Solution|```\w+\n', text))
-    has_explanation = bool(re.search(r'## How It Works|## Explanation', text))
-    
-    return has_approach and has_solution and has_explanation
+def _resolve_api_key_simple(
+    x_api_key: Optional[str],
+    x_gemini_key: Optional[str],
+    authorization: Optional[str],
+) -> Optional[str]:
+    """Simpler key resolution for enhanced/ultra endpoints (no demo logic)."""
+    groq_key = _clean_header_value(x_api_key)
+    gemini_key = _clean_header_value(x_gemini_key)
+    if not groq_key and authorization and authorization.startswith("Bearer "):
+        groq_key = authorization.split(" ", 1)[1].strip()
+    api_key = gemini_key or groq_key
+    if not api_key:
+        api_key = settings.gemini_api_key or settings.groq_api_key
+    return api_key
 
 
-def _answer_has_complexity(answer: str) -> bool:
-    """Detect if answer already contains time/space complexity notes."""
-    if not answer:
-        return False
-    # Common patterns: 'Time:', 'Space:', 'Time complexity', 'O(n)'
-    if re.search(r"\b(time complexity|space complexity|time:|space:|complexity:|O\()\b", answer, re.I):
-        return True
-    # Also look for lines that explicitly state complexity
-    for line in answer.splitlines():
-        if re.search(r"\b(time|space)\b.*O\(|\bcomplexity\b", line, re.I):
-            return True
-    return False
-
-
-def _parse_markdown_sections(text: str) -> dict:
-    """Parse markdown text into logical sections."""
-    sections = {
-        'summary': '',
-        'approach': '',
-        'solution': '',
-        'explanation': '',
-        'complexity': '',
-        'edge_cases': '',
-        'optimization': '',
-        'other': ''
-    }
-    
-    lines = text.split('\n')
-    current_section = 'other'
-    current_content = []
-    
-    for line in lines:
-        lower_line = line.lower().strip()
-        
-        # Detect section headers
-        if re.match(r'^#{1,3}\s*(complete answer|summary)', lower_line):
-            sections[current_section] = '\n'.join(current_content).strip()
-            current_section = 'summary'
-            current_content = []
-        elif re.match(r'^#{1,3}\s*(approach|algorithm|strategy)', lower_line):
-            sections[current_section] = '\n'.join(current_content).strip()
-            current_section = 'approach'
-            current_content = []
-        elif re.match(r'^#{1,3}\s*(solution|code)', lower_line):
-            sections[current_section] = '\n'.join(current_content).strip()
-            current_section = 'solution'
-            current_content = []
-        elif re.match(r'^#{1,3}\s*(how it works|explanation|walkthrough)', lower_line):
-            sections[current_section] = '\n'.join(current_content).strip()
-            current_section = 'explanation'
-            current_content = []
-        elif re.match(r'^#{1,3}\s*complexity', lower_line):
-            sections[current_section] = '\n'.join(current_content).strip()
-            current_section = 'complexity'
-            current_content = []
-        elif re.match(r'^#{1,3}\s*(edge case|corner case)', lower_line):
-            sections[current_section] = '\n'.join(current_content).strip()
-            current_section = 'edge_cases'
-            current_content = []
-        elif re.match(r'^#{1,3}\s*(optimization|performance)', lower_line):
-            sections[current_section] = '\n'.join(current_content).strip()
-            current_section = 'optimization'
-            current_content = []
-        else:
-            current_content.append(line)
-    
-    # Save last section
-    sections[current_section] = '\n'.join(current_content).strip()
-    
-    return sections
-
-
-def _extract_approach_summary(sections: dict, full_text: str) -> str:
-    """Extract concise 2-3 line approach."""
-    # Try sections in priority order
-    for section_key in ['summary', 'approach', 'other']:
-        content = sections.get(section_key, '')
-        if not content:
-            continue
-        
-        # Remove any code blocks first
-        content = _remove_all_code_aggressive(content)
-        
-        # Extract bullets
-        bullets = re.findall(r'^\s*[-*•]\s*(.+)$', content, re.MULTILINE)
-        if bullets:
-            relevant = [b for b in bullets if len(b) > 20][:3]
-            if relevant:
-                return ' '.join(relevant)
-        
-        # Extract sentences
-        sentences = re.split(r'(?<=[.!?])\s+', content)
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 15]
-        if len(sentences) >= 2:
-            return ' '.join(sentences[:2])
-    
-    # Fallback: first paragraph (without code)
-    clean_text = _remove_all_code_aggressive(full_text)
-    paragraphs = [p.strip() for p in clean_text.split('\n\n') if p.strip()]
-    if paragraphs:
-        first = paragraphs[0]
-        first = re.sub(r'^#{1,6}\s+', '', first)
-        first = re.sub(r'\*\*(.+?)\*\*', r'\1', first)
-        sentences = re.split(r'(?<=[.!?])\s+', first)
-        return ' '.join(sentences[:2])[:250]
-    
-    return ""
-
-
-def clean_history_metadata(metadata: dict) -> dict:
-    """
-    Remove fields that shouldn't be shown in history sidebar.
-    """
-    cleaned = dict(metadata)
-    # Remove avg_credibility to declutter the UI
-    cleaned.pop('avg_credibility', None)
-    return cleaned
-
-
-def apply_formatting_to_questions(questions: list) -> list:
-    """
-    Apply formatting to a list of question dictionaries.
-    """
-    formatted_questions = []
-    
-    for qq in (questions or []):
-        try:
-            formatted = dict(qq)
-            formatted['answer'] = format_coding_answer_for_interview_tab(
-                qq.get('answer', ''),
-                qq.get('code_solution'),
-                qq.get('is_coding_question', False),
-                qq.get('language'),
-                qq.get('time_complexity'),
-                qq.get('space_complexity')
-            )
-            # clear raw code_solution to avoid duplicate rendering in clients
-            formatted['code_solution'] = None
-            formatted_questions.append(formatted)
-        except Exception as e:
-            import logging
-            logging.error(f"Failed to format question: {e}")
-            formatted_questions.append(qq)
-    
-    return formatted_questions
+# --- Pydantic models for enhanced endpoints ---
 
 
 class EnhancedSearchRequest(BaseModel):
@@ -910,43 +288,7 @@ async def get_questions_by_topic(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """Get interview questions for a specific topic."""
-    # API key selection (Bridge Settings / BYOK)
-    # Accept any non-empty bridge header key as "provided" (don't over-validate
-    # key shapes here; tests and future providers may not match known prefixes).
-    def _clean(v: Optional[str]) -> Optional[str]:
-        t = (v or "").strip()
-        if not t:
-            return None
-        if t.lower() in {"null", "undefined", "none"}:
-            return None
-        return t
-
-    x_api_key = _clean(x_api_key)
-    x_gemini_key = _clean(x_gemini_key)
-    provided_key = x_gemini_key or x_api_key
-    # Authorization may be a JWT; only accept it as a provider key via strict parsing.
-    auth_key = extract_user_provided_api_key(
-        request,
-        x_api_key=None,
-        x_gemini_key=None,
-        authorization=authorization,
-    )
-    user_key = provided_key or auth_key
-    if settings.require_user_api_key and not user_key:
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                "API key required for Interview Intelligence. "
-                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
-                "or Authorization: Bearer <key>."
-            ),
-        )
-
-    api_key = user_key
-
-    # Fallback to server keys only when BYOK is not required.
-    if not api_key:
-        api_key = settings.gemini_api_key or settings.groq_api_key
+    api_key, _is_demo = _resolve_api_key(request, x_api_key, x_gemini_key, authorization)
 
     try:
         _ensure_intelligence_services_loaded()
@@ -1059,76 +401,7 @@ async def search_questions(
         )
     
     # API Key selection (Bridge Settings / BYOK)
-    # Treat any non-empty bridge header key as "provided".
-    def _clean(v: Optional[str]) -> Optional[str]:
-        t = (v or "").strip()
-        if not t:
-            return None
-        if t.lower() in {"null", "undefined", "none"}:
-            return None
-        return t
-
-    x_api_key = _clean(x_api_key)
-    x_gemini_key = _clean(x_gemini_key)
-    provided_key = x_gemini_key or x_api_key
-    # Authorization may be a JWT; only accept it as a provider key via strict parsing.
-    auth_key = extract_user_provided_api_key(
-        request,
-        x_api_key=None,
-        x_gemini_key=None,
-        authorization=authorization,
-    )
-    user_key = provided_key or auth_key
-
-    api_key = user_key
-    is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
-
-    # If the server is configured to require user API keys, do NOT fall back to server keys.
-    # Use the stricter extractor here so accidental values (e.g. 'undefined') don't bypass the guard.
-    if settings.require_user_api_key and not user_key:
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                "API key required for Interview Intelligence. "
-                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
-                "or Authorization: Bearer <key>."
-            ),
-        )
-
-    # Prefer the user-provided key when present.
-    api_key = user_key or api_key
-
-    # Fallback to server keys only when user provided no keys.
-    if not api_key:
-        if is_demo:
-            # DEMO PATH: always prefer Groq (cost-capped) and never fall back to Gemini.
-            if settings.is_demo_key_pool_enabled():
-                try:
-                    from app.services.chat.demo_key_pool import demo_key_pool
-                    demo_key = demo_key_pool.get_key()
-                    if demo_key and demo_key.startswith("gsk_"):
-                        api_key = demo_key
-                except Exception:
-                    # Fall back to env Groq key below
-                    pass
-
-            if not api_key and settings.groq_api_key:
-                api_key = settings.groq_api_key
-
-            if not api_key:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Demo is temporarily unavailable (Groq is not configured).",
-                )
-        else:
-            # REGISTERED PATH: use effective provider selection
-            effective = settings.get_effective_provider(feature="default")
-            if effective == "gemini" and settings.gemini_api_key:
-                api_key = settings.gemini_api_key
-            elif effective == "groq" and settings.groq_api_key:
-                api_key = settings.groq_api_key
-            else:
-                api_key = settings.gemini_api_key or settings.groq_api_key
+    api_key, is_demo = _resolve_api_key(request, x_api_key, x_gemini_key, authorization)
 
     # Demo-mode clamp: keep demo responses small/cost-capped.
     if is_demo:
@@ -1166,74 +439,7 @@ async def search_questions_post(
     save_to_history = payload.save_to_history if payload.save_to_history is not None else True
 
     # API Key selection (Bridge Settings / BYOK)
-    def _clean(v: Optional[str]) -> Optional[str]:
-        t = (v or "").strip()
-        if not t:
-            return None
-        if t.lower() in {"null", "undefined", "none"}:
-            return None
-        return t
-
-    x_api_key = _clean(x_api_key)
-    x_gemini_key = _clean(x_gemini_key)
-    provided_key = x_gemini_key or x_api_key
-    auth_key = extract_user_provided_api_key(
-        request,
-        x_api_key=None,
-        x_gemini_key=None,
-        authorization=authorization,
-    )
-    user_key = provided_key or auth_key
-
-    api_key = user_key
-    is_demo = infer_user_type(request, user_provided_key=user_key) == "demo"
-
-    # If the server is configured to require user API keys, do NOT fall back to server keys.
-    # Use the stricter extractor here so accidental values (e.g. 'undefined') don't bypass the guard.
-    if settings.require_user_api_key and not user_key:
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                "API key required for Interview Intelligence. "
-                "Set your key in Bridge Settings (frontend) or send it via X-API-Key / X-Gemini-Key header, "
-                "or Authorization: Bearer <key>."
-            ),
-        )
-
-    # Prefer the user-provided key when present.
-    api_key = user_key or api_key
-
-    # Fallback to server keys only when user provided no keys.
-    if not api_key:
-        if is_demo:
-            # DEMO PATH: always prefer Groq (cost-capped) and never fall back to Gemini.
-            if settings.is_demo_key_pool_enabled():
-                try:
-                    from app.services.chat.demo_key_pool import demo_key_pool
-                    demo_key = demo_key_pool.get_key()
-                    if demo_key and demo_key.startswith("gsk_"):
-                        api_key = demo_key
-                except Exception:
-                    # Fall back to env Groq key below
-                    pass
-
-            if not api_key and settings.groq_api_key:
-                api_key = settings.groq_api_key
-
-            if not api_key:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Demo is temporarily unavailable (Groq is not configured).",
-                )
-        else:
-            # REGISTERED PATH: use effective provider selection
-            effective = settings.get_effective_provider(feature="default")
-            if effective == "gemini" and settings.gemini_api_key:
-                api_key = settings.gemini_api_key
-            elif effective == "groq" and settings.groq_api_key:
-                api_key = settings.groq_api_key
-            else:
-                api_key = settings.gemini_api_key or settings.groq_api_key
+    api_key, is_demo = _resolve_api_key(request, x_api_key, x_gemini_key, authorization)
 
     # Demo-mode clamp: keep demo responses small/cost-capped.
     if is_demo:
@@ -1249,13 +455,11 @@ async def search_questions_post(
 
 
 @router.post("/curate")
-async def add_curated_question(question: dict):
+async def add_curated_question(question: dict, _user=Depends(get_current_user)):
     """
     Add a manually curated question to the database.
     
-    Use this to add high-quality questions from real interviews.
-    These questions will be stored permanently and used to improve
-    future search results.
+    Requires authentication — only logged-in users may add questions.
     
     **Request body:**
     ```json
@@ -1307,18 +511,7 @@ async def search_with_verification(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """Enhanced search with verification."""
-    # API Key selection (Bridge Settings)
-    groq_key = x_api_key
-    gemini_key = x_gemini_key
-    if not groq_key and authorization and authorization.startswith("Bearer "):
-        groq_key = authorization.split(" ")[1]
-        
-    api_key = gemini_key if gemini_key else groq_key
-    
-    # Fallback to dev keys
-    if not api_key:
-        from app.config import settings
-        api_key = settings.gemini_api_key or settings.groq_api_key
+    api_key = _resolve_api_key_simple(x_api_key, x_gemini_key, authorization)
 
     try:
         _ensure_intelligence_services_loaded()
@@ -1396,18 +589,7 @@ async def search_with_verification_post(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """POST version of enhanced search."""
-    # API Key selection (Bridge Settings)
-    groq_key = x_api_key
-    gemini_key = x_gemini_key
-    if not groq_key and authorization and authorization.startswith("Bearer "):
-        groq_key = authorization.split(" ")[1]
-        
-    api_key = gemini_key if gemini_key else groq_key
-    
-    # Fallback to dev keys
-    if not api_key:
-        from app.config import settings
-        api_key = settings.gemini_api_key or settings.groq_api_key
+    api_key = _resolve_api_key_simple(x_api_key, x_gemini_key, authorization)
 
     try:
         _ensure_intelligence_services_loaded()
@@ -1502,28 +684,32 @@ async def get_source_statistics():
 
 @router.get("/companies")
 async def get_supported_companies():
-	"""Get list of companies with verified interview questions"""
+	"""Get list of supported company filters for question search.
+
+	These are illustrative companies commonly searched against.
+	Actual question availability depends on real-time search results.
+	"""
 	companies = [
-		{"name": "Amazon", "slug": "amazon", "question_count": 1500},
-		{"name": "Google", "slug": "google", "question_count": 800},
-		{"name": "Meta/Facebook", "slug": "facebook", "question_count": 600},
-		{"name": "Microsoft", "slug": "microsoft", "question_count": 700},
-		{"name": "Apple", "slug": "apple", "question_count": 400},
-		{"name": "Netflix", "slug": "netflix", "question_count": 150},
-		{"name": "Tesla", "slug": "tesla", "question_count": 100},
-		{"name": "Bloomberg", "slug": "bloomberg", "question_count": 300},
-		{"name": "Adobe", "slug": "adobe", "question_count": 200},
-		{"name": "Uber", "slug": "uber", "question_count": 250},
-		{"name": "Airbnb", "slug": "airbnb", "question_count": 180},
-		{"name": "LinkedIn", "slug": "linkedin", "question_count": 220},
-		{"name": "Twitter", "slug": "twitter", "question_count": 150},
-		{"name": "Salesforce", "slug": "salesforce", "question_count": 180},
-		{"name": "Oracle", "slug": "oracle", "question_count": 200},
+		{"name": "Amazon", "slug": "amazon"},
+		{"name": "Google", "slug": "google"},
+		{"name": "Meta/Facebook", "slug": "facebook"},
+		{"name": "Microsoft", "slug": "microsoft"},
+		{"name": "Apple", "slug": "apple"},
+		{"name": "Netflix", "slug": "netflix"},
+		{"name": "Tesla", "slug": "tesla"},
+		{"name": "Bloomberg", "slug": "bloomberg"},
+		{"name": "Adobe", "slug": "adobe"},
+		{"name": "Uber", "slug": "uber"},
+		{"name": "Airbnb", "slug": "airbnb"},
+		{"name": "LinkedIn", "slug": "linkedin"},
+		{"name": "Twitter", "slug": "twitter"},
+		{"name": "Salesforce", "slug": "salesforce"},
+		{"name": "Oracle", "slug": "oracle"},
 	]
 	return {
 		"companies": companies,
 		"total": len(companies),
-		"note": "Use the 'slug' value in the company parameter"
+		"note": "Use the 'slug' value as the company parameter when searching"
 	}
 
 
@@ -1786,18 +972,7 @@ async def ultra_production_search(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """🚀 Ultra Production Search."""
-    # API Key selection (Bridge Settings)
-    groq_key = x_api_key
-    gemini_key = x_gemini_key
-    if not groq_key and authorization and authorization.startswith("Bearer "):
-        groq_key = authorization.split(" ")[1]
-        
-    api_key = gemini_key if gemini_key else groq_key
-    
-    # Fallback to dev keys
-    if not api_key:
-        from app.config import settings
-        api_key = settings.gemini_api_key or settings.groq_api_key
+    api_key = _resolve_api_key_simple(x_api_key, x_gemini_key, authorization)
 
     try:
         _ensure_intelligence_services_loaded()
@@ -1898,13 +1073,12 @@ async def get_features():
     _ensure_intelligence_services_loaded()
     return {
         "features": {
-            "hybrid_search": {"available": True, "impact": "30-50% better relevance"},
-            "reranking": {"available": ultra_production_service.enable_reranking, "impact": "20-40% quality boost"},
+            "hybrid_search": {"available": True, "description": "Combines semantic + keyword search"},
+            "reranking": {"available": ultra_production_service.enable_reranking, "description": "Re-ranks results by relevance"},
             "code_execution": {"available": True, "languages": ["python", "javascript", "java", "cpp"]},
-            "query_expansion": {"available": True, "impact": "3-5x coverage"},
-            "real_time_streaming": {"available": True, "impact": "Instant results as they're found"}
-        },
-        "rating": "9-10/10"
+            "query_expansion": {"available": True, "description": "Expands queries for broader coverage"},
+            "real_time_streaming": {"available": True, "description": "Streams results via WebSocket"}
+        }
     }
 
 
@@ -1949,6 +1123,20 @@ async def websocket_search(websocket: WebSocket):
         _ensure_intelligence_services_loaded()
         # Wait for search request
         request_data = await websocket.receive_json()
+
+        # Require an API key or auth token in the initial message
+        ws_api_key = (request_data.get("api_key") or request_data.get("token") or "").strip()
+        if not ws_api_key:
+            # Fall back to server keys if available (same logic as REST endpoints)
+            ws_api_key = settings.gemini_api_key or settings.groq_api_key
+        if not ws_api_key:
+            await websocket.send_json({
+                "type": "error",
+                "error": "Authentication required — send api_key or token in the first message",
+                "timestamp": time.time(),
+            })
+            await websocket.close(code=4001)
+            return
         
         query = request_data.get('query', '')
         limit = request_data.get('limit', 20)

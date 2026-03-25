@@ -273,10 +273,17 @@ class GitHubSearcher:
     ) -> List[VerifiedQuestion]:
         """Extract questions from a GitHub file"""
         try:
-            # Get raw file content
-            raw_url = item.get("html_url", "").replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+            # Get raw file content — validate domain to prevent SSRF
+            html_url = item.get("html_url", "")
+            raw_url = html_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
             
             if not raw_url:
+                return []
+
+            from urllib.parse import urlparse
+            parsed = urlparse(raw_url)
+            if parsed.hostname not in ("raw.githubusercontent.com", "github.com"):
+                logger.warning("Rejecting non-GitHub URL: %s", parsed.hostname)
                 return []
             
             async with session.get(raw_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:

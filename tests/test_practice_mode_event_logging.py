@@ -20,6 +20,10 @@ from app.schemas import (
     PracticeInterviewQuestion,
     PracticeSession,
     QuestionDifficulty,
+    SessionCoachingStyle,
+    SessionFollowUpDepth,
+    SessionStrategyAction,
+    SessionStrategyDecision,
     SpeechMetrics,
     MicroFeedback,
 )
@@ -74,10 +78,30 @@ class _DummyPracticeService:
             technical_accuracy="Good",
             is_correct=True,
         )
+        strategy = SessionStrategyDecision(
+            action=SessionStrategyAction.FOLLOW_UP,
+            reason="Drill one missed concept before moving on.",
+            coaching_style=SessionCoachingStyle.BALANCED,
+            follow_up_depth=SessionFollowUpDepth.LIGHT,
+            target_difficulty=QuestionDifficulty.MEDIUM,
+            source="fallback_rules",
+            learning_focus=["core technical depth and correctness"],
+            decision_trace={
+                "guardrail": None,
+                "proposed_action": "FOLLOW_UP",
+                "proposed_source": "fallback_rules",
+                "overall_score": 80.0,
+                "correctness_score": 80,
+                "remaining_questions": 1,
+                "last_strategy_action": None,
+                "follow_up_budget": {"used": 0, "max": 1, "remaining": 1},
+            },
+        )
         return {
             "transcript": "I would start by capturing heap snapshots and comparing growth over time...",
             "metrics": metrics,
             "micro_feedback": micro,
+            "strategy": strategy,
             "complete": False,
             "progress": "1/2",
             "requires_acknowledgment": True,
@@ -92,6 +116,25 @@ class _DummyPracticeService:
             "progress": "2/2",
             "next_question": next_q,
             "tts_audio_url": f"{session_id}_q2.mp3",
+            "strategy": SessionStrategyDecision(
+                action=SessionStrategyAction.FOLLOW_UP,
+                reason="Drill one missed concept before moving on.",
+                coaching_style=SessionCoachingStyle.BALANCED,
+                follow_up_depth=SessionFollowUpDepth.LIGHT,
+                target_difficulty=QuestionDifficulty.MEDIUM,
+                source="fallback_rules",
+                learning_focus=["core technical depth and correctness"],
+                decision_trace={
+                    "guardrail": None,
+                    "proposed_action": "FOLLOW_UP",
+                    "proposed_source": "fallback_rules",
+                    "overall_score": 80.0,
+                    "correctness_score": 80,
+                    "remaining_questions": 1,
+                    "last_strategy_action": None,
+                    "follow_up_budget": {"used": 0, "max": 1, "remaining": 1},
+                },
+            ),
         }
 
 
@@ -134,6 +177,7 @@ def test_practice_mode_emits_events(monkeypatch):
         data={"session_id": session_id, "question_id": 1},
     )
     assert submit.status_code == 200
+    assert submit.json().get("strategy", {}).get("action") == "FOLLOW_UP"
 
     # Acknowledge feedback
     ack = client.post(
@@ -143,6 +187,7 @@ def test_practice_mode_emits_events(monkeypatch):
     )
     assert ack.status_code == 200
     assert ack.json().get("auto_start_recording") is True
+    assert ack.json().get("strategy", {}).get("action") == "FOLLOW_UP"
 
     # Phase 3: Rate feedback usefulness (human label)
     rated = client.post(
@@ -174,3 +219,12 @@ def test_practice_mode_emits_events(monkeypatch):
     assert "practice_answer_processed" in event_types
     assert "practice_feedback_acknowledged" in event_types
     assert "practice_feedback_rated" in event_types
+    assert "practice_strategy_previewed" in event_types
+    assert "practice_strategy_executed" in event_types
+
+    preview_row = next(r for r in rows if r.event_type == "practice_strategy_previewed")
+    execute_row = next(r for r in rows if r.event_type == "practice_strategy_executed")
+    assert preview_row.extra_data.get("strategy_action") == "FOLLOW_UP"
+    assert preview_row.extra_data.get("strategy_follow_up_budget_remaining") == 1
+    assert execute_row.extra_data.get("strategy_stage") == "execution"
+    assert execute_row.extra_data.get("strategy_guardrail") is None

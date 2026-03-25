@@ -279,6 +279,7 @@ class PracticeModeGraph:
                 getattr(session, "answers", []) or [],
                 str(getattr(session, "session_id", state.get("session_id"))),
                 api_key=state.get("api_key"),
+                questions=getattr(session, "questions", None),
             )
             try:
                 self._svc._maybe_add_peer_learning_insight(evaluation_report)

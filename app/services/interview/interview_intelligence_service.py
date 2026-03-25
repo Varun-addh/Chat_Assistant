@@ -39,6 +39,22 @@ from app.services.chat.ai_native_enhancements import (
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_to_list(value: Any, field_name: str = "") -> list:
+    """Convert a value to a list.  LLMs sometimes return a string instead of a list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    try:
+        return list(value)
+    except (TypeError, ValueError):
+        logger.warning("Could not convert %s to list: %s", field_name, value)
+        return []
+
+
 # Optional burst protection: limit concurrent heavy to_thread work per event loop.
 # pytest may use multiple event loops, so keep semaphores loop-scoped.
 _HEAVY_OP_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[int, asyncio.Semaphore]]" = weakref.WeakKeyDictionary()
@@ -286,23 +302,29 @@ class ModernInterviewIntelligenceService:
             return await asyncio.to_thread(self._embed_text, text)
 
     def _fix_json_escapes(self, text: str) -> str:
-        """Normalize JSON escape sequences to improve parse success"""
-        # Protect existing escape sequences first
-        text = text.replace('\\\\', '\x00DOUBLE_BACKSLASH\x00')
-        text = text.replace('\\"', '\x00ESCAPED_QUOTE\x00')
-        text = text.replace('\\n', '\x00NEWLINE\x00')
-        text = text.replace('\\t', '\x00TAB\x00')
-        text = text.replace('\\r', '\x00CARRIAGE\x00')
+        """Normalize JSON escape sequences to improve parse success."""
+        # Named sentinel strings (no null bytes) to protect valid escape sequences
+        _DOUBLE_BS = "<<DBL_BACKSLASH>>"
+        _ESC_QUOTE = "<<ESC_QUOTE>>"
+        _NEWLINE   = "<<NEWLINE>>"
+        _TAB       = "<<TAB>>"
+        _CR        = "<<CR>>"
+
+        text = text.replace('\\\\', _DOUBLE_BS)
+        text = text.replace('\\"', _ESC_QUOTE)
+        text = text.replace('\\n', _NEWLINE)
+        text = text.replace('\\t', _TAB)
+        text = text.replace('\\r', _CR)
 
         # Escape any remaining stray backslashes
         text = text.replace('\\', '\\\\')
 
         # Restore protected sequences
-        text = text.replace('\x00DOUBLE_BACKSLASH\x00', '\\\\')
-        text = text.replace('\x00ESCAPED_QUOTE\x00', '\\"')
-        text = text.replace('\x00NEWLINE\x00', '\\n')
-        text = text.replace('\x00TAB\x00', '\\t')
-        text = text.replace('\x00CARRIAGE\x00', '\\r')
+        text = text.replace(_DOUBLE_BS, '\\\\')
+        text = text.replace(_ESC_QUOTE, '\\"')
+        text = text.replace(_NEWLINE, '\\n')
+        text = text.replace(_TAB, '\\t')
+        text = text.replace(_CR, '\\r')
 
         return text
 
@@ -376,10 +398,10 @@ class ModernInterviewIntelligenceService:
                 model = client.GenerativeModel(
                     llm_svc._settings.gemini_model,
                     safety_settings={
-                        "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-                        "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-                        "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                        "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+                        "HARM_CATEGORY_HARASSMENT": "BLOCK_MEDIUM_AND_ABOVE",
+                        "HARM_CATEGORY_HATE_SPEECH": "BLOCK_MEDIUM_AND_ABOVE",
+                        "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_MEDIUM_AND_ABOVE",
+                        "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_MEDIUM_AND_ABOVE",
                     },
                 )
                 response = model.generate_content(
@@ -691,10 +713,10 @@ class ModernInterviewIntelligenceService:
                         model = client.GenerativeModel(
                             llm_svc._settings.gemini_model,
                             safety_settings={
-                                'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
-                                'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
-                                'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
-                                'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+                                'HARM_CATEGORY_HARASSMENT': 'BLOCK_MEDIUM_AND_ABOVE',
+                                'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_MEDIUM_AND_ABOVE',
+                                'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_MEDIUM_AND_ABOVE',
+                                'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_MEDIUM_AND_ABOVE',
                             }
                         )
                         response = model.generate_content(
@@ -804,10 +826,10 @@ CRITICAL FORMAT RULES:
                             model = client.GenerativeModel(
                                 llm_svc._settings.gemini_model,
                                 safety_settings={
-                                    'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
-                                    'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
-                                    'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
-                                    'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+                                    'HARM_CATEGORY_HARASSMENT': 'BLOCK_MEDIUM_AND_ABOVE',
+                                    'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_MEDIUM_AND_ABOVE',
+                                    'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_MEDIUM_AND_ABOVE',
+                                    'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_MEDIUM_AND_ABOVE',
                                 }
                             )
                             response = model.generate_content(
@@ -1108,26 +1130,10 @@ CRITICAL FORMAT RULES:
                         item.setdefault("question_type", request.intent.question_type or "technical")
                         
                         # CRITICAL: Normalize array fields - LLM sometimes returns strings instead of lists
-                        def normalize_to_list(value, field_name):
-                            """Convert string to list if needed"""
-                            if value is None:
-                                return []
-                            if isinstance(value, list):
-                                return value
-                            if isinstance(value, str):
-                                # If it's a string, wrap it in a list
-                                return [value] if value.strip() else []
-                            # Try to convert other types
-                            try:
-                                return list(value)
-                            except (TypeError, ValueError):
-                                logger.warning(f"Could not convert {field_name} to list: {value}")
-                                return []
-                        
-                        item["key_concepts"] = normalize_to_list(item.get("key_concepts"), "key_concepts")
-                        item["common_mistakes"] = normalize_to_list(item.get("common_mistakes"), "common_mistakes")
-                        item["follow_up_questions"] = normalize_to_list(item.get("follow_up_questions"), "follow_up_questions")
-                        item["companies"] = normalize_to_list(item.get("companies"), "companies")
+                        item["key_concepts"] = _normalize_to_list(item.get("key_concepts"), "key_concepts")
+                        item["common_mistakes"] = _normalize_to_list(item.get("common_mistakes"), "common_mistakes")
+                        item["follow_up_questions"] = _normalize_to_list(item.get("follow_up_questions"), "follow_up_questions")
+                        item["companies"] = _normalize_to_list(item.get("companies"), "companies")
                         
                         # CRITICAL: Clean escaped newlines and quotes from answer text
                         if "answer" in item and item["answer"]:
@@ -1279,24 +1285,10 @@ CRITICAL FORMAT RULES:
                 item.setdefault("question_type", request.intent.question_type or "technical")
                 
                 # CRITICAL: Normalize array fields - LLM sometimes returns strings instead of lists
-                def normalize_to_list(value, field_name):
-                    """Convert string to list if needed"""
-                    if value is None:
-                        return []
-                    if isinstance(value, list):
-                        return value
-                    if isinstance(value, str):
-                        return [value] if value.strip() else []
-                    try:
-                        return list(value)
-                    except (TypeError, ValueError):
-                        logger.warning(f"Could not convert {field_name} to list: {value}")
-                        return []
-                
-                item["key_concepts"] = normalize_to_list(item.get("key_concepts"), "key_concepts")
-                item["common_mistakes"] = normalize_to_list(item.get("common_mistakes"), "common_mistakes")
-                item["follow_up_questions"] = normalize_to_list(item.get("follow_up_questions"), "follow_up_questions")
-                item["companies"] = normalize_to_list(item.get("companies"), "companies")
+                item["key_concepts"] = _normalize_to_list(item.get("key_concepts"), "key_concepts")
+                item["common_mistakes"] = _normalize_to_list(item.get("common_mistakes"), "common_mistakes")
+                item["follow_up_questions"] = _normalize_to_list(item.get("follow_up_questions"), "follow_up_questions")
+                item["companies"] = _normalize_to_list(item.get("companies"), "companies")
                 
                 # CRITICAL: Handle code_solution
                 if "code_solution" not in item:
@@ -1392,24 +1384,10 @@ CRITICAL FORMAT RULES:
                 item.setdefault("question_type", request.intent.question_type or "technical")
                 
                 # CRITICAL: Normalize array fields - LLM sometimes returns strings instead of lists
-                def normalize_to_list(value, field_name):
-                    """Convert string to list if needed"""
-                    if value is None:
-                        return []
-                    if isinstance(value, list):
-                        return value
-                    if isinstance(value, str):
-                        return [value] if value.strip() else []
-                    try:
-                        return list(value)
-                    except (TypeError, ValueError):
-                        logger.warning(f"Could not convert {field_name} to list: {value}")
-                        return []
-                
-                item["key_concepts"] = normalize_to_list(item.get("key_concepts"), "key_concepts")
-                item["common_mistakes"] = normalize_to_list(item.get("common_mistakes"), "common_mistakes")
-                item["follow_up_questions"] = normalize_to_list(item.get("follow_up_questions"), "follow_up_questions")
-                item["companies"] = normalize_to_list(item.get("companies"), "companies")
+                item["key_concepts"] = _normalize_to_list(item.get("key_concepts"), "key_concepts")
+                item["common_mistakes"] = _normalize_to_list(item.get("common_mistakes"), "common_mistakes")
+                item["follow_up_questions"] = _normalize_to_list(item.get("follow_up_questions"), "follow_up_questions")
+                item["companies"] = _normalize_to_list(item.get("companies"), "companies")
                 
                 if "code_solution" not in item:
                     item["code_solution"] = None
@@ -1496,8 +1474,7 @@ CRITICAL FORMAT RULES:
         Get expected sources based on query topic.
         This is used both for grounding questions and for WebSocket status updates.
         """
-        # Return generic source name
-        return ['Interview Database']
+        return ['AI Generated']
     
     async def _ground_with_web_search(
         self,
@@ -1523,7 +1500,7 @@ CRITICAL FORMAT RULES:
                     "validation_status": "not_checked",
                     "validation_score": 0.0,
                     "validation_sources": [],
-                    "source": "Interview Database"
+                    "source": "AI Generated"
                 }))
             return validated_questions
         
@@ -1570,7 +1547,7 @@ CRITICAL FORMAT RULES:
                         "validation_status": "not_checked",
                         "validation_score": 0.0,
                         "validation_sources": [],
-                        "source": "Interview Database"
+                        "source": "AI Generated"
                     }))
                 return validated_questions
             
@@ -1585,7 +1562,7 @@ CRITICAL FORMAT RULES:
                         "validation_status": "unverified",
                         "validation_score": 0.0,
                         "validation_sources": [],
-                        "source": "Interview Database"
+                        "source": "AI Generated"
                     }))
                 return validated_questions
             
@@ -1636,7 +1613,7 @@ CRITICAL FORMAT RULES:
                         "fuzzy_overlap": fuzzy_overlap,
                         "link": link
                     })
-                    if fuzzy_overlap >= 2:
+                    if fuzzy_overlap >= 3:
                         is_trusted = any(domain in link.lower() for domain in trusted_domains)
                         mentions_interview = "interview" in text
                         position_weight = (20 - idx) / 20  # Top result = 1.0
@@ -1653,17 +1630,13 @@ CRITICAL FORMAT RULES:
                 # Determine status and source label
                 if validation_score >= 50:
                     status = "validated"
-                    # Only show 'Interview Database (Verified)' if this is a verified-only search or truly verified source
-                    if getattr(self, 'verified_only', False):
-                        source = "Interview Database (Verified)"
-                    else:
-                        source = "Interview Database"
+                    source = "AI Generated (Web Validated)"
                 elif validation_score >= 20:
                     status = "partially_validated"
-                    source = "Interview Database"
+                    source = "AI Generated (Partially Validated)"
                 else:
                     status = "unverified"
-                    source = "Interview Database"
+                    source = "AI Generated"
                 # Log debug info for each question
                 logger.info(f"Validation debug for: '{question.question[:60]}...' | Score: {validation_score:.1f} | Status: {status}")
                 for match in debug_matches:
@@ -1698,7 +1671,7 @@ CRITICAL FORMAT RULES:
                     "validation_status": "not_checked",
                     "validation_score": 0.0,
                     "validation_sources": [],
-                    "source": "Interview Database"
+                    "source": "AI Generated"
                 }))
             return validated_questions
     
@@ -1812,30 +1785,23 @@ CRITICAL FORMAT RULES:
             return
         
         try:
+            import uuid
             points = []
-            
-            # Get current max ID
-            current_points = self.vector_client.scroll(
-                collection_name=self.collection_name,
-                limit=1,
-                with_payload=False,
-                with_vectors=False
-            )[0]
-            
-            next_id = len(current_points) if current_points else 0
             
             for q in questions:
                 # Create embedding
                 text = f"{q.question} {' '.join(q.key_concepts)}"
                 vector = self._embed_text(text)
                 
+                # Use a proper unique ID (hash-based UUID from question text)
+                point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, q.question))
+                
                 point = PointStruct(
-                    id=next_id,
+                    id=point_id,
                     vector=vector,
                     payload=q.dict()
                 )
                 points.append(point)
-                next_id += 1
             
             if points:
                 self.vector_client.upsert(
@@ -2319,12 +2285,12 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
                 
                 # Use the source assigned by grounding (not hardcoded)
                 "source": q.source,
-                "source_type": "verified",
-                "verification_status": "verified",
-                "verification_level": "verified",
+                "source_type": "llm_generated",
+                "verification_status": q.validation_status or "unverified",
+                "verification_level": "llm_generated",
                 "credibility_score": q.confidence_score,
-                "is_verified": True,
-                "is_generated": False,
+                "is_verified": False,
+                "is_generated": True,
                 "source_url": None,
                 
                 # SerpAPI validation results
@@ -2568,12 +2534,12 @@ class EnhancedInterviewIntelligenceService(ModernInterviewIntelligenceService):
                             "follow_up_questions": q.follow_up_questions,
                             "companies": q.companies,
                             "source": q.source,
-                            "source_type": "verified",
-                            "verification_status": "verified",
-                            "verification_level": "verified",
+                            "source_type": "cached",
+                            "verification_status": "cached",
+                            "verification_level": "cached",
                             "credibility_score": q.confidence_score,
-                            "is_verified": True,
-                            "is_generated": False,
+                            "is_verified": False,
+                            "is_generated": True,
                             "updated_at": q.created_at.isoformat(),
                             "is_coding_question": q.question_type == "coding",
                         }
@@ -2951,65 +2917,13 @@ class UltraProductionInterviewService(EnhancedInterviewIntelligenceService):
         results: List[Dict],
         user_id: str
     ) -> List[Dict]:
+        """Personalize results based on user history.
+
+        NOTE: Personalization is not yet implemented.  This method is an
+        intentional no-op that returns the results unmodified so callers
+        do not need conditional checks.
         """
-        Personalize results based on user history
-        
-        TODO: Implement full personalization with:
-        - User skill level
-        - Previously attempted questions
-        - Success rate
-        - Learning preferences
-        """
-        
-        # Placeholder for now
-        logger.debug(f"Personalizing results for user {user_id}")
-        
-        # TODO: Fetch user profile
-        # user_profile = await self.get_user_profile(user_id)
-        
-        # TODO: Filter based on skill level
-        # if user_profile.skill_level == 'beginner':
-        #     results = [r for r in results if r.get('difficulty') in ['easy', 'medium']]
-        
-        # TODO: Remove already attempted questions
-        # attempted = await self.get_attempted_questions(user_id)
-        # results = [r for r in results if r.get('question') not in attempted]
-        
         return results
-    
-    async def stream_search_results(
-        self,
-        query: str,
-        limit: int = 20,
-        **kwargs
-    ) -> AsyncGenerator[Dict, None]:
-        """
-        Stream search results in real-time
-        
-        Usage:
-            async for result in service.stream_search_results(query):
-                await websocket.send_json(result)
-        """
-        
-        # DEPRECATED: This method has broken imports and is not currently used
-        # TODO: Fix or remove this method if streaming search is needed
-        logger.warning("stream_search_results is deprecated - broken import")
-        raise NotImplementedError("stream_search_results is deprecated")
-        
-        # Use streaming implementation
-        # from app.services.enhanced_multi_source_adapter import enhanced_multi_source_manager
-        
-        # sources = [
-        #     enhanced_multi_source_manager,
-        #     # Add more sources
-        # ]
-        
-        # async for result in RealTimeSearchStream.stream_search_results(
-        #     query=query,
-        #     sources=sources,
-        #     limit=limit
-        # ):
-        #     yield result
     
     async def execute_and_validate_code(
         self,

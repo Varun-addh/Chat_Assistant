@@ -24,7 +24,8 @@ from app.schemas import (
     MicroFeedback,
     EvaluationReport,
     UserProfile,
-    InterviewRound
+    InterviewRound,
+    SessionStrategyDecision,
 )
 from app.services.practice.interviewer_agent import InterviewerAgent
 from app.services.practice.adaptive_interviewer_agent import AdaptiveInterviewerAgent
@@ -33,6 +34,7 @@ from app.services.practice.evaluation_agent import EvaluationAgent
 from app.services.practice.local_stt_service import LocalSTTService
 from app.services.practice.local_tts_service import LocalTTSService
 from app.services.practice.conversational_agent import ConversationalAgent
+from app.services.practice.session_strategy_agent import SessionStrategyAgent
 from app.services.chat.llm_service import LLMAuthenticationError
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,7 @@ class PracticeModeService:
         self.conversational_agent = ConversationalAgent(gemini_api_key)
         self.analytics_agent = SpeechAnalyticsAgent(config.analytics)
         self.evaluation_agent = EvaluationAgent(gemini_api_key, model_name=gemini_model)
+        self.session_strategy_agent = SessionStrategyAgent(self)
         
         # Store gemini API key for later use
         self.gemini_api_key = gemini_api_key
@@ -91,6 +94,42 @@ class PracticeModeService:
         asyncio.create_task(self._warmup_models())
         
         logger.info("Practice Mode Service initialized successfully with auto-cleanup")
+
+    def _get_session_strategy_agent(self) -> SessionStrategyAgent:
+        agent = getattr(self, "session_strategy_agent", None)
+        if agent is None:
+            agent = SessionStrategyAgent(self)
+            self.session_strategy_agent = agent
+        return agent
+
+    @staticmethod
+    def _find_answer_for_question(session: PracticeSession, question_id: int) -> Optional[AnswerSubmission]:
+        for answer in reversed(getattr(session, "answers", []) or []):
+            if int(getattr(answer, "question_id", -1)) == int(question_id):
+                return answer
+        return None
+
+    async def _preview_strategy_decision(
+        self,
+        *,
+        session: PracticeSession,
+        previous_question: PracticeInterviewQuestion,
+        last_answer: AnswerSubmission,
+        api_key: Optional[str],
+    ) -> Optional[SessionStrategyDecision]:
+        if not bool(getattr(settings, "enable_practice_session_brain", True)):
+            return None
+
+        try:
+            return await self._get_session_strategy_agent().preview_next_action(
+                session=session,
+                previous_question=previous_question,
+                last_answer=last_answer,
+                api_key=api_key,
+            )
+        except Exception as exc:
+            logger.warning("Session brain preview failed, falling back to legacy flow: %s", exc)
+            return None
 
     def _maybe_add_peer_learning_insight(self, evaluation_report: EvaluationReport) -> None:
         if not bool(getattr(settings, "enable_practice_learning", False)):
@@ -501,6 +540,20 @@ class PracticeModeService:
             transcript, stt_metadata = await self.stt_service.transcribe_async(audio_file_path)
             logger.info(f"Transcription (full): '{transcript}'")
             
+            # Transcription quality gate: warn when Whisper output looks garbled
+            _lang_prob = stt_metadata.get("language_probability", 1.0) if stt_metadata else 1.0
+            _word_count = len(transcript.split()) if transcript else 0
+            _audio_dur = stt_metadata.get("duration", 0) if stt_metadata else 0
+            _transcript_quality_low = (
+                _lang_prob < 0.70
+                or (_audio_dur > 5 and _word_count < 4)
+            )
+            if _transcript_quality_low:
+                logger.warning(
+                    f"Low transcription quality: lang_prob={_lang_prob:.2f}, "
+                    f"words={_word_count}, audio_dur={_audio_dur:.1f}s"
+                )
+            
             # Step 2: Analyze speech (Analytics Agent)
             metrics = self.analytics_agent.analyze_audio(
                 audio_path=audio_file_path,
@@ -533,6 +586,16 @@ class PracticeModeService:
                     technical_accuracy=None,
                 )
             
+            # Inject transcription quality warning into micro-feedback if garbled
+            if _transcript_quality_low and micro_feedback:
+                _qual_tip = (
+                    f"⚠️ Low transcription confidence (lang_prob={_lang_prob:.0%}) — "
+                    "evaluation may be inaccurate. Try speaking closer to the mic."
+                )
+                if hasattr(micro_feedback, "delivery_tips") and isinstance(micro_feedback.delivery_tips, list):
+                    micro_feedback.delivery_tips.insert(0, _qual_tip)
+                    micro_feedback.delivery_tips = micro_feedback.delivery_tips[:2]
+            
             # Create answer submission
             answer = AnswerSubmission(
                 question_id=question_id,
@@ -547,11 +610,41 @@ class PracticeModeService:
             # Update to 0-based index (question_id is 1-based, so subtract 1)
             session.current_question_index = question_id - 1
             
-            # Check if interview is complete
-            is_complete = self.interviewer_agent.is_interview_complete(
+            # Check if interview is complete (all pre-generated questions answered)
+            all_questions_answered = self.interviewer_agent.is_interview_complete(
                 session.current_question_index, 
                 len(session.questions)
             )
+            
+            # If all questions answered, give the strategy brain a chance to extend
+            # (e.g., follow-up drill, difficulty change) before declaring complete.
+            is_complete = all_questions_answered
+            strategy_preview = None
+            if all_questions_answered and bool(getattr(settings, "enable_practice_session_brain", True)):
+                try:
+                    strategy_preview = await self._preview_strategy_decision(
+                        session=session,
+                        previous_question=question,
+                        last_answer=answer,
+                        api_key=api_key,
+                    )
+                    if strategy_preview is not None:
+                        from app.schemas import SessionStrategyAction
+                        _continuing_actions = {
+                            SessionStrategyAction.FOLLOW_UP,
+                            SessionStrategyAction.ASK_QUESTION,
+                            SessionStrategyAction.INCREASE_DIFFICULTY,
+                            SessionStrategyAction.DECREASE_DIFFICULTY,
+                        }
+                        if strategy_preview.action in _continuing_actions:
+                            is_complete = False
+                            logger.info(
+                                f"Strategy brain overrides completion: action={strategy_preview.action.value}, "
+                                f"reason={strategy_preview.reason}"
+                            )
+                except Exception as exc:
+                    logger.warning("Strategy brain preview at completion failed: %s", exc)
+                    strategy_preview = None
             
             response = {
                 "transcript": transcript,
@@ -569,6 +662,19 @@ class PracticeModeService:
             # Store next question details in session for later retrieval (don't send yet)
             if not is_complete:
                 session.pending_next_question = True
+                # Re-use the preview we already computed (if any), else compute fresh
+                preview = strategy_preview
+                if preview is None:
+                    preview = await self._preview_strategy_decision(
+                        session=session,
+                        previous_question=question,
+                        last_answer=answer,
+                        api_key=api_key,
+                    )
+                session.pending_strategy_decision = preview
+                if preview is not None:
+                    session.current_coaching_style = preview.coaching_style
+                    response["strategy"] = preview
                 # Don't generate TTS yet - wait for acknowledgment
                 # This prevents auto-progression to next question
             
@@ -577,13 +683,15 @@ class PracticeModeService:
                 logger.info("Interview complete, generating evaluation...")
                 session.is_complete = True
                 session.completed_at = utcnow()
+                session.pending_strategy_decision = None
                 
                 try:
                     logger.info(f"Generating final evaluation for {len(session.answers)} answers...")
                     evaluation_report = await self.evaluation_agent.evaluate_interview(
                         session.answers,
                         session_id,
-                        api_key=api_key
+                        api_key=api_key,
+                        questions=session.questions,
                     )
 
                     self._maybe_add_peer_learning_insight(evaluation_report)
@@ -694,14 +802,26 @@ class PracticeModeService:
 
             if not is_complete:
                 session.pending_next_question = True
+                preview = await self._preview_strategy_decision(
+                    session=session,
+                    previous_question=session.questions[question_id - 1],
+                    last_answer=answer,
+                    api_key=api_key,
+                )
+                session.pending_strategy_decision = preview
+                if preview is not None:
+                    session.current_coaching_style = preview.coaching_style
+                    response["strategy"] = preview
             else:
                 session.is_complete = True
                 session.completed_at = utcnow()
+                session.pending_strategy_decision = None
                 try:
                     evaluation_report = await self.evaluation_agent.evaluate_interview(
                         session.answers,
                         session_id,
                         api_key=api_key,
+                        questions=session.questions,
                     )
 
                     self._maybe_add_peer_learning_insight(evaluation_report)
@@ -795,6 +915,85 @@ class PracticeModeService:
                 effective = getattr(session, "difficulty", None)
                 pressure_state = None
 
+            strategy_result: Optional[dict] = None
+            if bool(getattr(settings, "enable_practice_session_brain", True)):
+                last_answer = self._find_answer_for_question(session, question_id)
+                previous_question = session.questions[question_id - 1]
+                decision = getattr(session, "pending_strategy_decision", None)
+
+                if last_answer is not None:
+                    if decision is None:
+                        decision = await self._preview_strategy_decision(
+                            session=session,
+                            previous_question=previous_question,
+                            last_answer=last_answer,
+                            api_key=api_key,
+                        )
+                    if decision is not None:
+                        try:
+                            strategy_result = await self._get_session_strategy_agent().execute_next_action(
+                                session=session,
+                                previous_question=previous_question,
+                                last_answer=last_answer,
+                                decision=decision,
+                                api_key=api_key,
+                            )
+                            session.pending_strategy_decision = None
+                            session.current_coaching_style = decision.coaching_style
+                            session.strategy_history.append(decision)
+                        except Exception as exc:
+                            session.pending_strategy_decision = None
+                            logger.warning("Session brain execution failed, falling back to legacy next-question flow: %s", exc)
+                            strategy_result = None
+
+            if strategy_result is not None:
+                if strategy_result.get("complete"):
+                    session.pending_next_question = False
+                    return {
+                        "complete": True,
+                        "evaluation_report": strategy_result.get("evaluation_report") or session.evaluation_report,
+                        "progress": strategy_result.get("progress") or self.interviewer_agent.get_progress_indicator(
+                            question_id,
+                            len(session.questions)
+                        ),
+                        "pressure": pressure_state,
+                        "strategy": strategy_result.get("strategy"),
+                    }
+
+                next_question = strategy_result.get("next_question")
+                if next_question is None:
+                    raise ValueError("No next question available")
+
+                audio_filename = None
+                try:
+                    audio_path = str(self.audio_dir / f"{session_id}_q{next_question.id}.wav")
+                    formatted_text = self.interviewer_agent.format_tts_text(
+                        next_question,
+                        total_questions=len(session.questions),
+                        company_name=session.company_name
+                    )
+                    result_path = await self.tts_service.synthesize_async(formatted_text, audio_path)
+                    audio_filename = Path(result_path).name
+                    if audio_filename:
+                        session.audio_files.append(audio_filename)
+                    logger.info(f"✅ TTS generated after strategy execution for Q{next_question.id}")
+                except Exception as e:
+                    logger.warning(f"TTS failed for Q{next_question.id}: {e}")
+                    audio_filename = None
+
+                session.pending_next_question = False
+                return {
+                    "next_question": next_question,
+                    "tts_audio_url": audio_filename,
+                    "complete": False,
+                    "pressure": pressure_state,
+                    "strategy": strategy_result.get("strategy"),
+                    "progress": strategy_result.get("progress") or self.interviewer_agent.get_progress_indicator(
+                        next_question.id,
+                        len(session.questions)
+                    ),
+                }
+
             # 🚀 ADAPTIVE FOLLOW-UP (skipped when the answer was very poor):
             # Replace the upcoming question with a drill-down follow-up framed from
             # the candidate's *last* answer (transcript + micro_feedback). This makes
@@ -883,6 +1082,7 @@ class PracticeModeService:
             
             # Clear pending flag
             session.pending_next_question = False
+            session.pending_strategy_decision = None
             
             return {
                 "next_question": next_question,
@@ -932,6 +1132,7 @@ class PracticeModeService:
                         session.answers,
                         session_id,
                         api_key=api_key,
+                        questions=session.questions,
                     )
                     self._maybe_add_peer_learning_insight(evaluation_report)
                     session.evaluation_report = evaluation_report

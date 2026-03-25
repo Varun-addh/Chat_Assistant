@@ -4,9 +4,11 @@ Dynamically generates questions based on user profile, domain, experience, and s
 """
 
 import logging
+import random
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import asyncio
+import re
 import numpy as np
 
 from app.schemas import (
@@ -16,10 +18,70 @@ from app.schemas import (
     SpeechMetrics,
     UserProfile,
     InterviewRound,
-    RoundConfig
+    RoundConfig,
+    SessionCoachingStyle,
+    SessionFollowUpDepth,
 )
 
 logger = logging.getLogger(__name__)
+
+
+_QUESTION_TERMINAL_PUNCTUATION = ("?", ".", ":", ";")
+_QUESTION_GRAMMAR_CUES = {
+    "how",
+    "what",
+    "why",
+    "where",
+    "which",
+    "who",
+    "whose",
+    "whom",
+    "when",
+    "if",
+    "given",
+    "walk",
+    "tell",
+    "describe",
+    "explain",
+    "compare",
+    "discuss",
+    "outline",
+    "share",
+    "design",
+    "debug",
+    "implement",
+    "write",
+    "create",
+    "build",
+    "solve",
+    "analyze",
+    "evaluate",
+    "optimize",
+    "troubleshoot",
+    "define",
+    "can",
+    "could",
+    "would",
+    "should",
+    "will",
+    "do",
+    "does",
+    "did",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "you",
+    "your",
+    "we",
+    "our",
+    "me",
+    "my",
+    "us",
+}
 
 
 class AdaptiveInterviewerAgent:
@@ -38,6 +100,68 @@ class AdaptiveInterviewerAgent:
         """
         self.default_model = gemini_model
         logger.info(f"Adaptive Interviewer Agent initialized (Universal Provider Support)")
+
+    @staticmethod
+    def _normalize_question_text(text: str) -> str:
+        return " ".join(str(text or "").strip().split())
+
+    _SALVAGE_TEMPLATES = [
+        "Can you explain {topic} and how it applies in a real-world scenario?",
+        "What are the key considerations when working with {topic}?",
+        "How would you approach {topic} in a production environment?",
+        "Walk me through your understanding of {topic} and when you would use it.",
+        "What are the tradeoffs involved with {topic}?",
+        "How does {topic} work, and what are its limitations?",
+        "Describe how you have used {topic} in a past project.",
+        "What problems does {topic} solve, and when would you avoid it?",
+    ]
+
+    @classmethod
+    def _salvage_noun_phrase(cls, text: str) -> Optional[str]:
+        """Convert a bare noun-phrase topic label into a varied interview question.
+
+        Uses a pool of diverse templates so salvaged questions don't all sound
+        identical.  Only attempts salvage for short fragments (2-10 tokens)
+        without terminal punctuation.
+        """
+        if not text:
+            return None
+        tokens = text.split()
+        if len(tokens) < 2 or len(tokens) > 10:
+            return None
+        if text[-1] in ("?", ".", ":", ";"):
+            return None  # already has terminal punctuation — nothing to salvage
+        template = random.choice(cls._SALVAGE_TEMPLATES)
+        return template.format(topic=text)
+
+    @classmethod
+    def _is_valid_question_text(cls, text: str, *, question_type: Optional[str] = None) -> bool:
+        normalized = cls._normalize_question_text(text)
+        if not normalized:
+            return False
+
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9+#/._-]*", normalized)
+        token_count = len(tokens)
+        if token_count < 2:
+            return False
+
+        lowered_tokens = [token.lower() for token in tokens]
+        has_terminal_punctuation = normalized.endswith(_QUESTION_TERMINAL_PUNCTUATION)
+        has_grammar_cue = any(token in _QUESTION_GRAMMAR_CUES for token in lowered_tokens)
+        is_coding = str(question_type or "").lower() == "coding"
+
+        if has_terminal_punctuation:
+            return True
+
+        if has_grammar_cue:
+            return True
+
+        # Coding prompts are often imperative and shorter, but still need
+        # enough sentence structure to avoid accepting bare topic titles.
+        if is_coding and token_count >= 4 and any(token in {"write", "implement", "build", "create", "code"} for token in lowered_tokens):
+            return True
+
+        return False
     
     async def evaluate_answer_comprehensively(
         self,
@@ -398,7 +522,27 @@ CONTENT_RELEVANCE: <assessment>"""
                 f"Generating {count} adaptive questions{round_info} for {user_profile.domain} with {user_profile.experience_years}yrs experience"
             )
 
-            response = await self._call_llm(prompt, api_key)
+            _QUESTION_SYSTEM_PROMPT = (
+                "You are a senior technical interviewer. Every \"text\" value you produce "
+                "MUST be a complete, spoken interview question that a candidate can answer "
+                "out loud. NEVER output bare topic labels, noun phrases, or keyword "
+                "fragments like 'gradient boosting algorithm' or 'missing value handling'. "
+                "Always output full sentences such as 'How does gradient boosting work, and "
+                "when would you choose it over a random forest?' Each question must contain "
+                "a verb and end with a question mark or period."
+            )
+
+            # When only 1 question is needed, over-generate to increase the
+            # chance that at least one comes back as a real sentence (Groq
+            # frequently returns noun-phrase fragments for count=1).
+            llm_count = max(count, 4)
+            if llm_count != count:
+                prompt = self._build_adaptive_prompt(
+                    user_profile, interview_level, llm_count, round_type,
+                    previously_asked=previously_asked,
+                )
+
+            response = await self._call_llm(prompt, api_key, system_prompt=_QUESTION_SYSTEM_PROMPT)
             questions = self._parse_questions(response, user_profile, difficulty, round_type)
 
             # ── Post-generation semantic dedup (cross-session + intra-batch) ──
@@ -418,20 +562,22 @@ CONTENT_RELEVANCE: <assessment>"""
             dedup_stats["rejected_vs_past"] = metrics["rejected_vs_past"]
             dedup_stats["rejected_vs_batch"] = metrics["rejected_vs_batch"]
 
-            # If too many were rejected (>40%), retry once with higher temperature
+            # If too few valid questions survived parsing or dedup, retry once with
+            # stricter shape instructions and lower temperature.
             if len(questions) < count * 0.6:
                 dedup_stats["retry_count"] = 1
                 logger.info(
-                    f"Only {len(questions)}/{count} survived dedup — regenerating remainder"
+                    f"Only {len(questions)}/{count} survived validation/dedup — regenerating remainder"
                 )
                 shortfall = count - len(questions)
                 already = list(previously_asked or []) + [q.text for q in questions]
                 retry_prompt = self._build_adaptive_prompt(
                     user_profile, interview_level, shortfall, round_type,
                     previously_asked=already,
+                    repair_mode=True,
                 )
                 try:
-                    retry_resp = await self._call_llm(retry_prompt, api_key)
+                    retry_resp = await self._call_llm(retry_prompt, api_key, temperature=0.35, system_prompt=_QUESTION_SYSTEM_PROMPT)
                     retry_qs = self._parse_questions(retry_resp, user_profile, difficulty, round_type)
                     retry_qs, retry_metrics = self._semantic_dedup(retry_qs, already)
                     dedup_stats["rejected_vs_past"] += retry_metrics["rejected_vs_past"]
@@ -444,7 +590,7 @@ CONTENT_RELEVANCE: <assessment>"""
             if len(questions) < count:
                 remaining = count - len(questions)
                 dedup_stats["fallback_count"] = remaining
-                logger.warning(f"Only generated {len(questions)}/{count} questions, using fallback")
+                logger.warning(f"Only generated {len(questions)}/{count} valid questions, using fallback")
                 generic = await self._generate_generic_questions(difficulty, remaining, round_type)
                 questions.extend(generic[:remaining])
 
@@ -484,6 +630,8 @@ CONTENT_RELEVANCE: <assessment>"""
         micro_feedback: Optional[MicroFeedback] = None,
         already_asked: Optional[List[str]] = None,
         target_question_id: Optional[int] = None,
+        follow_up_depth: SessionFollowUpDepth = SessionFollowUpDepth.LIGHT,
+        coaching_style: SessionCoachingStyle = SessionCoachingStyle.BALANCED,
         api_key: Optional[str] = None,
     ) -> Optional[PracticeInterviewQuestion]:
         """Generate ONE drilling follow-up question based on the candidate's last answer.
@@ -505,6 +653,8 @@ CONTENT_RELEVANCE: <assessment>"""
                 transcript=transcript,
                 micro_feedback=micro_feedback,
                 already_asked=already_asked or [],
+                follow_up_depth=follow_up_depth,
+                coaching_style=coaching_style,
             )
 
             response = await self._call_llm(prompt, api_key)
@@ -529,6 +679,8 @@ CONTENT_RELEVANCE: <assessment>"""
         transcript: str,
         micro_feedback: Optional[MicroFeedback],
         already_asked: List[str],
+        follow_up_depth: SessionFollowUpDepth = SessionFollowUpDepth.LIGHT,
+        coaching_style: SessionCoachingStyle = SessionCoachingStyle.BALANCED,
     ) -> str:
         """Prompt for a single follow-up question (strict JSON object only)."""
 
@@ -624,6 +776,12 @@ Return EXACTLY one JSON object in this schema:
 Guidance:
 - Prefer question_type=voice unless the follow-up truly requires writing code.
 - Keep time_limit realistic: voice 60-180; coding 600-900; system_design 150-180.
+- Follow-up depth for this turn: {follow_up_depth.value}.
+- Coaching style for this turn: {coaching_style.value}.
+- If follow_up_depth is deep, press on tradeoffs, edge cases, failure modes, or metrics.
+- If follow_up_depth is light, focus on the single most important missed concept.
+- If coaching_style is supportive, keep the wording encouraging and precise.
+- If coaching_style is challenging, make the wording firmer and more senior-level.
 """
 
         return prompt
@@ -669,15 +827,24 @@ Guidance:
         if not isinstance(data, dict):
             return None
 
-        q_text = (data.get("text") or "").strip()
+        q_text = self._normalize_question_text(data.get("text") or "")
         if not q_text:
             return None
+
+        qtype_str = str(data.get("question_type") or "voice").lower()
+        if not self._is_valid_question_text(q_text, question_type=qtype_str):
+            salvaged = self._salvage_noun_phrase(q_text)
+            if salvaged and self._is_valid_question_text(salvaged, question_type=qtype_str):
+                logger.info("Salvaged noun-phrase follow-up into question: %r → %r", q_text[:80], salvaged[:80])
+                q_text = salvaged
+            else:
+                logger.warning("Rejecting malformed follow-up question text: %r", q_text[:120])
+                return None
 
         category = (data.get("category") or "technical").strip()
         time_limit = int(data.get("time_limit") or 90)
 
         from app.schemas import QuestionType
-        qtype_str = str(data.get("question_type") or "voice").lower()
         if qtype_str == "coding":
             qtype = QuestionType.CODING
         elif qtype_str == "system_design":
@@ -792,6 +959,7 @@ Guidance:
         count: int,
         round_type: Optional[InterviewRound] = None,
         previously_asked: Optional[List[str]] = None,
+        repair_mode: bool = False,
     ) -> str:
         """Build intelligent prompt for question generation with optional round context."""
         
@@ -822,8 +990,21 @@ Guidance:
 - Technical Deep-Dive: {profile.domain}-specific technical questions
 - Problem-Solving: Relevant to their actual tech stack
 - System Design (if senior+): Architecture decisions in their domain"""
+
+        repair_guardrail = """
+**CORRECTION:**
+Your previous output contained malformed topic fragments instead of interview questions.
+Regenerate using FULL question sentences only. If any item looks like a title or keyword list, rewrite it into a spoken interview prompt before returning JSON.
+""" if repair_mode else ""
         
         prompt = f"""You are a senior technical interviewer conducting a {interview_level} interview{role_context}{company_context}.
+
+=== MANDATORY OUTPUT RULE ===
+Every "text" value MUST be a FULL SPOKEN QUESTION with a verb and ending punctuation.
+WRONG: "gradient boosting algorithm"  |  "pipeline architecture"  |  "missing value handling"
+RIGHT: "How does gradient boosting work, and when would you choose it over other ensemble methods?"
+
+{repair_guardrail}
 
 CANDIDATE PROFILE:
 - Domain: {profile.domain}
@@ -862,6 +1043,10 @@ CRITICAL REQUIREMENTS:
   * If a question requires detailed explanation, give MORE time
   * Match time to what's ACTUALLY answerable in that duration
 
+REMINDER: Each "text" MUST be a complete spoken question — NOT a topic label or noun phrase.
+
+{repair_guardrail}
+
 **QUESTION TYPE DETECTION (CRITICAL FOR UI):**
 - Set "question_type" based on what the candidate needs to DO:
   * "voice" → Verbal answer (behavioral, verbal technical explanation)
@@ -892,16 +1077,16 @@ Example: "Write the Python code snippet to..." → question_type: "coding", time
 Format (strict JSON only - include key_points for answer evaluation):
 [
   {{
-    "text": "Your question here - keep it on one line",
+    "text": "Can you walk me through a time when you had to resolve a conflict within your team?",
     "category": "behavioral",
     "question_type": "voice",
     "time_limit": 90,
     "difficulty": "medium",
-    "key_points": ["concept 1", "concept 2", "concept 3"],
+    "key_points": ["conflict resolution", "communication", "outcome"],
     "expected_answer_template": "Brief outline of ideal answer"
   }},
   {{
-    "text": "Write the Python code to calculate fibonacci sequence",
+    "text": "Write a Python function that calculates the nth Fibonacci number efficiently using memoization.",
     "category": "technical",
     "question_type": "coding",
     "programming_language": "Python",
@@ -911,7 +1096,7 @@ Format (strict JSON only - include key_points for answer evaluation):
     "expected_answer_template": "Should use dynamic programming or memoization for efficiency"
   }},
   {{
-    "text": "Design a scalable URL shortener system",
+    "text": "How would you design a scalable URL shortener that handles millions of requests per day?",
     "category": "system_design",
     "question_type": "system_design",
     "time_limit": 900,
@@ -926,7 +1111,7 @@ Format (strict JSON only - include key_points for answer evaluation):
 **QUESTION_TYPE**: Set to "coding" if question asks to write actual code, "system_design" for architecture, otherwise "voice".
 
 IMPORTANT: Return ONLY the JSON array above. No explanations. No markdown. Just valid JSON.
-Generate exactly {count} questions with proper formatting INCLUDING key_points, expected_answer_template, AND question_type."""
+Generate exactly {count} questions. Each "text" MUST be a full spoken question with a verb and ending punctuation — never a bare topic label."""
 
         return prompt
 
@@ -938,74 +1123,53 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
         if resume_context is None:
             return ""
 
-        # Accept both dict and Pydantic model
-        if hasattr(resume_context, "model_dump"):
-            rc = resume_context.model_dump()
+        # Normalise input into a ResumeParseResult so we can reuse its formatting
+        from app.services.core.resume_parser import ResumeParseResult
+
+        if isinstance(resume_context, ResumeParseResult):
+            rpr = resume_context
+        elif hasattr(resume_context, "model_dump"):
+            rpr = ResumeParseResult(resume_context.model_dump())
         elif hasattr(resume_context, "dict"):
-            rc = resume_context.dict()
+            rpr = ResumeParseResult(resume_context.dict())
         elif isinstance(resume_context, dict):
-            rc = resume_context
+            rpr = ResumeParseResult(resume_context)
         else:
             return ""
 
-        lines = [
+        # Get the core resume block, then wrap with interview-specific header + guidance
+        core_block = rpr.to_prompt_block()
+        # Replace the generic header with the interview-specific one
+        core_block = core_block.replace(
+            "CANDIDATE RESUME CONTEXT:",
             "=== CANDIDATE RESUME CONTEXT (use for claim-based probing) ===",
+            1,
+        )
+
+        guidance_lines = [
+            "=== END RESUME CONTEXT ===",
+            "",
+            "RESUME-BASED PROBING GUIDANCE:",
+            "- Ask the candidate to EXPLAIN how they achieved specific metrics from their resume",
+            "- Probe the TRADEOFFS they made in their projects",
+            "- Ask about FAILURE MODES and edge cases in their claimed systems",
+            "- Verify DEPTH: 'You mentioned X — walk me through the architecture/implementation'",
+            "- Challenge claims: 'You improved latency by Y% — what was the bottleneck and how did you measure it?'",
         ]
 
-        summary = rc.get("experience_summary", "")
-        if summary and summary != "Not specified":
-            lines.append(f"Summary: {summary}")
-
-        roles = rc.get("role_titles", [])
-        if roles:
-            lines.append(f"Roles: {', '.join(roles[:5])}")
-
-        skills = rc.get("skills", [])
-        if skills:
-            lines.append(f"Skills from resume: {', '.join(skills[:15])}")
-
-        education = rc.get("education", "")
-        if education and education != "Not specified":
-            lines.append(f"Education: {education}")
-
-        projects = rc.get("projects", [])
-        if projects:
-            lines.append("Key Projects:")
-            for proj in projects[:5]:
-                name = proj.get("name", "Unnamed") if isinstance(proj, dict) else getattr(proj, "name", "Unnamed")
-                tech = proj.get("tech", []) if isinstance(proj, dict) else getattr(proj, "tech", [])
-                claims = proj.get("claims", []) if isinstance(proj, dict) else getattr(proj, "claims", [])
-                lines.append(f"  - {name} [{', '.join(tech[:5])}]")
-                for claim in claims[:3]:
-                    lines.append(f"    • Claim: {claim}")
-
-        achievements = rc.get("achievements", [])
-        if achievements:
-            lines.append("Notable Achievements (probe these!):")
-            for ach in achievements[:8]:
-                lines.append(f"  • {ach}")
-
-        lines.append("=== END RESUME CONTEXT ===")
-        lines.append("")
-        lines.append("RESUME-BASED PROBING GUIDANCE:")
-        lines.append("- Ask the candidate to EXPLAIN how they achieved specific metrics from their resume")
-        lines.append("- Probe the TRADEOFFS they made in their projects")
-        lines.append("- Ask about FAILURE MODES and edge cases in their claimed systems")
-        lines.append("- Verify DEPTH: 'You mentioned X — walk me through the architecture/implementation'")
-        lines.append("- Challenge claims: 'You improved latency by Y% — what was the bottleneck and how did you measure it?'")
-
-        return "\n".join(lines)
+        return core_block + "\n" + "\n".join(guidance_lines)
     
-    async def _call_llm(self, prompt: str, api_key: Optional[str] = None) -> str:
+    async def _call_llm(self, prompt: str, api_key: Optional[str] = None, temperature: float = 0.8, system_prompt: Optional[str] = None) -> str:
         """Call LLM with JSON mode for structured output."""
         from app.services.chat.llm_service import LLMAuthenticationError, llm_service
 
         try:
             text = await llm_service.generate_text(
                 prompt=prompt,
+                system_prompt=system_prompt,
                 api_key=api_key,
                 json_mode=True,
-                temperature=0.8,
+                temperature=temperature,
                 max_tokens=4000,
                 raise_on_auth_error=True,
             )
@@ -1236,9 +1400,19 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
                     or item.get("prompt")
                     or ""
                 )
-                question_text = str(question_text).strip()
+                question_text = self._normalize_question_text(question_text)
                 if not question_text:
                     continue
+
+                question_type_str = str(item.get("question_type", "voice") or "voice").lower()
+                if not self._is_valid_question_text(question_text, question_type=question_type_str):
+                    salvaged = self._salvage_noun_phrase(question_text)
+                    if salvaged and self._is_valid_question_text(salvaged, question_type=question_type_str):
+                        logger.info("Salvaged noun-phrase fragment into question: %r → %r", question_text[:80], salvaged[:80])
+                        question_text = salvaged
+                    else:
+                        logger.warning("Rejecting malformed adaptive question text: %r", question_text[:120])
+                        continue
                 
                 category = str(item.get("category", "technical") or "technical")
                 # Be tolerant of strings like "90".
@@ -1248,7 +1422,6 @@ Generate exactly {count} questions with proper formatting INCLUDING key_points, 
                     time_limit = 90
                 
                 # NEW: Extract question type and coding-specific fields
-                question_type_str = str(item.get("question_type", "voice") or "voice").lower()
                 programming_language = item.get("programming_language", None)
                 
                 # Map string to enum
@@ -1763,7 +1936,8 @@ INTERVIEWER STYLE: Data engineer evaluating data infrastructure knowledge""",
             pace_feedback = "Great pace!"
         
         # PART 2: COMPREHENSIVE ANSWER EVALUATION (NEW!)
-        if question_text and transcript:
+        transcript_words = transcript.split() if transcript else []
+        if question_text and transcript and len(transcript_words) >= 3:
             try:
                 # Use world-class evaluation
                 evaluation = await self.evaluate_answer_comprehensively(

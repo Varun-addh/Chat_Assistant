@@ -14,6 +14,7 @@ We can later swap/augment with model-based grading, but the contract stays.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -49,15 +50,24 @@ def _map_technical_accuracy(label: Optional[str]) -> Optional[float]:
 
 
 def _structure_heuristic(transcript: str) -> float:
-    """Cheap, explainable heuristic: reward explicit structure markers."""
+    """Cheap, explainable heuristic: reward explicit structure markers.
+
+    Uses word-boundary regex to avoid false positives (e.g. 'step' inside
+    'stephen').
+    """
     t = (transcript or "").lower()
     if not t.strip():
         return 0.0
 
-    markers = ["first", "second", "third", "finally", "in summary", "overall", "to start", "step", "i would"]
-    hits = sum(1 for m in markers if m in t)
-    # 50 base, +10 per marker, capped.
-    return _clamp(50.0 + 10.0 * hits, 40.0, 95.0)
+    markers = [
+        "first", "second", "third", "finally", "in summary",
+        "overall", "to start", "step by step", "i would",
+        "next", "then", "moreover", "to conclude", "lastly",
+        "additionally", "let me break", "in conclusion",
+    ]
+    hits = sum(1 for m in markers if re.search(r"\b" + re.escape(m) + r"\b", t))
+    # 50 base, +7 per marker, capped.
+    return _clamp(50.0 + 7.0 * hits, 40.0, 95.0)
 
 
 @dataclass(frozen=True)
@@ -104,13 +114,12 @@ def score_answer(*, answer: AnswerSubmission) -> PracticeAnswerScoreResult:
     overtalked = bool(getattr(metrics, "overtalked", False))
 
     # Delivery scoring
-    # conf is 0-1 scale from speech metrics. When no speech metrics are
-    # available (text input), conf and wpm will both be 0.  In that case
-    # we use a generous baseline so text-based answers are not penalised
-    # for something that was never measured.
+    # confidence_score may arrive on a 0-1 or 0-10 scale depending on
+    # the speech provider.  Normalise to 0-1 before converting to 0-100.
     has_speech_metrics = conf > 0.0 or wpm > 0.0
     if has_speech_metrics:
-        delivery = conf * 100.0
+        conf_norm = conf / 10.0 if conf > 1.0 else conf
+        delivery = conf_norm * 100.0
     else:
         # No speech data — assume average-good delivery (70/100)
         delivery = 70.0
@@ -308,8 +317,9 @@ def score_session(*, session: PracticeSession) -> PracticeScoreResult:
         if overtalked:
             overtalked_count += 1
 
-        # Start from confidence (confidence_score is 0-1 scale, convert to 0-100)
-        delivery = conf * 100.0
+        # Normalise confidence_score to 0-1 range (may arrive as 0-10)
+        conf_norm = conf / 10.0 if conf > 1.0 else conf
+        delivery = conf_norm * 100.0
         # Penalize fillers (small)
         delivery -= min(20.0, fillers * 2.5)
         # Penalize overtalking

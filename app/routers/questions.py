@@ -39,7 +39,7 @@ from app.utils.story_contract import extract_mermaid_first, enforce_story_contra
 from app.utils.mermaid_sanitizer import MermaidSanitizer
 
 from app.database import get_db_context
-from app.utils.usage_tracking import track_api_usage, track_session
+from app.utils.usage_tracking import track_api_usage, track_session, check_copilot_quota
 from app.utils.event_logging import track_event
 from app.utils.abuse_guard import classify_abuse
 
@@ -86,6 +86,8 @@ async def mirror_feedback(payload: MirrorFeedbackIn, request: Request):
 						"flags": list(payload.flags or []),
 						"comment": payload.comment,
 						"has_report": bool(payload.report),
+						"user_answer": (payload.user_answer or "")[:2000],
+						"report_snapshot": payload.report,
 					},
 				)
 		except Exception:
@@ -216,6 +218,7 @@ async def _auto_evaluate_if_code(session_manager: SessionManager, session_id: st
 		})
 	except Exception as e:
 		# Don't fail the main request if evaluation fails
+		logger.error("Auto-evaluation failed for session %s: %s", session_id, e, exc_info=True)
 		await auditor.log({
 			"type": "auto_evaluation_error",
 			"session_id": session_id,
@@ -463,6 +466,26 @@ async def submit_question(
 	if not payload.question.strip():
 		raise HTTPException(status_code=400, detail="Empty question")
 
+	# --- Quota enforcement: check daily copilot limit before processing ---
+	if user:
+		try:
+			with get_db_context() as db:
+				allowed, reason = check_copilot_quota(db, user)
+				if not allowed:
+					raise HTTPException(status_code=429, detail=reason)
+		except HTTPException:
+			raise
+		except Exception:
+			pass  # Never block on quota check failure
+
+	# Resolve user tier for token budget allocation.
+	_user_tier = "standard"
+	if user:
+		from app.models import UserTier
+		_raw_tier = getattr(user, "tier", None) or UserTier.FREE
+		_tier_map = {UserTier.FREE: "free", UserTier.BASIC: "standard", UserTier.PRO: "pro", UserTier.ENTERPRISE: "internal"}
+		_user_tier = _tier_map.get(_raw_tier, "standard")
+
 	# --- Telemetry spine: request received (safe, low-cost, no raw text by default) ---
 	if getattr(settings, "enable_event_logging", True):
 		try:
@@ -683,6 +706,31 @@ async def submit_question(
 	# Emit a consistent header so the UI can tag messages without guessing.
 	response.headers["X-Stratax-Chat-Mode"] = mode
 	if mode == "mirror":
+		# Mirror-specific rate limit: each report triggers up to 4 LLM calls.
+		# Apply a tighter per-user budget (30 mirror reports per 24h window).
+		try:
+			from app.middleware.rate_limit import rate_limiter
+			from app.models import UserTier
+			_mirror_user = getattr(request.state, "user", None)
+			_mirror_tier = getattr(_mirror_user, "tier", None) or UserTier.FREE
+			_mirror_allowed, _mirror_count, _mirror_limit = await rate_limiter.check_rate_limit(
+				user_id=user_id,
+				endpoint="mirror:reports",
+				tier=_mirror_tier,
+				window_minutes=1440,
+				limit_override=int(getattr(settings, "mirror_daily_limit", 30) or 30),
+			)
+			if not _mirror_allowed:
+				return AnswerOut(
+					answer="Mirror mode daily limit reached. Please try again tomorrow or connect your own API key for unlimited access.",
+					session_id=payload.session_id,
+					mode="mirror",
+					created_at=utcnow(),
+					truncated=False,
+				)
+		except Exception:
+			pass  # Fail-open: don't block mirror if rate limiter errors
+
 		user_answer = (getattr(payload, "user_answer", None) or "").strip()
 		if not user_answer:
 			if getattr(settings, "enable_event_logging", True):
@@ -1155,6 +1203,7 @@ async def submit_question(
 								allow_provider_fallback=(not is_demo),
 								groq_model_override=(demo_groq_model if is_demo else None),
 								restrict_groq_to_override=bool(is_demo),
+								user_tier=_user_tier,
 							)
 
 							# Parse response: Mermaid diagram first, then explanation
@@ -1319,6 +1368,7 @@ async def submit_question(
 					allow_provider_fallback=(not is_demo),
 					groq_model_override=(demo_groq_model if is_demo else None),
 					restrict_groq_to_override=bool(is_demo),
+					user_tier=_user_tier,
 				):
 					collected.append(chunk)
 					safe_chunk = chunk.replace('\n', '\ndata: ')
@@ -1364,6 +1414,7 @@ async def submit_question(
 				allow_provider_fallback=(not is_demo),
 				groq_model_override=(demo_groq_model if is_demo else None),
 				restrict_groq_to_override=bool(is_demo),
+				user_tier=_user_tier,
 			)
 			final_ans = ("## Single-View Architecture\n\n" + (answer or "").strip()).strip()
 			if payload.save_to_history:
@@ -1393,29 +1444,80 @@ async def submit_question(
 		# Mirror supports streaming (one-shot markdown report streamed via SSE)
 		if payload.stream:
 			async def _mirror_event_gen():
+				prev_attempt = find_previous_mirror_attempt(
+					question=payload.question,
+					mirror_history=list(getattr(state, "mirror_history", []) or []),
+				)
+				prev_report = None
+				if isinstance(prev_attempt, dict):
+					pr = prev_attempt.get("report")
+					if isinstance(pr, dict):
+						prev_report = pr
+
 				md, _truncated, report = await llm_service.generate_mirror_report_structured(
 					question=payload.question,
 					user_answer=user_answer,
 					depth=getattr(payload, "depth", None),
 					api_key=api_key,
 				)
+
+				progress_md = ""
+				progress_meta = None
+				if isinstance(prev_report, dict) and isinstance(report, dict):
+					try:
+						progress = compute_mirror_progress(prev_report, report)
+						progress_md = format_mirror_progress_markdown(progress)
+						progress_meta = {
+							"confidence_prev": progress.confidence_prev,
+							"confidence_curr": progress.confidence_curr,
+							"confidence_delta": progress.confidence_delta,
+							"gaps_closed": list(progress.gaps_closed),
+							"new_gaps": list(progress.new_gaps),
+							"new_strengths": list(progress.new_strengths),
+							"new_red_flags": list(progress.new_red_flags),
+							"red_flags_resolved": list(progress.red_flags_resolved),
+						}
+					except Exception:
+						progress_md = ""
+						progress_meta = None
+
+				if progress_md:
+					md = (md or "") + "\n\n" + progress_md
+
 				safe = (md or "").replace("\n", "\ndata: ")
 				yield f"data: {safe}\n\n"
 				if payload.save_to_history:
-					await manager.append_qna(state.session_id, payload.question, md)
+					await manager.append_qna(
+						state.session_id, payload.question, md,
+						meta={
+							"mode": "mirror",
+							"mirror_user_answer": user_answer,
+							"mirror_report": report,
+							"mirror_progress": progress_meta,
+						},
+					)
+					await manager.append_mirror_attempt(
+						state.session_id,
+						question=payload.question,
+						user_answer=user_answer,
+						report=report,
+					)
 
 				await auditor.log({
 					"type": "mirror_report",
 					"session_id": state.session_id,
 					"question": payload.question,
 					"saved_to_history": payload.save_to_history,
-					"topic": report.get("topic"),
-					"confidence": report.get("confidence"),
-					"gaps": report.get("gaps"),
+					"topic": (report or {}).get("topic") if isinstance(report, dict) else None,
+					"confidence": (report or {}).get("confidence") if isinstance(report, dict) else None,
+					"progress": progress_meta,
 				})
 
 				if getattr(settings, "enable_event_logging", True):
 					try:
+						_meta = (report or {}).get("_meta") if isinstance(report, dict) else {}
+						if not isinstance(_meta, dict):
+							_meta = {}
 						with get_db_context() as db:
 							track_event(
 								db,
@@ -1425,14 +1527,15 @@ async def submit_question(
 								question_text=payload.question,
 								extra={
 									"stream": True,
-									"topic": report.get("topic"),
-									"confidence": report.get("confidence"),
-									"gaps_count": len(report.get("gaps") or []),
-									"red_flags_count": len(report.get("red_flags") or []),
-									"mirror_parse_ok": (report.get("_meta") or {}).get("parse_ok"),
-									"mirror_validation_ok": (report.get("_meta") or {}).get("validation_ok"),
-									"mirror_schema_drift": (report.get("_meta") or {}).get("schema_drift"),
-									"mirror_low_conf_guard": (report.get("_meta") or {}).get("low_confidence_guard"),
+									"topic": (report or {}).get("topic") if isinstance(report, dict) else None,
+									"confidence": (report or {}).get("confidence") if isinstance(report, dict) else None,
+									"gaps_count": len((report or {}).get("gaps") or []) if isinstance(report, dict) else 0,
+									"red_flags_count": len((report or {}).get("red_flags") or []) if isinstance(report, dict) else 0,
+									"mirror_parse_ok": _meta.get("parse_ok"),
+									"mirror_validation_ok": _meta.get("validation_ok"),
+									"mirror_schema_drift": _meta.get("schema_drift"),
+									"mirror_low_conf_guard": _meta.get("low_confidence_guard"),
+									"mirror_progress": progress_meta,
 								},
 							)
 					except Exception:
@@ -1454,27 +1557,78 @@ async def submit_question(
 				},
 			)
 
+		prev_attempt = find_previous_mirror_attempt(
+			question=payload.question,
+			mirror_history=list(getattr(state, "mirror_history", []) or []),
+		)
+		prev_report = None
+		if isinstance(prev_attempt, dict):
+			pr = prev_attempt.get("report")
+			if isinstance(pr, dict):
+				prev_report = pr
+
 		md, truncated, report = await llm_service.generate_mirror_report_structured(
 			question=payload.question,
 			user_answer=user_answer,
 			depth=getattr(payload, "depth", None),
 			api_key=api_key,
 		)
+
+		progress_md = ""
+		progress_meta = None
+		if isinstance(prev_report, dict) and isinstance(report, dict):
+			try:
+				progress = compute_mirror_progress(prev_report, report)
+				progress_md = format_mirror_progress_markdown(progress)
+				progress_meta = {
+					"confidence_prev": progress.confidence_prev,
+					"confidence_curr": progress.confidence_curr,
+					"confidence_delta": progress.confidence_delta,
+					"gaps_closed": list(progress.gaps_closed),
+					"new_gaps": list(progress.new_gaps),
+					"new_strengths": list(progress.new_strengths),
+					"new_red_flags": list(progress.new_red_flags),
+					"red_flags_resolved": list(progress.red_flags_resolved),
+				}
+			except Exception:
+				progress_md = ""
+				progress_meta = None
+
+		if progress_md:
+			md = (md or "") + "\n\n" + progress_md
+
 		if payload.save_to_history:
-			await manager.append_qna(state.session_id, payload.question, md)
+			await manager.append_qna(
+				state.session_id, payload.question, md,
+				meta={
+					"mode": "mirror",
+					"mirror_user_answer": user_answer,
+					"mirror_report": report,
+					"mirror_progress": progress_meta,
+				},
+			)
+			await manager.append_mirror_attempt(
+				state.session_id,
+				question=payload.question,
+				user_answer=user_answer,
+				report=report,
+			)
 
 		await auditor.log({
 			"type": "mirror_report",
 			"session_id": state.session_id,
 			"question": payload.question,
 			"saved_to_history": payload.save_to_history,
-			"topic": report.get("topic"),
-			"confidence": report.get("confidence"),
-			"gaps": report.get("gaps"),
+			"topic": (report or {}).get("topic") if isinstance(report, dict) else None,
+			"confidence": (report or {}).get("confidence") if isinstance(report, dict) else None,
+			"progress": progress_meta,
 		})
 
 		if getattr(settings, "enable_event_logging", True):
 			try:
+				_meta = (report or {}).get("_meta") if isinstance(report, dict) else {}
+				if not isinstance(_meta, dict):
+					_meta = {}
 				with get_db_context() as db:
 					track_event(
 						db,
@@ -1484,14 +1638,15 @@ async def submit_question(
 						question_text=payload.question,
 						extra={
 							"stream": False,
-							"topic": report.get("topic"),
-							"confidence": report.get("confidence"),
-							"gaps_count": len(report.get("gaps") or []),
-							"red_flags_count": len(report.get("red_flags") or []),
-							"mirror_parse_ok": (report.get("_meta") or {}).get("parse_ok"),
-							"mirror_validation_ok": (report.get("_meta") or {}).get("validation_ok"),
-							"mirror_schema_drift": (report.get("_meta") or {}).get("schema_drift"),
-							"mirror_low_conf_guard": (report.get("_meta") or {}).get("low_confidence_guard"),
+							"topic": (report or {}).get("topic") if isinstance(report, dict) else None,
+							"confidence": (report or {}).get("confidence") if isinstance(report, dict) else None,
+							"gaps_count": len((report or {}).get("gaps") or []) if isinstance(report, dict) else 0,
+							"red_flags_count": len((report or {}).get("red_flags") or []) if isinstance(report, dict) else 0,
+							"mirror_parse_ok": _meta.get("parse_ok"),
+							"mirror_validation_ok": _meta.get("validation_ok"),
+							"mirror_schema_drift": _meta.get("schema_drift"),
+							"mirror_low_conf_guard": _meta.get("low_confidence_guard"),
+							"mirror_progress": progress_meta,
 						},
 					)
 			except Exception:
@@ -1519,6 +1674,7 @@ async def submit_question(
 				allow_provider_fallback=(not is_demo),
 				groq_model_override=(demo_groq_model if is_demo else None),
 				restrict_groq_to_override=bool(is_demo),
+				user_tier=_user_tier,
 			):
 				collected.append(chunk)
 				# Fix: Proper SSE encoding for multi-line chunks to prevent text loss/corruption
@@ -1598,6 +1754,7 @@ async def submit_question(
 			allow_provider_fallback=(not is_demo),
 			groq_model_override=(demo_groq_model if is_demo else None),
 			restrict_groq_to_override=bool(is_demo),
+			user_tier=_user_tier,
 		)
 	except Exception as e:
 		logger.error("❌ LLM generate_answer failed: %s", str(e)[:300])
@@ -1683,38 +1840,12 @@ async def upload_profile(
 
 	text: str = ""
 	try:
-		if filename.endswith(".txt") or content_type.startswith("text/"):
-			text = data.decode("utf-8", errors="ignore")
-		elif filename.endswith(".md"):
-			text = data.decode("utf-8", errors="ignore")
-		elif filename.endswith(".docx") or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-			# Handle Word documents (.docx)
-			try:
-				from docx import Document  # type: ignore[import-not-found]
-				import io
-				doc = Document(io.BytesIO(data))
-				# Extract all paragraphs
-				text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
-				# Also extract text from tables
-				for table in doc.tables:
-					for row in table.rows:
-						for cell in row.cells:
-							if cell.text.strip():
-								text += "\n" + cell.text
-			except ImportError:
-				raise HTTPException(status_code=415, detail="Word document support not available. Please install python-docx or upload a PDF/text file.")
-			except Exception as e:
-				raise HTTPException(status_code=415, detail=f"Unable to read Word document: {str(e)}. Please try converting to PDF or text format.")
-		elif filename.endswith(".pdf") or content_type == "application/pdf":
-			# Lazy import to avoid heavy dependency at startup
-			try:
-				from app.utils.text_extract import extract_text_from_pdf  # type: ignore
-			except Exception:
-				raise HTTPException(status_code=415, detail="PDF support not available. Please install pdfminer.six or upload a text/markdown file.")
-			text = extract_text_from_pdf(data)
-		else:
-			# Fallback: try utf-8
-			text = data.decode("utf-8", errors="ignore")
+		from app.services.core.resume_parser import extract_text_from_bytes
+		text = extract_text_from_bytes(data, filename or "upload.txt")
+	except ValueError as ve:
+		raise HTTPException(status_code=415, detail=str(ve))
+	except ImportError as ie:
+		raise HTTPException(status_code=415, detail=str(ie))
 	except UnicodeDecodeError:
 		raise HTTPException(status_code=415, detail="Unable to decode file. Please upload a UTF-8 text, markdown, PDF, or Word (.docx) file.")
 

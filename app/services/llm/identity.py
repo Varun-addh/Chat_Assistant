@@ -97,7 +97,7 @@ def identity_response_text(settings, question: str) -> str:
 
 		# Also handle direct assistant-addressed phrasing (e.g., "who developed you") without
 		# accidentally catching "who are you".
-		if "you" in q and ("develop" in q or "created" in q or "built" in q or "made" in q or "founder" in q or "owner" in q):
+		if re.search(r'\byou\b', q) and ("develop" in q or "created" in q or "built" in q or "made" in q or "founder" in q or "owner" in q):
 			if not developer:
 				return _attribution_fallback()
 			return (
@@ -117,7 +117,7 @@ def identity_response_text(settings, question: str) -> str:
 	# If the user asks about ownership/creator, answer succinctly.
 	app_targets = app_name_targets(settings)
 	if ("owner" in q or "owns" in q or "creator" in q or "developer" in q or "built" in q or "made" in q) and (
-		any(t in q for t in app_targets) or "you" in q or "this app" in q or "this application" in q
+		any(t in q for t in app_targets) or bool(re.search(r'\byou\b', q)) or "this app" in q or "this application" in q
 	):
 		if not developer:
 			return _attribution_fallback()

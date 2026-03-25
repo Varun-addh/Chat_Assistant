@@ -5,10 +5,48 @@ from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from app.models import UsageRecord, SessionRecord, User
+from sqlalchemy import func
+from app.models import UsageRecord, SessionRecord, User, UserTier, TIER_QUOTAS
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def check_copilot_quota(db: Session, user: Optional[User]) -> tuple[bool, str]:
+    """Check if the user has remaining copilot quota for today.
+
+    Returns (allowed, reason).
+    - Guests and users without a tier => allowed (no enforcement for unauthenticated).
+    - Authenticated users => enforced against TIER_QUOTAS.
+    """
+    if user is None:
+        return True, "guest"
+
+    tier_str = getattr(user, "tier", UserTier.FREE)
+    try:
+        tier = UserTier(tier_str)
+    except (ValueError, KeyError):
+        tier = UserTier.FREE
+
+    quota = TIER_QUOTAS.get(tier, TIER_QUOTAS[UserTier.FREE])
+    daily_limit = quota.get("daily_copilot_questions", 10)
+    if daily_limit < 0:  # unlimited
+        return True, "unlimited"
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    count = (
+        db.query(func.count(UsageRecord.id))
+        .filter(
+            UsageRecord.user_id == user.id,
+            UsageRecord.feature == "copilot",
+            UsageRecord.timestamp >= today_start,
+        )
+        .scalar()
+    ) or 0
+
+    if count >= daily_limit:
+        return False, f"Daily copilot quota reached ({daily_limit}/{daily_limit}). Upgrade your plan for more."
+    return True, f"{count}/{daily_limit}"
 
 
 def track_api_usage(

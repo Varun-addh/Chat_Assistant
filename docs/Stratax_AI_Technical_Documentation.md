@@ -3,10 +3,11 @@
 
 ---
 
-**Version:** 2.0  
-**Date:** February 2026  
+**Version:** 2.1  
+**Date:** March 17, 2026  
 **Organization:** Stratax AI Development Team  
-**Classification:** Technical Architecture Document
+**Classification:** Technical Architecture Document  
+**Last verified against repository state:** March 17, 2026
 
 ---
 
@@ -133,7 +134,7 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 5. **Evaluation Pipeline** — Multi-stage assessment of answers and code submissions
 6. **Diagram Generation** — Architecture visualization from code analysis
 
-## Recent Updates (Past Week)
+## Recent Updates (Verified Through March 17, 2026)
 
 ### Resume Parsing & Document Analysis (NEW)
 
@@ -155,6 +156,13 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 - **Practice Progress & Learning** (`app/services/practice/practice_progress.py`, `practice_learning.py`) — cross-session progress tracking and learning-loop insights.
 - **Round Config Service** (`app/services/practice/round_config_service.py`) — centralized round selection logic.
 - **LangGraph Orchestration** (`app/services/practice/practice_mode_graph.py`) — optional graph-based practice flow (behind `ENABLE_LANGGRAPH_PRACTICE` flag).
+
+### Practice Proctoring, Progress Continuity & Auth Hardening (NEW)
+
+- **Backend-authoritative proctoring state** (`app/services/practice/proctoring.py`, `PracticeProctoringSession`) now tracks status, risk level, violation counters, heartbeat staleness, and termination reason per practice session.
+- Added **session-scoped proctoring + media endpoints** for permission gating, media audit, event ingest, heartbeats, and live status reads under `/api/practice/session/{session_id}/...`.
+- Practice Mode now differentiates **invalid user-supplied provider keys (401)** from **invalid server-side provider credentials (503)** using `LLMAuthenticationError`, making start/quick-start failures explicit.
+- Guest **progress continuity** depends on preserving the stable guest identifier (`x-stratax-guest-id` header or `stratax_guest_id` cookie) so attempts, heatmaps, and next-session plans aggregate under one user.
 
 ### Mock Interview Analytics (NEW)
 
@@ -269,6 +277,7 @@ FastAPI Application
 │   ├── Evaluation Agent (app/services/practice/evaluation_agent.py)
 │   ├── Local STT Service (app/services/practice/local_stt_service.py)
 │   ├── Local TTS Service (app/services/practice/local_tts_service.py)
+│   ├── Proctoring State Engine (app/services/practice/proctoring.py)
 │   ├── Semantic Deduplication (in adaptive_interviewer_agent.py)
 │   ├── Deterministic Scoring (app/services/practice/practice_scoring.py)
 │   ├── Adaptive Pressure (app/services/practice/adaptive_pressure.py)
@@ -529,8 +538,11 @@ When `ENABLE_PRACTICE_LEARNING` is enabled, Practice Mode optionally captures an
 - **Quick-start onboarding:** Conversational AI infers user profile from natural language
 - **Audio processing:** Local STT transcription with Voice Activity Detection (VAD)
 - **Speech analytics:** Delivery metrics (WPM, fillers, pauses, pitch variance, confidence scoring)
+- **Progress tracking:** DB-backed attempt summaries, weekly heatmaps, and next-session recommendations
+- **Proctoring & session audit:** Backend-authoritative status, privacy-safe event/heartbeat ingestion, optional media capture
 - **Micro-feedback:** Immediate coaching tips (< 15 words each) on delivery
 - **Comprehensive evaluation:** Per-answer technical accuracy scoring with actionable suggestions
+- **Fail-fast provider auth:** Invalid BYOK credentials surface as 401; invalid server credentials surface as 503
 - **Final report:** End-of-interview coaching with strengths, improvements, and action plan
 
 ### Multi-Agent Architecture
@@ -568,7 +580,7 @@ When practice learning is enabled and a minimum cohort size is met (currently 3+
 - Feedback is informed by real practice behavior, not just LLM-generated answers
 - Confidence and communication signals are tracked across sessions for the same user
 - LLM-provider-aware evaluation (Groq/Gemini routing)
-- Proctoring signal capture (focus, tab switches, presence)
+- Backend-authoritative proctoring capture (focus, tab switches, heartbeat freshness, presence)
 - Explainable evaluation output (not just pass/fail)
 
 ### Core Differentiation
@@ -576,7 +588,7 @@ When practice learning is enabled and a minimum cohort size is met (currently 3+
 - Interviewer-style follow-up logic (not static Q&A)
 - Session-level evaluation (not per-question gamification)
 - Explainable scoring (strengths, gaps, red flags)
-- Proctoring signals integrated into evaluation context
+- Proctoring status and event summaries integrated into score/evaluation context
 - Same engine used for self-practice and formal assessment
 
 ---
@@ -2024,13 +2036,37 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 - `GET /api/session/{id}/chat` — Get history
 
 ### Practice Mode Endpoints
+- `POST /api/practice/upload-resume` — Parse resume into structured practice context
 - `GET /api/practice/rounds/available` — List rounds
+- `GET /api/practice/difficulty-preview` — Preview experience-based difficulty
+- `GET /api/practice/insights` — Explainable learning insights + recommended focus
+- `GET /api/practice/progress/summary` — Attempt totals and dimension rollup
+- `GET /api/practice/progress/heatmap` — Weekly dimension heatmap/trend points
+- `GET /api/practice/progress/next-session` — Latest targeted next-session plan
 - `POST /api/practice/interview/start-round` — Start round
 - `POST /api/practice/interview/quick-start` — Quick start
+- `POST /api/practice/interview/start` — Start standard practice interview
+- `POST /api/practice/session/{id}/start` — Enforce camera/screen-share gate
 - `POST /api/practice/proctoring/event` — Proctoring signals (events only; no media)
+- `POST /api/practice/session/{id}/proctoring/event` — Session-scoped proctoring event ingest
+- `POST /api/practice/session/{id}/proctoring/heartbeat` — Update backend-authoritative proctoring state
+- `GET /api/practice/session/{id}/proctoring/status` — Fetch current proctoring status and risk
+- `POST /api/practice/session/{id}/media` — Upload session recording artifact
+- `GET /api/practice/session/{id}/media/{media_id}` — Fetch uploaded session recording
 - `POST /api/practice/interview/submit-answer` — Submit audio
+- `POST /api/practice/interview/submit-code` / `submit_code` — Submit coding answer
+- `POST /api/practice/interview/end-session` — End a session early and persist results
 - `POST /api/practice/interview/acknowledge-feedback` — Next question
+- `POST /api/practice/interview/rate-feedback` — Rate coaching feedback
+- `POST /api/practice/session/{id}/outcome/confidence` — Submit post-session confidence score
+- `GET /api/practice/conversational-response` — Get conversational onboarding response
+- `GET /api/practice/audio/{filename}` — Retrieve synthesized audio
+- `GET /api/practice/session/{id}` — Get session details
+- `DELETE /api/practice/session/{id}` — Delete session
+- `GET /api/practice/status` — Service status
 - `GET /api/practice/session/{id}/evaluation` — Final report
+- `GET /api/practice/session/{id}/score` — Deterministic score + proctoring/media summary
+- `POST /api/practice/cleanup` — Cleanup inactive sessions
 
 ### Interview Intelligence Endpoints
 - `GET /api/intelligence/search` — Search questions
@@ -2079,7 +2115,7 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 | Data Type | Location |
 |-----------|----------|
 | User sessions | SQL DB (default for Postgres) or `data/sessions/{user_id}/{session_id}.json` when `STRATAX_SESSION_STORE=file` |
-| Mock interviews | `data/sessions/mock_interview_sessions.json` |
+| Mock interviews | SQL DB via `MockInterviewSessionRecord` (legacy `data/sessions/mock_interview_sessions.json` imported once if present) |
 | Practice audio | `data/practice_audio/*.wav` |
 | Vector DB | `data/interview_intelligence_v2/vector_db/` |
 | Models cache | `data/models/` |
@@ -2090,7 +2126,8 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 ## Appendix D: Test Coverage
 
 **Test Files:** 80+ across `tests/` directory and root  
-**Last verified:** February 2026
+**Last verified:** March 17, 2026  
+**Current validation snapshot:** `pytest -q` → 224 passed, 12 skipped
 
 Key test areas:
 - `tests/test_structural_integrity_validator.py` — Structural integrity validator (fences, emphasis, Mermaid, size)
@@ -2111,6 +2148,8 @@ Key test areas:
 - `tests/test_dynamic_budget.py` — Token budget computation
 - `tests/test_mock_interview_analytics.py` — Mock interview trajectory
 - `tests/test_email_verification_and_password_reset.py` — Email auth flows
+- `tests/test_practice_llm_auth_fail_fast.py` — Practice-mode invalid user key vs invalid server credential handling
+- `tests/test_practice_proctoring_enforcement.py` — Backend-authoritative proctoring state, heartbeat, and termination thresholds
 - `tests/test_rate_limiting.py` — Tier-based rate limiting
 - `tests/test_domain_profile.py` — Domain profile detection
 - `tests/test_interview_intelligence_requires_user_key.py` — II BYOK enforcement
@@ -2165,4 +2204,4 @@ uvicorn app.main:app --log-level debug
 ---
 
 *Generated with precision from repository codebase.*  
-*Stratax AI Development Team — February 2026*
+*Stratax AI Development Team — March 17, 2026*

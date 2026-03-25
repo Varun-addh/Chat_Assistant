@@ -45,6 +45,9 @@ class PromptFlags:
     is_technical_strategy: bool = False
     is_mirror_mode: bool = False
 
+    # Detected intent — used for lightweight prompt paths.
+    intent: str = ""
+
     # quick | standard | deep (best-effort inferred)
     depth: str = "standard"
 
@@ -65,7 +68,6 @@ def build_default_system_prompt(
         COPILOT_SYSTEM,
         PROMPT_INJECTION_RESISTANCE,
         COPILOT_INTERVIEW_MODE,
-        INTERVIEW_COACH,
         RESPONSE_TEMPLATE,
         OUTPUT_GUARDS,
         BASE_PERSONA,
@@ -79,10 +81,24 @@ def build_default_system_prompt(
         ACCURACY_AND_CALIBRATION,
     ]
 
+    # Lightweight prompt path: greetings and off-topic queries only need
+    # essential modules, saving ~60% of system prompt tokens.
+    if flags.intent in ("greeting", "off_topic"):
+        modules = [
+            BASE_PERSONA,
+            PROMPT_INJECTION_RESISTANCE,
+            IDENTITY_AND_ATTRIBUTION,
+            ABUSE_BOUNDARIES,
+            UX_CONVERSATION,
+            RESPONSE_CONTRACT,
+            APP_KNOWLEDGE,
+        ]
+
     # Mirror mode uses a different contract (JSON analysis), so avoid conflicting UX contracts.
     if flags.is_mirror_mode:
         modules = [
             BASE_PERSONA,
+            PROMPT_INJECTION_RESISTANCE,
             IDENTITY_AND_ATTRIBUTION,
             ABUSE_BOUNDARIES,
             OUTPUT_HYGIENE,

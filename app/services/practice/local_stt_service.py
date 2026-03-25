@@ -85,9 +85,9 @@ class LocalSTTService:
                 condition_on_previous_text=True,
                 vad_filter=True,  # Voice activity detection
                 vad_parameters=dict(
-                    threshold=0.5,
+                    threshold=0.35,
                     min_speech_duration_ms=250,
-                    min_silence_duration_ms=100
+                    min_silence_duration_ms=500
                 )
             )
             
@@ -99,15 +99,35 @@ class LocalSTTService:
                 segment_durations += (segment.end - segment.start)
             
             transcript = " ".join(transcript_parts)
-            
+
+            # ── Whisper hallucination guard ─────────────────────────────
+            # When VAD removes >85% of audio, only a tiny fragment of speech
+            # remains.  Whisper often hallucinates or produces repetitive
+            # output in this case.  Detect and discard suspicious transcripts.
             transcription_time = time.time() - start_time
 
             audio_duration = float(getattr(info, "duration", 0.0) or 0.0)
-            rtf = transcription_time / max(audio_duration, 1e-6)
-            
-            # Calculate VAD removed duration (approximate)
-            # Total audio duration - actual speech segments duration
             vad_removed = max(0, info.duration - segment_durations)
+            speech_duration = max(0, audio_duration - vad_removed)
+
+            if audio_duration > 5 and speech_duration < audio_duration * 0.15:
+                # Less than 15% of the recording is speech — highly suspicious
+                words = transcript.split()
+                # Check for exact-half repetition (common Whisper hallucination)
+                if len(words) >= 6:
+                    half = len(words) // 2
+                    first_half = " ".join(words[:half]).lower()
+                    second_half = " ".join(words[half:half * 2]).lower()
+                    if first_half == second_half:
+                        logger.warning(
+                            "Whisper hallucination detected (repeated text with %.1f%% VAD removal): %r",
+                            (vad_removed / audio_duration * 100) if audio_duration else 0,
+                            transcript[:120],
+                        )
+                        transcript = ""
+                        transcript_parts = []
+
+            rtf = transcription_time / max(audio_duration, 1e-6)
             
             # Metadata
             metadata = {

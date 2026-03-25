@@ -93,7 +93,7 @@ class Settings(BaseSettings):
 	# When enabled, the app stores small per-session aggregate metrics and optional
 	# self-reported outcomes (no raw audio, no raw transcripts).
 	enable_practice_learning: bool = Field(
-		default=False,
+		default=True,
 		validation_alias=AliasChoices("ENABLE_PRACTICE_LEARNING", "STRATAX_ENABLE_PRACTICE_LEARNING"),
 	)
 
@@ -315,14 +315,6 @@ class Settings(BaseSettings):
 		"coding", "algorithm", "implement", "code", "write a function", "program", "solution",
 	]
 
-	# Document analyzer heuristics
-	document_jd_keywords: List[str] = [
-		"responsibilities", "requirements", "qualifications", "we are looking for", "job description", "position", "reports to",
-		"salary range", "benefits",
-	]
-	document_resume_keywords: List[str] = ["experience", "education", "skills", "projects", "certifications", "achievements", "resume", "cv"]
-	document_cover_letter_keywords: List[str] = ["dear", "sincerely", "i am writing", "i am interested", "cover letter", "application for"]
-
 	# Local TTS voice selection heuristics
 	# NOTE: Avoid overly-broad keywords like "man" which can false-match language names
 	# (e.g., "Manipuri") and cause surprising voice selection.
@@ -374,6 +366,8 @@ class Settings(BaseSettings):
 	enable_code_execution: bool = True
 	enable_query_expansion: bool = True
 	enable_streaming: bool = True
+	enable_practice_session_brain: bool = True
+	enable_practice_session_brain_llm: bool = True
 	# If true, Practice Mode runs via a LangGraph workflow (optional dependency).
 	# Defaults to false to keep deployments simple.
 	enable_practice_mode_langgraph: bool = False

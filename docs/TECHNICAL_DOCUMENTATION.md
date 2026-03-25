@@ -1,6 +1,8 @@
 # Stratax AI Backend — Technical Documentation (Code-Derived)
 
 > This document is intentionally **grounded in the repository’s code** (primarily under `app/`) and its runtime artifacts (`Dockerfile`, `docker-compose.yml`, `requirements.txt`). Where behavior is inferred from framework conventions (FastAPI/Pydantic), it is stated explicitly as such.
+>
+> Last reviewed against repository state: March 17, 2026. Verification snapshot: `pytest -q` → 224 passed, 12 skipped.
 
 ## Executive Summary (Non-Technical)
 
@@ -485,7 +487,7 @@ See: `app/main.py`, `app/routers/interview_intelligence.py`, `app/services/inter
 
 ### 4.10 `app/routers/mock_interview.py` + `app/services/interview/mock_interview_service.py`
 
-- Implements a mock interview workflow with sessions persisted to `data/sessions/mock_interview_sessions.json`.
+- Implements a mock interview workflow with sessions persisted in the SQL database via `MockInterviewSessionRecord`, with a one-time import path from legacy `data/sessions/mock_interview_sessions.json` when that file exists.
 - Uses `llm_service.generate_answer(...)` to generate evaluations and hints.
 - Endpoints are under `/api/mock-interview`.
 - **Mock Interview Analytics** (`app/services/interview/mock_interview_analytics.py`): deterministic within-session trajectory computation — per-criterion score tracking (correctness, completeness, clarity, confidence, technical_depth), improvement delta analysis, and trajectory direction (Improving/Stable/Declining).
@@ -496,26 +498,33 @@ See: `app/routers/mock_interview.py`, `app/services/interview/mock_interview_ser
 
 - Router is mounted at `/api/practice` (router itself sets `prefix="/api/practice"`).
 - Service orchestrates multiple agents, local STT/TTS, and evaluation.
-- Optional “proctoring” is supported via a privacy-safe event-only endpoint:
-  - `POST /api/practice/proctoring/event`
-  - Client initiates camera access; the backend only logs signals (no frames/audio by default)
-  - Events are validated against an active practice `session_id` and logged into `EventRecord` as `practice_proctoring_*`
+- Optional “proctoring” is backend-authoritative rather than event-log-only:
+  - legacy compatibility endpoint: `POST /api/practice/proctoring/event`
+  - session-scoped endpoints: `POST /api/practice/session/{session_id}/proctoring/event`, `POST /api/practice/session/{session_id}/proctoring/heartbeat`, `GET /api/practice/session/{session_id}/proctoring/status`
+  - session helpers: `POST /api/practice/session/{session_id}/start`, `POST /api/practice/session/{session_id}/media`, `GET /api/practice/session/{session_id}/media/{media_id}`
+  - backend state is stored in `PracticeProctoringSession`; audit rows remain in `PracticeProctoringEvent`
+- Proctoring state tracks `status`, `risk_level`, total/serious violations, remaining violations before termination, heartbeat staleness, and termination reason.
+- Practice Mode exposes `POST /api/practice/session/{session_id}/outcome/confidence` for post-session self-reported confidence.
 - Concrete agent components (constructed inside `PracticeModeService`) include:
   - `InterviewerAgent` (`app/services/practice/interviewer_agent.py`)
   - `AdaptiveInterviewerAgent` (`app/services/practice/adaptive_interviewer_agent.py`)
   - `ConversationalAgent` (`app/services/practice/conversational_agent.py`)
   - `EvaluationAgent` (`app/services/practice/evaluation_agent.py`)
   - Speech delivery metrics are computed via `SpeechAnalyticsAgent` (`app/services/practice/speech_analytics_agent.py`).
+- Practice startup and conversational flows fail fast on LLM credential issues:
+  - invalid user-supplied provider key → HTTP 401 with Bridge Settings guidance
+  - invalid server-side provider credentials → HTTP 503
 - **Deterministic Scoring** (`app/services/practice/practice_scoring.py`): stable, explainable scoring contract (no LLM required) producing overall score (0-100), dimension scores (correctness, delivery, clarity, structure), 'why' reasons, improvement plan, and a next-session plan.
 - **Adaptive Pressure** (`app/services/practice/adaptive_pressure.py`): deterministic supportive/balanced/challenging mode selection based on recent answer scores.
 - **Practice Progress** (`app/services/practice/practice_progress.py`): DB-backed persistence for completed attempts, progress summaries, and heatmap-friendly trend data.
+- Practice progress aggregation keys off `PracticeAttemptRecord.user_id`; guest continuity therefore depends on the stable guest id propagated by middleware (`x-stratax-guest-id` header / `stratax_guest_id` cookie).
 - **Practice Learning** (`app/services/practice/practice_learning.py`): per-session aggregate metrics, peer bucketing (WPM/filler rate), DB-backed learning insights.
 - **Round Configuration** (`app/services/practice/round_config_service.py`): maps real company interview processes to practice rounds with difficulty, categories, and timing.
 - Optional **LangGraph orchestration** (`app/services/practice/practice_mode_graph.py`): when `enable_practice_mode_langgraph=true` and `langgraph` is installed, provides graph-based practice flow orchestration. Falls back gracefully when unavailable.
 - Supports round-based interviews via `RoundConfigService` and `InterviewRound`.
 - Stores synthesized audio under `data/practice_audio` by default.
 
-See: `app/routers/practice_mode.py`, `app/services/practice/practice_mode_service.py`, `app/services/practice/local_stt_service.py`, `app/services/practice/local_tts_service.py`, `app/config_practice_mode.py`.
+See: `app/routers/practice_mode.py`, `app/services/practice/practice_mode_service.py`, `app/services/practice/local_stt_service.py`, `app/services/practice/local_tts_service.py`, `app/services/practice/proctoring.py`, `app/config_practice_mode.py`.
 
 ### 4.12 WebSocket STT: `app/routers/ws.py` + `app/services/practice/stt_service.py`
 
@@ -684,6 +693,7 @@ app/services/
     ├── speech_analytics_agent.py
     ├── local_stt_service.py
     ├── local_tts_service.py
+  ├── proctoring.py
     ├── practice_scoring.py
     ├── practice_progress.py
     ├── practice_learning.py
@@ -731,26 +741,27 @@ app/services/
 
 Evidence: `app/routers/practice_mode.py`, `app/services/practice/practice_mode_service.py`, `app/services/practice/local_stt_service.py`.
 
-### 5.3.1 Practice Mode proctoring signals (event-only)
+### 5.3.1 Practice Mode proctoring state, heartbeat, and audit events
 
-The backend cannot enable the camera. Proctoring is client-driven and opt-in:
+The backend still cannot enable the camera. Proctoring remains client-driven and opt-in, but the server now maintains backend-authoritative per-session state.
 
-1. Client starts a practice session (`POST /api/practice/interview/start`).
-2. Client acquires camera permissions locally (`getUserMedia`) and begins monitoring signals.
-3. Client posts privacy-safe events to `POST /api/practice/proctoring/event`.
-4. Server validates the `session_id` exists, then logs an `EventRecord` with:
-   - `event_type`: `practice_proctoring_{event_type}` (example: `practice_proctoring_tab_switch`)
-   - `extra_data`: `severity`, `metadata`, and optional `client_timestamp`
+1. Client starts a practice session (`POST /api/practice/interview/start`) and can enforce required permissions with `POST /api/practice/session/{session_id}/start`.
+2. Client acquires camera/screen permissions locally (`getUserMedia` / screen capture) and can upload optional media to `POST /api/practice/session/{session_id}/media`.
+3. Client emits privacy-safe events to either `POST /api/practice/proctoring/event` (legacy compatibility) or `POST /api/practice/session/{session_id}/proctoring/event`.
+4. Client sends periodic health snapshots to `POST /api/practice/session/{session_id}/proctoring/heartbeat`.
+5. Server updates `PracticeProctoringSession`, appends `PracticeProctoringEvent` audit rows, and returns current `status`, `risk_level`, counters, heartbeat freshness, and action (`none`, `warn`, or `terminate`).
+6. Frontends can read the latest backend view via `GET /api/practice/session/{session_id}/proctoring/status`.
 
-Example request payload:
+Example heartbeat payload:
 
 ```json
 {
-  "session_id": "<practice_session_id>",
-  "event_type": "tab_switch",
-  "severity": "violation",
-  "metadata": {"reason": "visibilitychange", "hidden": true},
-  "client_timestamp": "2026-01-26T12:34:56Z"
+  "camera_active": true,
+  "screen_active": true,
+  "tab_active": true,
+  "window_focused": true,
+  "detection_active": true,
+  "display_surface": "monitor"
 }
 ```
 
@@ -977,19 +988,29 @@ See: `app/main.py`, `app/utils/audit.py`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| POST | `/api/practice/upload-resume` | Parse resume into structured practice context |
+| POST | `/api/practice/session/{session_id}/outcome/confidence` | Store post-session self-reported confidence |
+| POST | `/api/practice/proctoring/event` | Legacy privacy-safe proctoring event ingest |
+| POST | `/api/practice/session/{session_id}/start` | Enforce screen-share + camera gate |
+| POST | `/api/practice/session/{session_id}/media` | Upload session media artifact |
+| GET | `/api/practice/session/{session_id}/media/{media_id}` | Fetch uploaded session media |
+| POST | `/api/practice/session/{session_id}/proctoring/event` | Session-scoped proctoring event ingest |
+| POST | `/api/practice/session/{session_id}/proctoring/heartbeat` | Update backend-authoritative proctoring state |
+| GET | `/api/practice/session/{session_id}/proctoring/status` | Fetch current proctoring status/risk |
 | GET | `/api/practice/rounds/available` | List available interview rounds |
-| POST | `/api/practice/interview/start-round` | Start round-based interview |
-| GET | `/api/practice/difficulty-preview` | Preview difficulty levels |
-| POST | `/api/practice/interview/quick-start` | Quick conversational start |
-| POST | `/api/practice/interview/start` | Start full practice interview |
-| POST | `/api/practice/proctoring/event` | Ingest privacy-safe proctoring signals (events only; no media) |
-| POST | `/api/practice/interview/submit-answer` | Submit audio answer |
-| POST | `/api/practice/interview/acknowledge-feedback` | Acknowledge and get next question |
-| POST | `/api/practice/interview/rate-feedback` | Rate feedback quality (signal for coaching loop) |
 | GET | `/api/practice/insights` | Get explainable practice insights + recommended focus areas |
 | GET | `/api/practice/progress/summary` | Get progress summary |
 | GET | `/api/practice/progress/heatmap` | Get progress heatmap |
 | GET | `/api/practice/progress/next-session` | Get recommended next session plan |
+| POST | `/api/practice/interview/start-round` | Start round-based interview |
+| GET | `/api/practice/difficulty-preview` | Preview difficulty levels |
+| POST | `/api/practice/interview/quick-start` | Quick conversational start |
+| POST | `/api/practice/interview/start` | Start full practice interview |
+| POST | `/api/practice/interview/submit-answer` | Submit audio answer |
+| POST | `/api/practice/interview/submit-code` and `/api/practice/interview/submit_code` | Submit coding answer |
+| POST | `/api/practice/interview/end-session` | End session early and persist results |
+| POST | `/api/practice/interview/acknowledge-feedback` | Acknowledge and get next question |
+| POST | `/api/practice/interview/rate-feedback` | Rate feedback quality (signal for coaching loop) |
 | GET | `/api/practice/conversational-response` | Get conversational AI response |
 | GET | `/api/practice/audio/{filename}` | Retrieve synthesized TTS audio |
 | GET | `/api/practice/session/{session_id}` | Get practice session details |
@@ -1087,10 +1108,10 @@ All request/response schemas are defined in `app/schemas.py`. Key models include
 
 ### Persistence Layer
 
-**File-based storage locations**:
+**Primary persistence locations**:
 
-- User sessions: `data/sessions/{user_id}/{session_id}.json`
-- Mock interview sessions: `data/sessions/mock_interview_sessions.json`
+- User sessions: SQL DB by default when using Postgres, or `data/sessions/{user_id}/{session_id}.json` when `STRATAX_SESSION_STORE=file`
+- Mock interview sessions: SQL DB via `MockInterviewSessionRecord` (legacy `data/sessions/mock_interview_sessions.json` imported once if present)
 - Practice audio: `data/practice_audio/` (WAV files)
 - History: JSONL format via `HistoryManager`
 - Interview Intelligence vector DB: `data/interview_intelligence_v2/vector_db/` (Qdrant local)
@@ -1128,7 +1149,9 @@ The repository contains extensive test scripts (in `tests/` and root):
 
 **Practice Mode (Advanced):**
 - `test_practice_learning_outcomes_and_metrics.py` — Practice learning metrics persistence
+- `test_practice_llm_auth_fail_fast.py` — Practice-mode invalid user key vs invalid server credential handling
 - `test_practice_proctoring_event_logging.py` — Proctoring event logging
+- `test_practice_proctoring_enforcement.py` — Backend-authoritative proctoring state, heartbeat, and termination thresholds
 - `test_practice_session_media_and_proctoring.py` — Session media + proctoring
 - `test_practice_session_score_endpoint.py` — Session score endpoint
 - `test_practice_progress_endpoints.py` — Progress API endpoints

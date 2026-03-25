@@ -33,6 +33,7 @@ from app.schemas import (
     PracticeProgressSummaryResponse,
     PracticeHeatmapResponse,
     PracticeNextSessionRecommendationResponse,
+    NextSessionPlan,
     InterviewRound,
     RoundConfig,
     RoundSelectionRequest,
@@ -156,6 +157,47 @@ def _should_auto_start_recording(question: Any) -> bool:
         return getattr(qt, "value", None) == "voice"
     except Exception:
         return True
+
+
+def _serialize_strategy_decision(decision: Any) -> Optional[dict[str, Any]]:
+    if decision is None:
+        return None
+    if isinstance(decision, dict):
+        return dict(decision)
+    model_dump = getattr(decision, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(mode="json")
+        except TypeError:
+            return model_dump()
+    return None
+
+
+def _strategy_event_extra(decision: Any, *, stage: str) -> dict[str, Any]:
+    payload = _serialize_strategy_decision(decision) or {}
+    if not payload:
+        return {}
+
+    trace = payload.get("decision_trace") or {}
+    follow_up_budget = trace.get("follow_up_budget") or {}
+    return {
+        "strategy_stage": stage,
+        "strategy_action": payload.get("action"),
+        "strategy_source": payload.get("source"),
+        "strategy_coaching_style": payload.get("coaching_style"),
+        "strategy_follow_up_depth": payload.get("follow_up_depth"),
+        "strategy_target_difficulty": payload.get("target_difficulty"),
+        "strategy_guardrail": trace.get("guardrail"),
+        "strategy_proposed_action": trace.get("proposed_action"),
+        "strategy_proposed_source": trace.get("proposed_source"),
+        "strategy_overall_score": trace.get("overall_score"),
+        "strategy_correctness_score": trace.get("correctness_score"),
+        "strategy_remaining_questions": trace.get("remaining_questions"),
+        "strategy_last_action": trace.get("last_strategy_action"),
+        "strategy_follow_up_budget_used": follow_up_budget.get("used"),
+        "strategy_follow_up_budget_max": follow_up_budget.get("max"),
+        "strategy_follow_up_budget_remaining": follow_up_budget.get("remaining"),
+    }
 
 
 def _insert_practice_proctoring_event(
@@ -816,6 +858,55 @@ def _extract_non_jwt_bearer_api_key(authorization: Optional[str]) -> Optional[st
     return bearer_value or None
 
 
+def _clean_bridge_api_key(value: Optional[str]) -> Optional[str]:
+    token = (value or "").strip()
+    if not token:
+        return None
+    if token.lower() in {"null", "undefined", "none"}:
+        return None
+    return token
+
+
+def _request_is_authenticated(request: Optional[Request]) -> bool:
+    if request is None:
+        return False
+    return getattr(request.state, "user", None) is not None
+
+
+def _resolve_server_fallback_api_key() -> Optional[str]:
+    if settings.llm_provider == "gemini":
+        return settings.gemini_api_key or settings.groq_api_key
+    return settings.groq_api_key or settings.gemini_api_key
+
+
+def _resolve_practice_api_key(
+    *,
+    request: Optional[Request],
+    x_api_key: Optional[str],
+    x_gemini_key: Optional[str],
+    authorization: Optional[str],
+    missing_key_detail: str,
+    allow_authenticated_fallback: bool = True,
+) -> tuple[Optional[str], bool]:
+    groq_key = _clean_bridge_api_key(x_api_key)
+    gemini_key = _clean_bridge_api_key(x_gemini_key)
+
+    if not groq_key:
+        groq_key = _extract_non_jwt_bearer_api_key(authorization)
+
+    user_supplied_api_key = bool(groq_key or gemini_key)
+    api_key = gemini_key or groq_key
+    if api_key:
+        return api_key, user_supplied_api_key
+
+    if settings.require_user_api_key and not (
+        allow_authenticated_fallback and _request_is_authenticated(request)
+    ):
+        raise HTTPException(status_code=401, detail=missing_key_detail)
+
+    return _resolve_server_fallback_api_key(), user_supplied_api_key
+
+
 def _raise_http_for_llm_auth_failure(*, user_supplied_api_key: bool) -> None:
     if user_supplied_api_key:
         raise HTTPException(
@@ -1008,25 +1099,13 @@ async def upload_resume_for_practice(
             raise HTTPException(status_code=400, detail="File too large (max 5MB)")
 
         # Resolve API key for LLM parsing
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            bearer_value = authorization.split(" ", 1)[1].strip()
-            if bearer_value.count(".") != 2:
-                groq_key = bearer_value
-        api_key = gemini_key if gemini_key else groq_key
-
-        if not api_key:
-            from app.config import settings
-            if settings.require_user_api_key:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key to parse resume.",
-                )
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
+        api_key, _ = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please add your Groq or Gemini API key to parse resume.",
+        )
 
         # Parse resume → structured JSON (raw bytes are discarded after this call)
         result = await parse_resume(content, file.filename, api_key=api_key)
@@ -1055,7 +1134,7 @@ async def upload_resume_for_practice(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Resume upload failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Resume parsing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Resume parsing failed. Please try again or use a different file format.")
 
 
 @router.get("/rounds/available", response_model=RoundSelectionResponse)
@@ -1158,12 +1237,13 @@ async def get_progress_heatmap_endpoint(
     http_request: Request,
     domain: Optional[str] = Query(None, description="Optional domain filter"),
     lookback_days: int = Query(90, ge=1, le=365),
+    max_points: int = Query(500, ge=1, le=5000, description="Max heatmap points returned"),
 ):
     """Flagship loop: weekly x dimension trend points."""
 
     user_id = get_user_id_from_request(http_request) or "guest_unknown"
     with get_db_context() as db:
-        points = get_dimension_heatmap(db, user_id=user_id, lookback_days=lookback_days, domain=domain)
+        points = get_dimension_heatmap(db, user_id=user_id, lookback_days=lookback_days, domain=domain, max_points=max_points)
         return PracticeHeatmapResponse(points=points)
 
 
@@ -1176,8 +1256,9 @@ async def get_next_session_plan_endpoint(
 
     user_id = get_user_id_from_request(http_request) or "guest_unknown"
     with get_db_context() as db:
-        plan = get_latest_next_session_plan(db, user_id=user_id, domain=domain)
-        return PracticeNextSessionRecommendationResponse(plan=plan)
+        plan_dict = get_latest_next_session_plan(db, user_id=user_id, domain=domain)
+        typed_plan = NextSessionPlan(**plan_dict) if isinstance(plan_dict, dict) else None
+        return PracticeNextSessionRecommendationResponse(plan=typed_plan)
 
 
 @router.post("/interview/start-round", response_model=StartInterviewResponse)
@@ -1212,6 +1293,7 @@ async def start_round_based_interview(
     Returns:
         Session with questions specific to the chosen round
     """
+    user_supplied_api_key = False
     try:
         logger.info(f"📥 Received request: round_type={payload.round_type}, domain={payload.domain}, exp={payload.experience_years}")
 
@@ -1265,29 +1347,14 @@ async def start_round_based_interview(
         profile, recommended_focus = _maybe_enrich_profile_focus(user_id=user_id, profile=profile)
         
         logger.info(f"📋 Profile: {profile.domain} with {profile.experience_years} years | Difficulty: {experience_based_difficulty.value.upper()} | Company: {profile.company_preference or 'Generic'}")
-        
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key:
-            groq_key = _extract_non_jwt_bearer_api_key(authorization)
 
-        user_supplied_api_key = bool(groq_key or gemini_key)
-            
-        api_key = gemini_key if gemini_key else groq_key
-        
-        # Fallback to dev keys in local mode if headers are empty
-        if not api_key:
-            from app.config import settings
-            if settings.require_user_api_key:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                )
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
+        api_key, user_supplied_api_key = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+        )
  
         # Cross-session dedup: fetch previously asked questions for this user+domain
         previously_asked: list[str] = []
@@ -1424,26 +1491,22 @@ async def quick_start_interview(
     """
     🚀 AI QUICK START - Zero-click conversational interview setup.
     """
+    user_supplied_api_key = False
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
         
         user_id = get_user_id_from_request(http_request) or "guest_unknown"
         logger.info("🚀 Quick Start AI Mode initiated")
-        
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key:
-            groq_key = _extract_non_jwt_bearer_api_key(authorization)
+        is_authenticated = _request_is_authenticated(http_request)
 
-        user_supplied_api_key = bool(groq_key or gemini_key)
-            
-        api_key = gemini_key if gemini_key else groq_key
-        
-        # Authenticated users (logged in via JWT) can use server keys even when
-        # REQUIRE_USER_API_KEY is true — the requirement is about *demo/guest* traffic.
-        is_authenticated = getattr(http_request.state, "user", None) is not None
+        api_key, user_supplied_api_key = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please log in or add your Groq/Gemini API key in Bridge Settings.",
+        )
         
         logger.info(
             f"Quick-start auth debug: api_key={'yes' if api_key else 'NO'}, "
@@ -1452,23 +1515,6 @@ async def quick_start_interview(
             f"has_x_api_key={'yes' if x_api_key else 'NO'}, "
             f"has_gemini_key={'yes' if x_gemini_key else 'NO'}"
         )
-        
-        # Fallback to dev keys
-        if not api_key:
-            from app.config import settings
-            if settings.require_user_api_key and not is_authenticated:
-                logger.warning(
-                    "Quick-start 401: REQUIRE_USER_API_KEY=true, user not authenticated, "
-                    "no API key provided. Client must either login (JWT) or supply an API key."
-                )
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please log in or add your Groq/Gemini API key in Bridge Settings.",
-                )
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
 
         # Use AI to build profile from conversational input
         result = await practice_service.quick_start_conversational(
@@ -1546,6 +1592,7 @@ async def start_interview(
     """
     Start a new practice interview session.
     """
+    user_supplied_api_key = False
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
@@ -1556,29 +1603,14 @@ async def start_interview(
         logger.info(f"Starting interview with difficulty: {payload.difficulty}")
 
         user_id = get_user_id_from_request(http_request) or "guest_unknown"
-        
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key:
-            groq_key = _extract_non_jwt_bearer_api_key(authorization)
 
-        user_supplied_api_key = bool(groq_key or gemini_key)
-            
-        api_key = gemini_key if gemini_key else groq_key
-        
-        # Fallback to dev keys respecting provider preference
-        if not api_key:
-            from app.config import settings
-            if settings.require_user_api_key:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                )
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
+        api_key, user_supplied_api_key = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+        )
 
         # Learning loop: enrich focus areas from prior attempts (best-effort)
         enriched_profile, recommended_focus = _maybe_enrich_profile_focus(
@@ -1700,6 +1732,7 @@ async def submit_answer(
     """
     Submit an answer to a question.
     """
+    user_supplied_api_key = False
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
@@ -1707,27 +1740,14 @@ async def submit_answer(
         logger.info(f"Receiving answer for session {session_id}, question {question_id}")
 
         user_id = get_user_id_from_request(http_request) or "guest_unknown"
-        
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization.split(" ")[1]
-            
-        api_key = gemini_key if gemini_key else groq_key
-        
-        # Fallback to dev keys respecting provider preference
-        if not api_key:
-            from app.config import settings
-            if settings.require_user_api_key:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                )
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
+
+        api_key, user_supplied_api_key = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+        )
 
         # Validate audio file
         if not audio.content_type or not audio.content_type.startswith("audio/"):
@@ -1798,6 +1818,12 @@ async def submit_answer(
         except Exception:
             pass
 
+        if result.get("strategy") is not None:
+            response.strategy = result.get("strategy")
+
+        strategy_extra = _serialize_strategy_decision(result.get("strategy")) or {}
+        strategy_event_extra = _strategy_event_extra(result.get("strategy"), stage="preview")
+
         # Telemetry: processed answer summary (avoid storing transcript by default)
         metrics_obj = result.get("metrics")
         fb_obj = result.get("micro_feedback")
@@ -1817,8 +1843,21 @@ async def submit_answer(
                 "is_correct": getattr(fb_obj, "is_correct", None),
                 "complete": bool(result.get("complete")),
                 "requires_acknowledgment": bool(result.get("requires_acknowledgment", True)),
+                **strategy_event_extra,
             },
         )
+
+        if strategy_event_extra:
+            _track_practice_event(
+                user_id=user_id,
+                session_id=session_id,
+                event_type="practice_strategy_previewed",
+                question_text=None,
+                extra={
+                    "question_id": int(question_id),
+                    **strategy_event_extra,
+                },
+            )
         
         # Don't add next_question - user must acknowledge feedback first
         # Next question will be fetched via /acknowledge-feedback endpoint
@@ -1839,6 +1878,10 @@ async def submit_answer(
         logger.info(f"Answer processed successfully for session {session_id}")
         return response
         
+    except HTTPException:
+        raise
+    except LLMAuthenticationError:
+        _raise_http_for_llm_auth_failure(user_supplied_api_key=user_supplied_api_key)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -1863,18 +1906,20 @@ async def submit_code(
     - We do NOT execute user code by default.
     - If code execution is explicitly configured (Judge0 API key), we can run it in a sandbox.
     """
+    user_supplied_api_key = False
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
 
         user_id = get_user_id_from_request(http_request) or "guest_unknown"
 
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization[7:]
-        api_key = gemini_key if gemini_key else groq_key
+        api_key, user_supplied_api_key = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+        )
 
         session = practice_service.get_session(payload.session_id)
         if not session:
@@ -1961,6 +2006,8 @@ async def submit_code(
             api_key=api_key,
         )
 
+        strategy_event_extra = _strategy_event_extra(svc_resp.get("strategy"), stage="preview")
+
         _track_practice_event(
             user_id=user_id,
             session_id=payload.session_id,
@@ -1973,8 +2020,21 @@ async def submit_code(
                 "time_taken": int(payload.time_taken),
                 "executed": bool(should_execute),
                 "execution_success": bool(execution_success) if should_execute else None,
+                **strategy_event_extra,
             },
         )
+
+        if strategy_event_extra:
+            _track_practice_event(
+                user_id=user_id,
+                session_id=payload.session_id,
+                event_type="practice_strategy_previewed",
+                question_text=getattr(question, "text", None) if question else None,
+                extra={
+                    "question_id": int(payload.question_id),
+                    **strategy_event_extra,
+                },
+            )
 
         # Flagship loop: persist completed attempt for progress/trends (best-effort)
         if bool(svc_resp.get("complete")):
@@ -1988,6 +2048,7 @@ async def submit_code(
             test_results=results,
             all_tests_passed=bool(execution_success) if should_execute else False,
             code_feedback=code_feedback,
+            strategy=svc_resp.get("strategy"),
             complete=bool(svc_resp.get("complete")),
             next_question=None,
             evaluation_report=svc_resp.get("evaluation_report"),
@@ -1997,6 +2058,8 @@ async def submit_code(
 
     except HTTPException:
         raise
+    except LLMAuthenticationError:
+        _raise_http_for_llm_auth_failure(user_supplied_api_key=user_supplied_api_key)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -2027,35 +2090,20 @@ async def end_practice_session(
     - `skipped_questions[]`: questions that were not reached
     - `evaluation_report`: full session evaluation (strengths, improvements, action plan)
     """
+    user_supplied_api_key = False
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
 
         user_id = get_user_id_from_request(http_request) or "guest_unknown" if http_request else "guest_unknown"
 
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            bearer_value = authorization.split(" ", 1)[1].strip()
-            if bearer_value.count(".") != 2:  # Not a JWT
-                groq_key = bearer_value
-
-        api_key = gemini_key if gemini_key else groq_key
-
-        # Authenticated users can use server keys
-        is_authenticated = getattr(http_request.state, "user", None) is not None if http_request else False
-
-        if not api_key:
-            if settings.require_user_api_key and not is_authenticated:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                )
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
+        api_key, user_supplied_api_key = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+        )
 
         logger.info(f"🛑 End session requested for {session_id} by {user_id}")
 
@@ -2088,6 +2136,8 @@ async def end_practice_session(
         raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
+    except LLMAuthenticationError:
+        _raise_http_for_llm_auth_failure(user_supplied_api_key=user_supplied_api_key)
     except Exception as e:
         logger.error(f"Error ending practice session: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2105,6 +2155,7 @@ async def acknowledge_feedback(
     """
     🎯 NEW FLOW: Acknowledge feedback and get next question.
     """
+    user_supplied_api_key = False
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
@@ -2112,27 +2163,14 @@ async def acknowledge_feedback(
         logger.info(f"📋 Feedback acknowledged for session {payload.session_id}, question {payload.question_id}")
 
         user_id = get_user_id_from_request(http_request) or "guest_unknown"
-        
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key and authorization and authorization.startswith("Bearer "):
-            groq_key = authorization.split(" ")[1]
-            
-        api_key = gemini_key if gemini_key else groq_key
-        
-        # Fallback to dev keys
-        if not api_key:
-            from app.config import settings
-            if settings.require_user_api_key:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                )
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
+
+        api_key, user_supplied_api_key = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+        )
 
         # Get next question after acknowledgment
         runner = practice_graph if (practice_graph and practice_graph.available) else None
@@ -2149,6 +2187,20 @@ async def acknowledge_feedback(
                 api_key=api_key
             )
 
+        # Build response
+        response = NextQuestionResponse(
+            complete=result["complete"],
+            progress=result["progress"]
+        )
+
+        if result.get("pressure") is not None:
+            response.pressure = result.get("pressure")
+        if result.get("strategy") is not None:
+            response.strategy = result.get("strategy")
+
+        strategy_extra = _serialize_strategy_decision(result.get("strategy")) or {}
+        strategy_event_extra = _strategy_event_extra(result.get("strategy"), stage="execution")
+
         _track_practice_event(
             user_id=user_id,
             session_id=payload.session_id,
@@ -2158,30 +2210,30 @@ async def acknowledge_feedback(
                 "question_id": int(payload.question_id),
                 "feedback_read": bool(getattr(payload, "feedback_read", True)),
                 "complete": bool(result.get("complete")),
+                **strategy_event_extra,
             },
         )
-        
-        # Build response
-        response = NextQuestionResponse(
-            complete=result["complete"],
-            progress=result["progress"]
-        )
 
-        if result.get("pressure") is not None:
-            response.pressure = result.get("pressure")
+        if strategy_event_extra:
+            _track_practice_event(
+                user_id=user_id,
+                session_id=payload.session_id,
+                event_type="practice_strategy_executed",
+                question_text=None,
+                extra={
+                    "question_id": int(payload.question_id),
+                    **strategy_event_extra,
+                },
+            )
         
         if result["complete"]:
             # Interview finished
             response.evaluation_report = result.get("evaluation_report")
             logger.info(f"✅ Interview complete for session {payload.session_id}")
 
-            # Flagship loop: persist completed attempt for progress/trends (best-effort)
-            # Persist on completion regardless of whether evaluation_report succeeded
-            background_tasks.add_task(
-                _persist_completed_practice_attempt,
-                user_id=user_id,
-                session_id=payload.session_id,
-            )
+            # NOTE: Persist is handled by submit_answer (or end_session).
+            # No need to persist again here — the dedup check catches it,
+            # but skipping avoids a wasted DB round-trip on every completed interview.
         else:
             # Next question available
             response.next_question = result["next_question"]
@@ -2209,6 +2261,10 @@ async def acknowledge_feedback(
         
         return response
         
+    except HTTPException:
+        raise
+    except LLMAuthenticationError:
+        _raise_http_for_llm_auth_failure(user_supplied_api_key=user_supplied_api_key)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -2282,6 +2338,7 @@ async def get_conversational_response(
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
     """Get a conversational AI response for onboarding."""
+    user_supplied_api_key = False
     try:
         if not practice_service:
             raise HTTPException(status_code=503, detail="Practice mode not initialized")
@@ -2289,28 +2346,13 @@ async def get_conversational_response(
         user_id = get_user_id_from_request(http_request) if http_request else "guest_unknown"
         user_id = user_id or "guest_unknown"
 
-        # API Key selection (Bridge Settings)
-        groq_key = x_api_key
-        gemini_key = x_gemini_key
-        if not groq_key:
-            groq_key = _extract_non_jwt_bearer_api_key(authorization)
-
-        user_supplied_api_key = bool(groq_key or gemini_key)
-            
-        api_key = gemini_key if gemini_key else groq_key
-        
-        # Fallback to dev keys
-        if not api_key:
-            from app.config import settings
-            if settings.require_user_api_key:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                )
-            if settings.llm_provider == "gemini":
-                api_key = settings.gemini_api_key or settings.groq_api_key
-            else:
-                api_key = settings.groq_api_key or settings.gemini_api_key
+        api_key, user_supplied_api_key = _resolve_practice_api_key(
+            request=http_request,
+            x_api_key=x_api_key,
+            x_gemini_key=x_gemini_key,
+            authorization=authorization,
+            missing_key_detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+        )
 
         result = await practice_service.get_conversational_response(
             voice_input=q,
@@ -2450,6 +2492,7 @@ async def get_status():
 @router.get("/session/{session_id}/evaluation")
 async def get_evaluation(
     session_id: str,
+    http_request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -2490,30 +2533,19 @@ async def get_evaluation(
             # Try to regenerate evaluation if missing
             logger.warning(f"Evaluation missing for completed session {session_id}, regenerating...")
             try:
-                # API Key selection
-                groq_key = x_api_key
-                gemini_key = x_gemini_key
-                if not groq_key and authorization and authorization.startswith("Bearer "):
-                    groq_key = authorization.split(" ")[1]
-                api_key = gemini_key if gemini_key else groq_key
-                
-                # Fallback to dev keys
-                if not api_key:
-                    from app.config import settings
-                    if settings.require_user_api_key:
-                        raise HTTPException(
-                            status_code=401,
-                            detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                        )
-                    if settings.llm_provider == "gemini":
-                        api_key = settings.gemini_api_key or settings.groq_api_key
-                    else:
-                        api_key = settings.groq_api_key or settings.gemini_api_key
+                api_key, _ = _resolve_practice_api_key(
+                    request=http_request,
+                    x_api_key=x_api_key,
+                    x_gemini_key=x_gemini_key,
+                    authorization=authorization,
+                    missing_key_detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+                )
 
                 evaluation_report = await practice_service.evaluation_agent.evaluate_interview(
                     session.answers,
                     session_id,
-                    api_key=api_key
+                    api_key=api_key,
+                    questions=getattr(session, "questions", None),
                 )
                 session.evaluation_report = evaluation_report
                 return {

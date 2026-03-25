@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, AliasChoices
+from pydantic import BaseModel, Field, AliasChoices, field_validator
 from pydantic import ConfigDict
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
@@ -252,6 +252,59 @@ class QuestionType(str, Enum):
 	SYSTEM_DESIGN = "system_design"  # Whiteboard/diagram-based
 
 
+class SessionStrategyAction(str, Enum):
+	"""Bounded next-step actions for the Practice Mode session brain."""
+	ASK_QUESTION = "ASK_QUESTION"
+	FOLLOW_UP = "FOLLOW_UP"
+	INCREASE_DIFFICULTY = "INCREASE_DIFFICULTY"
+	DECREASE_DIFFICULTY = "DECREASE_DIFFICULTY"
+	GIVE_FEEDBACK = "GIVE_FEEDBACK"
+	END_SESSION = "END_SESSION"
+
+
+class SessionCoachingStyle(str, Enum):
+	"""How the frontend should frame the next coaching interaction."""
+	SUPPORTIVE = "supportive"
+	BALANCED = "balanced"
+	CHALLENGING = "challenging"
+
+
+class SessionFollowUpDepth(str, Enum):
+	"""How aggressively to drill on the previous answer."""
+	NONE = "none"
+	LIGHT = "light"
+	DEEP = "deep"
+
+
+class SessionStrategyDecision(BaseModel):
+	"""One bounded decision from the Session Brain for the next user turn."""
+	action: SessionStrategyAction = Field(..., description="Single next action chosen by the strategy layer")
+	reason: str = Field(..., min_length=1, max_length=300, description="Short explanation for the chosen action")
+	coaching_style: SessionCoachingStyle = Field(
+		default=SessionCoachingStyle.BALANCED,
+		description="How the UI should frame the next interaction",
+	)
+	follow_up_depth: SessionFollowUpDepth = Field(
+		default=SessionFollowUpDepth.NONE,
+		description="Requested drill-down depth for follow-up questions",
+	)
+	target_difficulty: Optional[QuestionDifficulty] = Field(
+		default=None,
+		description="Optional difficulty override for the next question",
+	)
+	source: Literal["llm", "fallback_rules", "guardrail"] = Field(
+		default="fallback_rules",
+		description="How this decision was produced",
+	)
+	learning_focus: List[str] = Field(
+		default_factory=list,
+		description="Optional focus areas pulled from existing learning loops",
+	)
+	decision_trace: Dict[str, Any] = Field(
+		default_factory=dict,
+		description="Compact planner trace for UI explainability, telemetry, and debugging",
+	)
+
 class InterviewRound(str, Enum):
 	"""Interview round types - mirrors real company interview processes."""
 	HR_SCREENING = "hr_screening"
@@ -385,6 +438,13 @@ class PracticeSessionProctoringEventIn(BaseModel):
 	severity: Optional[Literal["info", "warning", "violation"]] = Field(default=None)
 	metadata: Dict[str, Any] = Field(default_factory=dict)
 	client_timestamp: Optional[datetime] = Field(default=None)
+
+	@field_validator("event_type", mode="before")
+	@classmethod
+	def _normalize_event_type(cls, v: Any) -> Any:
+		if isinstance(v, str):
+			return v.upper()
+		return v
 
 
 class PracticeSessionProctoringEventOut(PracticeSessionProctoringSnapshot):
@@ -596,6 +656,18 @@ class PracticeSession(BaseModel):
 	is_complete: bool = Field(default=False)
 	audio_files: List[str] = Field(default_factory=list, description="Generated TTS audio filenames")
 	pending_next_question: bool = Field(default=False, description="True if waiting for feedback acknowledgment")
+	pending_strategy_decision: Optional[SessionStrategyDecision] = Field(
+		default=None,
+		description="Buffered Session Brain decision to execute after feedback acknowledgment",
+	)
+	strategy_history: List[SessionStrategyDecision] = Field(
+		default_factory=list,
+		description="Past bounded strategy decisions for this session",
+	)
+	current_coaching_style: SessionCoachingStyle = Field(
+		default=SessionCoachingStyle.BALANCED,
+		description="Latest coaching style selected by the Session Brain",
+	)
 
 
 # API Request/Response Models for Practice Mode
@@ -636,16 +708,32 @@ class RoundSelectionResponse(BaseModel):
 
 class QuickStartRequest(BaseModel):
 	"""🚀 AI Quick Start - Zero-click conversational onboarding."""
+	model_config = ConfigDict(populate_by_name=True)
+
 	voice_input: Optional[str] = Field(default=None, description="Voice/text input from user")
 	context: Optional[str] = Field(default=None, description="Additional context (resume, LinkedIn, etc.)")
 	auto_mode: bool = Field(default=True, description="Let AI decide everything")
 	session_memory: bool = Field(default=True, description="Use previous session data")
-	question_count: Optional[int] = Field(default=None, ge=3, le=10, description="Number of questions (3-10). If not provided, AI decides.")
+	question_count: Optional[int] = Field(default=None, ge=1, le=15, description="Number of questions (1-15). If not provided, AI decides.")
 	target_company: Optional[str] = Field(default=None, description="Specific target company (e.g., 'Google', 'Meta', 'Amazon', 'Microsoft'). If not provided, AI infers from voice_input.")
 	# NEW: Round-based selection
 	target_round: Optional[InterviewRound] = Field(default=None, description="Specific interview round to practice")
 	# NEW: Pre-parsed resume context
 	resume_context: Optional[ResumeContext] = Field(default=None, description="Optional: Pre-parsed structured resume context for claim-based probing")
+
+	@field_validator("target_round", mode="before")
+	@classmethod
+	def _normalize_target_round(cls, value):
+		if value is None or isinstance(value, InterviewRound):
+			return value
+		text = str(value).strip()
+		if not text:
+			return None
+		normalized = text.lower()
+		for member in InterviewRound:
+			if normalized == member.value or normalized == member.name.lower():
+				return member
+		return value
 
 
 class ConversationalResponse(BaseModel):
@@ -684,6 +772,10 @@ class SubmitAnswerResponse(BaseModel):
 	transcript: str
 	metrics: SpeechMetrics
 	micro_feedback: MicroFeedback
+	strategy: Optional[SessionStrategyDecision] = Field(
+		default=None,
+		description="Bounded next-step decision preview from the Session Brain",
+	)
 	next_question: Optional[PracticeInterviewQuestion] = None
 	tts_audio_url: Optional[str] = None
 	complete: bool = Field(default=False)
@@ -771,6 +863,10 @@ class PracticeFeedbackRatedResponse(BaseModel):
 class NextQuestionResponse(BaseModel):
 	"""Response with next question after feedback acknowledgment."""
 	next_question: Optional[PracticeInterviewQuestion] = Field(None, description="Next question if interview not complete")
+	strategy: Optional[SessionStrategyDecision] = Field(
+		default=None,
+		description="Executed Session Brain decision for this transition",
+	)
 	tts_audio_url: Optional[str] = Field(None, description="Audio URL for next question")
 	auto_start_recording: bool = Field(
 		default=False,
@@ -806,9 +902,19 @@ class PracticeHeatmapResponse(BaseModel):
 	points: List[PracticeHeatmapPoint] = Field(default_factory=list)
 
 
+class NextSessionPlan(BaseModel):
+	"""Typed model for the recommended next-session settings."""
+	generated_at: Optional[str] = None
+	focus_dimension: Optional[str] = None
+	focus: List[str] = Field(default_factory=list)
+	question_count: int = Field(default=5, ge=1)
+	recommended_round: Optional[str] = None
+	difficulty: Optional[str] = None
+
+
 class PracticeNextSessionRecommendationResponse(BaseModel):
 	"""Settings the client can use to start the next targeted session."""
-	plan: Optional[Dict[str, Any]] = None
+	plan: Optional[NextSessionPlan] = None
 
 
 # Code Submission Models (for coding questions)
@@ -848,6 +954,10 @@ class SubmitCodeResponse(BaseModel):
 	test_results: List[CodeTestResult] = Field(..., description="Results from running test cases")
 	all_tests_passed: bool = Field(..., description="True if all test cases passed")
 	code_feedback: CodeEvaluationFeedback = Field(..., description="AI evaluation of code quality")
+	strategy: Optional[SessionStrategyDecision] = Field(
+		default=None,
+		description="Bounded next-step decision preview from the Session Brain",
+	)
 	complete: bool = Field(default=False, description="True if interview is complete")
 	next_question: Optional[PracticeInterviewQuestion] = Field(None, description="Next question if not complete")
 	evaluation_report: Optional[EvaluationReport] = Field(None, description="Final evaluation if complete")

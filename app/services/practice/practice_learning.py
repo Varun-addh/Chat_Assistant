@@ -152,6 +152,7 @@ def compute_peer_confidence_benchmark(
     bucket: PeerBucket,
     min_samples: int = 3,
 ) -> Tuple[Optional[float], int]:
+    # Exact match: both wpm_bucket AND filler_bucket
     q = (
         db.query(PracticeSessionOutcome.confidence_1_5)
         .join(
@@ -165,11 +166,28 @@ def compute_peer_confidence_benchmark(
 
     rows = [int(r[0]) for r in q.all() if r and r[0] is not None]
     n = len(rows)
-    if n < int(min_samples):
-        return None, n
+    if n >= int(min_samples):
+        avg = sum(rows) / n
+        return round(float(avg), 2), n
 
-    avg = sum(rows) / n
-    return round(float(avg), 2), n
+    # Fallback: match on wpm_bucket only (wider peer group)
+    q_fallback = (
+        db.query(PracticeSessionOutcome.confidence_1_5)
+        .join(
+            PracticeSessionMetrics,
+            (PracticeSessionMetrics.user_id == PracticeSessionOutcome.user_id)
+            & (PracticeSessionMetrics.session_id == PracticeSessionOutcome.session_id),
+        )
+        .filter(PracticeSessionMetrics.wpm_bucket == bucket.wpm_bucket)
+    )
+
+    rows_fb = [int(r[0]) for r in q_fallback.all() if r and r[0] is not None]
+    n_fb = len(rows_fb)
+    if n_fb >= int(min_samples):
+        avg_fb = sum(rows_fb) / n_fb
+        return round(float(avg_fb), 2), n_fb
+
+    return None, n_fb
 
 
 def format_peer_confidence_insight(*, avg_confidence_1_5: float, n: int) -> str:

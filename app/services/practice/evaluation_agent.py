@@ -44,7 +44,8 @@ class EvaluationAgent:
         self, 
         answers: List[AnswerSubmission],
         session_id: str,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        questions: Optional[list] = None,
     ) -> EvaluationReport:
         """
         Generate comprehensive evaluation report using Gemini Pro.
@@ -71,7 +72,7 @@ class EvaluationAgent:
                        f"{metrics_summary.avg_confidence}/10 confidence")
             
             # Prepare data for Gemini
-            prompt = self._build_evaluation_prompt(answers, metrics_summary)
+            prompt = self._build_evaluation_prompt(answers, metrics_summary, questions=questions)
             
             # Call Gemini Pro
             logger.info("Calling Gemini Pro API for evaluation...")
@@ -131,7 +132,8 @@ class EvaluationAgent:
     def _build_evaluation_prompt(
         self, 
         answers: List[AnswerSubmission], 
-        metrics: MetricsSummary
+        metrics: MetricsSummary,
+        questions: Optional[list] = None,
     ) -> str:
         """
         Build comprehensive prompt for Gemini Pro.
@@ -139,51 +141,80 @@ class EvaluationAgent:
         Args:
             answers: List of answer submissions
             metrics: Aggregated metrics
+            questions: Optional list of PracticeInterviewQuestion objects
             
         Returns:
             Formatted prompt string
         """
-        # Prepare transcript data
+        num_questions = len(answers)
+        # Confidence is 0.0-1.0 scale; show as 0-10 for readability
+        confidence_display = round(metrics.avg_confidence * 10, 1)
+
+        # Prepare transcript data with question text and content evaluation
         transcripts = []
         for i, answer in enumerate(answers, 1):
-            transcripts.append({
+            entry: dict = {
                 "question_num": i,
                 "transcript": answer.transcript,
                 "filler_count": answer.metrics.filler_count,
                 "wpm": answer.metrics.wpm,
-                "confidence": answer.metrics.confidence_score
-            })
+                "confidence": answer.metrics.confidence_score,
+            }
+            # Include question text if available
+            if questions and i <= len(questions):
+                q = questions[i - 1]
+                entry["question_text"] = getattr(q, "text", None)
+                entry["key_points"] = getattr(q, "key_points", None) or []
+                entry["category"] = getattr(q, "category", None)
+            # Include micro-feedback correctness if available
+            mf = getattr(answer, "micro_feedback", None)
+            if mf:
+                cs = getattr(mf, "correctness_score", None)
+                if cs is not None:
+                    entry["correctness_score"] = cs
+                ta = getattr(mf, "technical_accuracy", None)
+                if ta:
+                    entry["technical_accuracy"] = ta
+                covered = getattr(mf, "key_points_covered", None)
+                if covered:
+                    entry["key_points_covered"] = covered
+                missed = getattr(mf, "key_points_missed", None)
+                if missed:
+                    entry["key_points_missed"] = missed
+            transcripts.append(entry)
         
         transcripts_json = json.dumps(transcripts, indent=2)
         
         prompt = f"""You are an expert interview coach with 15 years of experience. Analyze this practice interview performance.
 
 Interview Data:
+- Total questions: {num_questions}
 - Total filler words: {metrics.total_fillers}
 - Average speaking pace: {metrics.avg_wpm} WPM (ideal 140-160)
 - Longest pause: {metrics.longest_pause} seconds
-- Average confidence score: {metrics.avg_confidence}/10 (pitch stability analysis)
+- Average confidence score: {confidence_display}/10 (pitch stability analysis, 0-10 scale)
 - Total duration: {metrics.total_duration:.0f} seconds
-- Questions where overtalked: {metrics.overtalked_count}/5
+- Questions where overtalked: {metrics.overtalked_count}/{num_questions}
 
-Transcripts by Question:
+Questions and Answers (with per-question evaluation):
 {transcripts_json}
 
 Generate a professional coaching report with:
 
 1. STRENGTHS (2-3 specific items)
    - Must be evidence-based from the data
-   - Reference specific metrics or transcript examples
-   - Be specific and actionable
+   - Evaluate BOTH answer content quality AND delivery
+   - Reference specific answers, key points covered, or transcript quality
 
 2. AREAS TO IMPROVE (2-3 specific items)
    - Must be evidence-based with examples
+   - Evaluate BOTH answer accuracy/completeness AND delivery
+   - Highlight key concepts that were missed or poorly explained
    - Reference specific metrics or patterns in transcripts
-   - Prioritize by impact
 
 3. ACTION PLAN (2-3 concrete steps)
    - Must be specific and actionable
-   - Focus on delivery improvement
+   - Include both content knowledge gaps AND delivery improvements
    - Realistic and achievable
 
 4. PRACTICE RECOMMENDATION
@@ -192,10 +223,11 @@ Generate a professional coaching report with:
    - Be realistic based on the data
 
 CRITICAL RULES:
+- Evaluate ANSWER CONTENT first (accuracy, completeness, key concepts), THEN delivery
+- If question_text and key_points are provided, assess whether the answer actually addresses them
+- If correctness_score or key_points_missed are provided, reference them
 - NO scores or percentages in the report
 - NO generic statements like "good job" without evidence
-- Be specific with examples from transcripts or metrics
-- Focus on delivery (pace, fillers, pauses, confidence)
 - Keep each item under 30 words
 - Use professional coaching tone
 

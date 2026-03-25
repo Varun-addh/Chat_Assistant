@@ -57,17 +57,26 @@ MAX_RESUME_TEXT_FOR_LLM = 6000  # chars — keeps within context budget
 
 
 class ResumeParseResult:
-    """Structured output from resume parsing."""
+    """Structured output from resume parsing.
 
-    def __init__(self, data: Dict[str, Any]):
-        self.skills: List[str] = data.get("skills", [])
-        self.projects: List[Dict[str, Any]] = data.get("projects", [])
-        self.experience_summary: str = data.get("experience_summary", "Not specified")
-        self.role_titles: List[str] = data.get("role_titles", [])
-        self.education: str = data.get("education", "Not specified")
-        self.achievements: List[str] = data.get("achievements", [])
-        self.years_of_experience: int = data.get("years_of_experience", 0)
-        self.primary_domain: str = data.get("primary_domain", "General Software Engineering")
+    Thin wrapper around a dict that is fully compatible with
+    ``app.schemas.ResumeContext`` (same field names / defaults).
+    Keeps backward-compat ``ResumeParseResult(dict)`` constructor
+    while also accepting Pydantic-style ``**kwargs``.
+    """
+
+    def __init__(self, data: Optional[Dict[str, Any]] = None, **kwargs):
+        src = data if data is not None else kwargs
+        self.skills: List[str] = src.get("skills", [])
+        self.projects: List[Dict[str, Any]] = src.get("projects", [])
+        self.experience_summary: str = src.get("experience_summary", "Not specified")
+        self.role_titles: List[str] = src.get("role_titles", [])
+        self.education: str = src.get("education", "Not specified")
+        self.achievements: List[str] = src.get("achievements", [])
+        self.years_of_experience: int = src.get("years_of_experience", 0)
+        self.primary_domain: str = src.get("primary_domain", "General Software Engineering")
+
+    # -- serialisation --------------------------------------------------------
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -80,6 +89,13 @@ class ResumeParseResult:
             "years_of_experience": self.years_of_experience,
             "primary_domain": self.primary_domain,
         }
+
+    def to_resume_context(self):
+        """Convert to the canonical Pydantic ``ResumeContext`` schema."""
+        from app.schemas import ResumeContext
+        return ResumeContext(**self.to_dict())
+
+    # -- prompt helpers -------------------------------------------------------
 
     def to_prompt_block(self) -> str:
         """Build a compact prompt block for injection into interview prompts."""
@@ -100,10 +116,11 @@ class ResumeParseResult:
         if self.projects:
             lines.append("  Key Projects:")
             for proj in self.projects[:5]:
-                name = proj.get("name", "Unnamed")
-                tech = ", ".join(proj.get("tech", [])[:5])
-                lines.append(f"    - {name} [{tech}]")
-                for claim in proj.get("claims", [])[:3]:
+                name = proj.get("name", "Unnamed") if isinstance(proj, dict) else getattr(proj, "name", "Unnamed")
+                tech_list = proj.get("tech", []) if isinstance(proj, dict) else getattr(proj, "tech", [])
+                claims = proj.get("claims", []) if isinstance(proj, dict) else getattr(proj, "claims", [])
+                lines.append(f"    - {name} [{', '.join(tech_list[:5])}]")
+                for claim in claims[:3]:
                     lines.append(f"      • Claim: {claim}")
 
         if self.achievements:
@@ -118,6 +135,19 @@ class ResumeParseResult:
 # Text extraction helpers (same formats the copilot upload already supports)
 # ---------------------------------------------------------------------------
 
+# Magic bytes for file-type validation
+_PDF_MAGIC = b"%PDF"
+_DOCX_MAGIC = b"PK\x03\x04"  # ZIP (Office Open XML)
+
+
+def _validate_magic_bytes(content: bytes, ext: str) -> None:
+    """Ensure file content matches its declared extension."""
+    if ext == ".pdf" and not content[:4].startswith(_PDF_MAGIC):
+        raise ValueError("File has .pdf extension but does not appear to be a valid PDF")
+    if ext == ".docx" and not content[:4].startswith(_DOCX_MAGIC):
+        raise ValueError("File has .docx extension but does not appear to be a valid DOCX")
+
+
 def extract_text_from_bytes(content: bytes, filename: str) -> str:
     """Extract plain text from resume file bytes."""
     ext = Path(filename).suffix.lower()
@@ -126,9 +156,11 @@ def extract_text_from_bytes(content: bytes, filename: str) -> str:
         return content.decode("utf-8", errors="replace")
 
     if ext == ".pdf":
+        _validate_magic_bytes(content, ext)
         return _extract_pdf_text(content)
 
     if ext == ".docx":
+        _validate_magic_bytes(content, ext)
         return _extract_docx_text(content)
 
     raise ValueError(f"Unsupported file type: {ext}. Use .txt, .md, .pdf, or .docx")
@@ -322,10 +354,13 @@ def _fallback_parse(text: str) -> ResumeParseResult:
         "kotlin", "scala", "hadoop", "spark", "tensorflow", "pytorch",
         "machine learning", "deep learning", "data science", "devops",
         "microservices", "rest", "graphql", "grpc",
+        "next.js", "nextjs", "svelte", "remix", "astro", "bun", "deno",
+        "tailwind", "prisma", "supabase", "vercel", "vite", "playwright",
+        "cypress", "langchain", "openai", "llm", "rag", "vector database",
     }
 
     text_lower = text.lower()
-    found_skills = [kw for kw in tech_keywords if kw in text_lower]
+    found_skills = [kw for kw in tech_keywords if re.search(r'\b' + re.escape(kw) + r'\b', text_lower)]
 
     # Extract years of experience
     yoe_match = re.search(r"(\d+)\+?\s*years?\s*(?:of\s*)?(?:experience|exp)", text_lower)

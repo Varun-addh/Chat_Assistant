@@ -8,9 +8,11 @@ except Exception:
     genai = None
 
 from app.config import settings
+import asyncio
 import logging
 import json
 import re
+import threading
 
 from app.services.chat.demo_key_pool import demo_key_pool
 
@@ -84,6 +86,17 @@ def _is_authentication_error(exc: Exception) -> bool:
 			"authentication failed",
 		]
 	)
+
+
+# Lock to protect genai.configure() calls (global state in the legacy library)
+_genai_configure_lock = threading.Lock()
+
+
+def _configure_genai(api_key: str):
+	"""Thread-safe wrapper around genai.configure()."""
+	with _genai_configure_lock:
+		genai.configure(api_key=api_key)
+		return genai
 
 
 # NOTE: Legacy mega-prompt removed.
@@ -175,7 +188,6 @@ class LLMService:
 					
 					extra_args = {}
 					if json_mode:
-						# Groq supports JSON mode via response_format
 						extra_args["response_format"] = {"type": "json_object"}
 					
 					target_model = model or self._settings.groq_model
@@ -190,16 +202,14 @@ class LLMService:
 				
 				elif provider == "gemini":
 					target_model = model or self._settings.gemini_model
-					# Remove 'models/' prefix if present for Gemini library calls
 					if target_model.startswith("models/"):
 						target_model = target_model.replace("models/", "")
-						
-					gmodel = client.GenerativeModel(target_model)
 					
-					# Combine prompts for Gemini (it handles system instructions via different method, but this is simpler for unified API)
-					full_prompt = prompt
+					# Use system_instruction for proper role separation (avoids prompt injection weakness)
+					model_kwargs = {}
 					if system_prompt:
-						full_prompt = f"{system_prompt}\n\nUSER REQUEST: {prompt}"
+						model_kwargs["system_instruction"] = system_prompt
+					gmodel = client.GenerativeModel(target_model, **model_kwargs)
 					
 					config = {
 						"temperature": temperature,
@@ -208,20 +218,19 @@ class LLMService:
 					if json_mode:
 						config["response_mime_type"] = "application/json"
 					
-					# Add permissive safety settings to avoid false blocks on technical content
+					# Permissive on technical content, but keep basic safety for harmful content
 					safety_settings = [
-						{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-						{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-						{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-						{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+						{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+						{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+						{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+						{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
 					]
 					
 					resp = gmodel.generate_content(
-						full_prompt, 
+						prompt,
 						generation_config=config,
 						safety_settings=safety_settings
 					)
-					# Handle variants of response format
 					if hasattr(resp, "text"):
 						return resp.text
 					elif hasattr(resp, "candidates") and resp.candidates:
@@ -316,49 +325,59 @@ class LLMService:
 		return any(pattern in q for pattern in off_topic_patterns)
 
 	def _is_ambiguous(self, question: str) -> bool:
-		"""Detect if question is ambiguous and needs clarification"""
+		"""Detect if question is ambiguous and needs clarification.
+
+		Uses word count instead of character length to avoid flagging valid
+		short technical questions like 'TCP vs UDP' (3 words, 10 chars).
+		"""
 		q = (question or "").strip()
-		if len(q) < 10:  # Very short questions
+		words = q.split()
+		# Single-word or empty queries are genuinely ambiguous
+		if len(words) <= 1:
 			return True
 		
-		# Ambiguous patterns
+		# Ambiguous patterns from config
 		ambiguous_patterns = list(getattr(self._settings, "llm_ambiguous_patterns", None) or [])
 		
-		# Check if question is too vague
 		if any(pattern in q.lower() for pattern in ambiguous_patterns):
-			# If it's a very general question without specific context
-			if len(q.split()) < 5:  # Very short
-				return True
-			# If it lacks specific technical terms
-			technical_terms = list(getattr(self._settings, "llm_ambiguous_technical_terms", None) or [])
-			if not any(term in q.lower() for term in technical_terms):
-				return True
+			# Only flag as ambiguous if ALSO very short AND no technical terms
+			if len(words) < 4:
+				technical_terms = list(getattr(self._settings, "llm_ambiguous_technical_terms", None) or [])
+				if not any(term in q.lower() for term in technical_terms):
+					return True
 		
 		return False
 
 	def _has_sufficient_context(self, question: str, previous_qna: Optional[List[Dict[str, str]]]) -> bool:
-		"""Check if there's sufficient context for the question"""
+		"""Check if this question is a standalone query that does NOT need context.
+
+		Returns True when the question stands on its own (sufficient context in itself).
+		Returns False when the question references prior conversation (needs history).
+		When previous_qna is empty, the question is always standalone → True.
+		"""
 		if not previous_qna or len(previous_qna) == 0:
-			return False
+			# No history = standalone question = sufficient context
+			return True
 		
 		q = (question or "").lower()
+		words = set(q.split())
 		
-		# Check for pronouns that need context
-		context_pronouns = ["this", "that", "it", "these", "those", "them"]
-		if any(pronoun in q for pronoun in context_pronouns):
-			return True
+		# Pronouns that reference prior conversation (word-boundary via set lookup)
+		context_pronouns = {"this", "that", "it", "these", "those", "them"}
+		if words & context_pronouns:
+			return False  # needs context
 		
-		# Check for references to previous topics
+		# Explicit back-references
 		context_references = ["previous", "earlier", "above", "before", "last"]
 		if any(ref in q for ref in context_references):
-			return True
+			return False  # needs context
 		
-		# Check for follow-up questions
-		follow_up_patterns = ["also", "additionally", "furthermore", "more", "another"]
-		if any(pattern in q for pattern in follow_up_patterns):
-			return True
+		# Continuation patterns
+		follow_up_patterns = {"also", "additionally", "furthermore"}
+		if words & follow_up_patterns:
+			return False  # needs context
 		
-		return False
+		return True  # standalone question
 
 	def _greeting_overrides(self) -> str:
 		return greeting_overrides()
@@ -485,16 +504,14 @@ class LLMService:
 			if name == "groq": return Groq(api_key=api_key), "groq"
 			if name == "gemini":
 				if genai: 
-					genai.configure(api_key=api_key)
-					return genai, "gemini"
+					return _configure_genai(api_key), "gemini"
 		
 		# Fallback to server keys
 		if name == "groq" and self._settings.groq_api_key:
 			return Groq(api_key=self._settings.groq_api_key), "groq"
 		if name == "gemini" and self._settings.gemini_api_key:
 			if genai:
-				genai.configure(api_key=self._settings.gemini_api_key)
-				return genai, "gemini"
+				return _configure_genai(self._settings.gemini_api_key), "gemini"
 		
 		return None, name
 
@@ -522,19 +539,18 @@ class LLMService:
 				return Groq(api_key=api_key), "groq"
 			elif "AIza" in api_key or "ATza" in api_key:
 				if genai is None:
+					logger.warning("Gemini key detected but google-generativeai not installed")
 					return None, "gemini"
-				# Use a per-call configuration approach conceptually (SDK global, so we re-configure)
-				genai.configure(api_key=api_key)
-				return genai, "gemini"
+				return _configure_genai(api_key), "gemini"
 			
 			# Fallback to globally configured provider if prefix not recognized
+			logger.debug("API key prefix not recognized (not gsk_/AIza/ATza), using configured provider: %s", provider)
 			if provider == "groq":
 				return Groq(api_key=api_key), "groq"
 			elif provider == "gemini":
 				if genai is None:
 					return None, "gemini"
-				genai.configure(api_key=api_key)
-				return genai, "gemini"
+				return _configure_genai(api_key), "gemini"
 			else:
 				# If provider is unknown but we have a key, default to Groq for safety
 				return Groq(api_key=api_key), "groq"
@@ -558,8 +574,7 @@ class LLMService:
 			api_key = self._settings.gemini_api_key
 			if not api_key:
 				return None, "gemini"
-			genai.configure(api_key=api_key)
-			return genai, "gemini"
+			return _configure_genai(api_key), "gemini"
 		else:
 			return None, provider
 
@@ -811,6 +826,7 @@ class LLMService:
 			needs_first_person=self._needs_first_person(question),
 			is_technical_strategy=(plan.intent == "technical_strategy"),
 			is_mirror_mode=(plan.intent == "mirror"),
+			intent=plan.intent or "",
 			depth=plan.depth,
 		)
 
@@ -899,6 +915,7 @@ class LLMService:
 		*,
 		depth: Optional[str] = None,
 		mode: Optional[str] = None,
+		user_tier: str = "standard",
 	) -> int:
 		"""Get optimal token limit based on question intent and depth budget.
 
@@ -911,8 +928,6 @@ class LLMService:
 		plan = self._build_response_plan(question, depth=depth, mode=mode)
 		intent = plan.intent or "general"
 		resolved_depth = plan.depth or (depth or "standard")
-		# For now, map user tier to 'standard' (can be extended to per-user tiers).
-		user_tier = "standard"
 		# Ask the engine to compute tokens; pass base_limit as a hard ceiling candidate.
 		target = dynamic_budget_engine.compute_budget_tokens(
 			question=question,
@@ -1083,12 +1098,12 @@ class LLMService:
 		else:
 			meta["length_ok"] = True
 
-		# Primitive coverage (simple substring match; robust and cheap)
+		# Primitive coverage (word-boundary matching; avoids false positives from substrings)
 		primitives = list(getattr(ontology, "primitives", ()) or ())
 		primitives = [str(p).strip().lower() for p in primitives if str(p).strip()]
 		matched = 0
 		for p in primitives[:8]:
-			if p and p in a:
+			if p and self._primitive_present(p, a):
 				matched += 1
 		coverage = (matched / max(1, min(5, len(primitives)))) if primitives else 0.0
 		meta["primitive_coverage"] = round(coverage, 3)
@@ -1326,12 +1341,22 @@ class LLMService:
 
 		return "\n".join(lines).strip() + "\n"
 
-	def _enforce_mirror_gap_and_followup_policy(self, report: dict[str, Any], ontology: Any, user_answer: str) -> dict[str, Any]:
-		"""Enforce must-have vs nice-to-have gap policy and sharpen follow-ups.
+	def _primitive_present(self, primitive: str, user_answer: str) -> bool:
+		"""Check if a primitive concept is present using word-boundary matching."""
+		try:
+			# Escape regex special chars in the primitive, then use word boundaries
+			pattern = r'\b' + re.escape(primitive) + r'\b'
+			return bool(re.search(pattern, user_answer))
+		except re.error:
+			# Fallback: space-padded containment (safer than bare `in`)
+			return f" {primitive} " in f" {user_answer} "
 
-		- If core primitives are missing, only list those as gaps (must-haves).
-		- If must-haves are all present, allow model-provided gaps (nice-to-have).
-		- Sharpen likely follow-ups to prefer concept-probing questions; inject topic-specific probes for Java.
+	def _enforce_mirror_gap_and_followup_policy(self, report: dict[str, Any], ontology: Any, user_answer: str) -> dict[str, Any]:
+		"""Merge must-have primitive gaps with LLM-provided gaps and sharpen follow-ups.
+
+		- Uses word-boundary matching (not bare substring) to detect primitives.
+		- Merges must-have gaps with LLM gaps (does not overwrite).
+		- Sharpens follow-ups to prefer concept-probing questions.
 		"""
 		if not report or not ontology:
 			return report
@@ -1339,17 +1364,18 @@ class LLMService:
 		primitives = [str(p).strip().lower() for p in list(getattr(ontology, "primitives", ()) or []) if str(p).strip()]
 		must_gaps: list[str] = []
 		for p in primitives:
-			# Simple containment check: if primitive phrase not present in user answer, mark as missing
-			if p and p not in ua:
+			if p and not self._primitive_present(p, ua):
 				must_gaps.append(f"Missing core concept: {p}")
 
-		# If there are must-have gaps, prefer them exclusively
-		if must_gaps:
-			report["gaps"] = self._normalize_string_list(must_gaps, limit=5)
-			# Do not include nice-to-have gaps when must-haves are present
-		else:
-			# No must-haves missing: keep LLM-provided gaps but prefer concept-probing phrasing
-			report["gaps"] = self._normalize_string_list(report.get("gaps"), limit=5)
+		# Merge: must-have gaps first, then LLM-provided gaps (deduped), up to limit
+		llm_gaps = self._normalize_string_list(report.get("gaps"), limit=5)
+		merged: list[str] = list(must_gaps)
+		seen_lower = {g.lower() for g in merged}
+		for g in llm_gaps:
+			if g.lower() not in seen_lower and len(merged) < 5:
+				merged.append(g)
+				seen_lower.add(g.lower())
+		report["gaps"] = self._normalize_string_list(merged, limit=5)
 
 		# Sharpen follow-ups: prefer questions starting with key probing verbs
 		followups = list(report.get("likely_followups") or [])
@@ -1360,18 +1386,6 @@ class LLMService:
 				continue
 			if re.match(r'^(explain|how|what|compare|describe|why)\b', fs.strip().lower()):
 				preferred.append(fs)
-
-		# Topic-specific injections (Java examples)
-		topic = (report.get("topic") or "").lower()
-		if "java" in topic:
-			java_probes = [
-				"Explain JVM vs JRE vs JDK.",
-				"How does Garbage Collection work?",
-			]
-			# Prepend them to preferred if not duplicates
-			for jp in java_probes:
-				if jp not in preferred:
-					preferred.insert(0, jp)
 
 		if preferred:
 			report["likely_followups"] = self._normalize_string_list(preferred, limit=3)
@@ -1385,16 +1399,11 @@ class LLMService:
 		confidence = self._normalize_confidence(report.get("confidence"))
 		report["confidence"] = confidence
 		meta = report.get("_meta") if isinstance(report.get("_meta"), dict) else {}
-		# Brevity acknowledgment: very short answers should be flagged as partial signal
+		# Brevity acknowledgment: estimate word count from answer_len in calibration meta
 		ua_words = 0
-		try:
-			ua_words = len(str(meta.get("user_answer") or "").split())
-		except Exception:
-			ua_words = 0
-
-		# If user_answer not in meta, attempt to estimate from message length
-		if ua_words == 0 and isinstance(meta.get("answer_len"), int):
-			# approximate words from characters
+		if isinstance(meta.get("confidence_details"), dict) and isinstance(meta["confidence_details"].get("answer_len"), int):
+			ua_words = max(0, meta["confidence_details"]["answer_len"] // 5)
+		elif isinstance(meta.get("answer_len"), int):
 			ua_words = max(0, meta.get("answer_len") // 5)
 
 		brevity_note = ""
@@ -1457,9 +1466,9 @@ class LLMService:
 		q = (question or "").strip()
 		ua = (user_answer or "").strip()
 		if not q:
-			return ("", False)
+			return ("", False, {})
 		if not ua:
-			return ("", False)
+			return ("", False, {})
 
 		plan = self._build_response_plan(q, depth=depth, mode="mirror")
 		flags = self._flags_from_plan(plan, q)
@@ -1590,35 +1599,42 @@ class LLMService:
 		# but skip if the schema drifted (incomplete/unsafe to rewrite).
 		llm_conf_for_rewrites = float(meta.get("llm_confidence") or 0.0)
 		if (not meta.get("schema_drift")) and llm_conf_for_rewrites >= 0.4:
-			try:
-				meta["upgrade_rewrite_attempted"] = True
-				normalized["upgrade_lines"] = await self._rewrite_upgrade_lines_if_needed(
-					question=q,
-					user_answer=ua,
-					topic=str(normalized.get("topic") or "General"),
+			# Run rewrite and soften in parallel (independent LLM calls)
+			topic_str = str(normalized.get("topic") or "General")
+
+			async def _do_rewrite() -> list[str]:
+				return await self._rewrite_upgrade_lines_if_needed(
+					question=q, user_answer=ua, topic=topic_str,
 					upgrade_lines=list(normalized.get("upgrade_lines") or []),
 					api_key=api_key,
 				)
-				meta["upgrade_rewrite_ok"] = True
-			except Exception:
-				# Never fail the Mirror report due to the rewrite pass.
-				meta["upgrade_rewrite_ok"] = False
-				pass
 
-			# Soften red flags if harsh phrasing was used.
-			try:
-				meta["red_flags_soften_attempted"] = True
-				normalized["red_flags"] = await self._soften_red_flags_if_needed(
-					question=q,
-					user_answer=ua,
-					topic=str(normalized.get("topic") or "General"),
+			async def _do_soften() -> list[str]:
+				return await self._soften_red_flags_if_needed(
+					question=q, user_answer=ua, topic=topic_str,
 					red_flags=list(normalized.get("red_flags") or []),
 					api_key=api_key,
 				)
-				meta["red_flags_soften_ok"] = True
+
+			meta["upgrade_rewrite_attempted"] = True
+			meta["red_flags_soften_attempted"] = True
+			try:
+				rewritten, softened = await asyncio.gather(
+					_do_rewrite(), _do_soften(), return_exceptions=True,
+				)
+				if isinstance(rewritten, list):
+					normalized["upgrade_lines"] = rewritten
+					meta["upgrade_rewrite_ok"] = True
+				else:
+					meta["upgrade_rewrite_ok"] = False
+				if isinstance(softened, list):
+					normalized["red_flags"] = softened
+					meta["red_flags_soften_ok"] = True
+				else:
+					meta["red_flags_soften_ok"] = False
 			except Exception:
+				meta["upgrade_rewrite_ok"] = False
 				meta["red_flags_soften_ok"] = False
-				pass
 
 		# Deterministic confidence calibration (do not rely solely on model self-report)
 		try:
@@ -1731,47 +1747,47 @@ class LLMService:
 		"""
 		Intelligently determine if this question actually needs conversation history.
 		This dramatically reduces token usage by only including context when necessary.
+
+		Uses word-boundary matching for pronouns (avoids 'that' matching inside
+		'What is **that** design pattern') and multi-word phrases for follow-up
+		indicators (avoids standalone questions like 'Compare TCP vs UDP' from
+		being treated as follow-ups).
 		"""
 		if not previous_qna:
 			return False
 		
 		question_lower = question.lower().strip()
+		words = set(question_lower.split())
 		
-		# Indicators that this is a follow-up question requiring context
-		follow_up_indicators = [
-			# Direct references to previous content
-			'that', 'this', 'it', 'them', 'those', 'these',
-			# Continuation phrases
-			'also', 'additionally', 'furthermore', 'moreover',
-			# Clarification requests
-			'explain more', 'tell me more', 'elaborate', 'clarify',
+		# Multi-word phrases: strong follow-up signals (low false-positive)
+		phrase_indicators = [
+			'explain more', 'tell me more', 'elaborate on', 'clarify',
 			'what about', 'how about', 'what if',
-			# Reference to previous answers
 			'you said', 'you mentioned', 'earlier', 'before', 'previous',
 			'the code', 'the solution', 'the example', 'the approach',
-			# Modification requests
-			'change', 'modify', 'update', 'improve', 'optimize',
-			'can you show', 'show me', 'give me',
-			# Comparative
-			'compare', 'difference between', 'versus', 'vs',
-			# Follow-up questions
-			'why', 'how does', 'what happens',
+			'can you show', 'show me',
 		]
-		
-		# Check if question contains follow-up indicators
-		for indicator in follow_up_indicators:
-			if indicator in question_lower:
+		for phrase in phrase_indicators:
+			if phrase in question_lower:
 				return True
 		
-		# Check if question is very short (likely a follow-up)
-		if len(question.split()) <= 5:
+		# Check if question is very short (2 words or less — likely a follow-up like "and?" "yes" "no why?")
+		if len(question.split()) <= 2:
 			return True
 		
-		# If question starts with these words, it's likely a follow-up
-		follow_up_starters = ['can you', 'could you', 'would you', 'will you', 'show', 'explain']
-		for starter in follow_up_starters:
-			if question_lower.startswith(starter):
+		# Single-word pronoun check: only flag as follow-up if the question
+		# is SHORT (≤8 words) AND contains a demonstrative pronoun at the start.
+		# This avoids flagging "What is that design pattern called?" as a follow-up.
+		if len(question.split()) <= 8:
+			first_words = question_lower.split()[:3]
+			start_pronouns = {'this', 'that', 'these', 'those'}
+			if any(w in start_pronouns for w in first_words):
 				return True
+		
+		# Explicit continuation words (must be a whole word, not substring)
+		continuation_words = {'also', 'additionally', 'furthermore', 'moreover'}
+		if words & continuation_words:
+			return True
 		
 		# Otherwise, it's a standalone question - no context needed!
 		return False
@@ -1999,6 +2015,7 @@ class LLMService:
 		allow_provider_fallback: bool = True,
 		groq_model_override: Optional[str] = None,
 		restrict_groq_to_override: bool = False,
+		user_tier: str = "standard",
 	) -> tuple[str, bool]:
 		# Deterministic identity answers (avoid LLM hallucinated attribution)
 		if self._is_identity_question(question):
@@ -2030,7 +2047,7 @@ class LLMService:
 
 		temperature = self._settings.answer_temperature
 		top_p = self._settings.groq_top_p
-		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens, depth=depth)
+		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens, depth=depth, user_tier=user_tier)
 		stream = self._settings.groq_stream
 		# When we detect provider truncation, we may need a higher output cap for continuation.
 		max_tokens_ceiling = (
@@ -2337,7 +2354,7 @@ class LLMService:
 		return True
 
 	def _auto_recommendations_for_question(self, question: str, answer_text: str) -> list[str]:
-		"""Generate deterministic, topic-agnostic next steps.
+		"""Generate topic-aware next steps based on the question content.
 
 		No LLM calls here on purpose (cost + consistency).
 		"""
@@ -2345,7 +2362,42 @@ class LLMService:
 		a = (answer_text or "").strip()
 		if not q or not a:
 			return []
-		# Keep this short and interview-useful.
+
+		q_lower = q.lower()
+
+		# System design questions
+		if any(t in q_lower for t in ("system design", "design a", "architect", "scalab", "distributed")):
+			return [
+				"Sketch the data model and identify the hottest read/write paths.",
+				"Prepare to discuss a concrete scaling bottleneck and how you'd resolve it.",
+				"Practice explaining trade-offs (consistency vs availability, cost vs latency).",
+			]
+
+		# Coding / algorithm questions
+		if any(t in q_lower for t in ("algorithm", "implement", "code", "function", "leetcode", "time complexity", "big o")):
+			return [
+				"Run through at least 2 edge cases (empty input, single element, duplicates).",
+				"Be ready to explain your time and space complexity clearly.",
+				"Think about an alternative approach and why you chose this one.",
+			]
+
+		# Database / SQL questions
+		if any(t in q_lower for t in ("database", "sql", "schema", "index", "query", "normalization", "nosql")):
+			return [
+				"Know when to normalize vs denormalize and the trade-offs of each.",
+				"Prepare to discuss indexing strategy for the most common query pattern.",
+				"Practice explaining your schema decisions in under 60 seconds.",
+			]
+
+		# Behavioral questions
+		if any(t in q_lower for t in ("tell me about a time", "behavioral", "leadership", "conflict", "teamwork", "challenge")):
+			return [
+				"Structure your answer using STAR (Situation, Task, Action, Result).",
+				"Quantify the result if possible (saved X hours, improved Y%).",
+				"Prepare a 30-second version and a 2-minute version of this story.",
+			]
+
+		# Default: general interview prep
 		return [
 			"Know 1 real-world use case and 1 common pitfall.",
 			"Be ready to compare it with the closest alternative (trade-offs).",
@@ -2424,76 +2476,54 @@ class LLMService:
 
 	async def classify_is_technical(self, question: str, answer: str, api_key: Optional[str] = None) -> tuple[bool, float, str]:
 		"""
-		Dynamically classify if content is technical/evaluatable using the LLM itself.
-		Eliminates the need for brittle hardcoded keyword lists.
+		Classify if content is technical/evaluatable using fast keyword heuristics.
+		No LLM call needed — code blocks, technical keywords, and question patterns
+		are sufficient for routing decisions.
 		"""
-		# 0. Structural check: If AI already gave code, it's evaluatable (0 tokens used)
+		q_lower = (question or "").lower()
+		a_lower = (answer or "").lower()
+		combined = q_lower + " " + a_lower
+
+		# 1. Structural: code blocks in question or answer → definitely technical
 		if "```" in answer or "```" in question:
 			return True, 1.0, "code block detected"
 
-		# 1. AI Classification: Setup
-		client, provider = self._ensure_client(api_key)
-		if not client:
-			return False, 0.0, "provider unavailable"
+		# 2. Keyword sets for technical categories
+		_CODING_TERMS = {
+			"algorithm", "function", "class", "method", "array", "hashmap", "hash map",
+			"linked list", "binary tree", "stack", "queue", "recursion", "loop",
+			"pointer", "variable", "compile", "runtime", "exception", "debug",
+			"api", "endpoint", "rest", "graphql", "http", "tcp", "udp",
+			"sorting", "searching", "dynamic programming", "dfs", "bfs",
+			"big o", "time complexity", "space complexity", "o(n)", "o(1)",
+			"python", "javascript", "java", "typescript", "golang", "rust", "c++",
+			"react", "node", "django", "flask", "fastapi", "spring",
+		}
+		_SYSTEM_DESIGN_TERMS = {
+			"system design", "scalability", "load balancer", "microservice",
+			"distributed", "cache", "caching", "redis", "kafka", "message queue",
+			"sharding", "partition", "replication", "cdn", "latency",
+			"throughput", "availability", "consistency", "cap theorem",
+			"database design", "schema", "sql", "nosql", "mongodb", "postgresql",
+			"indexing", "normalization", "denormalization", "acid",
+		}
+		_ARCHITECTURE_TERMS = {
+			"architecture", "design pattern", "singleton", "factory", "observer",
+			"mvc", "mvvm", "monolith", "serverless", "containerization",
+			"docker", "kubernetes", "ci/cd", "deployment", "infrastructure",
+		}
 
-		system_prompt = (
-			"You are a technical classifier. Analyze the user request and determine if it belongs to categories: "
-			"coding, algorithms, system design, database, or technical architecture. "
-			"Return ONLY a JSON object: {\"is_technical\": bool, \"confidence\": float, \"category\": string}"
-		)
-		user_content = f"Question: {question[:300]}\nAnswer Context: {answer[:300]}"
+		all_terms = _CODING_TERMS | _SYSTEM_DESIGN_TERMS | _ARCHITECTURE_TERMS
 
-		# Try multiple Groq models (keep short to reduce latency/cost)
-		models_to_try = self._groq_models_to_try(limit=3)
-		
-		for current_model in models_to_try:
-			try:
-				import anyio
-				if provider == "groq":
-					resp = await anyio.to_thread.run_sync(
-						lambda: client.chat.completions.create(
-							model=current_model,
-							messages=[
-								{"role": "system", "content": system_prompt},
-								{"role": "user", "content": user_content}
-							],
-							max_tokens=50,
-							response_format={"type": "json_object"}
-						)
-					)
-					data = json.loads(resp.choices[0].message.content)
-					return data.get("is_technical", False), data.get("confidence", 0.0), data.get("category", "unknown")
-				
-				elif provider == "gemini":
-					gmodel = client.GenerativeModel(self._settings.gemini_model.replace("models/", ""))
-					full_prompt = f"{system_prompt}\n\nContent to classify:\n{user_content}"
-					resp = await anyio.to_thread.run_sync(gmodel.generate_content, full_prompt)
-					text = resp.text.strip()
-					if "{" in text:
-						data = json.loads(text[text.find("{"):text.rfind("}")+1])
-						return data.get("is_technical", False), data.get("confidence", 0.0), data.get("category", "unknown")
-					return "true" in text.lower(), 0.8, "heuristic"
-			except Exception as e:
-				error_msg = str(e).lower()
-				should_retry = any(x in error_msg for x in ["429", "rate_limit", "400", "decommissioned", "not found", "invalid_request_error"])
-				if should_retry:
-					continue
-				logger.error(f"Classification error on {current_model}: {e}")
-		
-		# Final fallback: try Gemini even if Groq was primary
-		if provider == "groq":
-			try:
-				gemini_client, _ = self._ensure_client_by_provider("gemini")
-				if gemini_client:
-					gmodel = gemini_client.GenerativeModel(self._settings.gemini_model.replace("models/", ""))
-					full_prompt = f"{system_prompt}\n\nContent to classify:\n{user_content}"
-					resp = gmodel.generate_content(full_prompt)
-					text = resp.text.strip()
-					return "true" in text.lower(), 0.8, "gemini-fallback"
-			except Exception as e:
-				logger.warning(f"Final Gemini fallback failed: {e}")
-		
-		return False, 0.0, "all classification attempts failed"
+		matched = [t for t in all_terms if t in combined]
+		if len(matched) >= 2:
+			category = "system_design" if any(t in _SYSTEM_DESIGN_TERMS for t in matched) else "coding"
+			return True, 0.95, category
+		if len(matched) == 1:
+			return True, 0.8, "technical_keyword"
+
+		# 3. Fallback: not technical
+		return False, 0.1, "no technical signals"
 
 	def _stream_sanitize_chunk(self, chunk: str) -> str:
 		"""Lightweight per-chunk sanitizer for streaming responses.
@@ -2537,6 +2567,7 @@ class LLMService:
 		allow_provider_fallback: bool = True,
 		groq_model_override: Optional[str] = None,
 		restrict_groq_to_override: bool = False,
+		user_tier: str = "standard",
 	) -> AsyncIterator[str]:
 		# Deterministic identity answers (avoid LLM hallucinated attribution)
 		if self._is_identity_question(question):
@@ -2566,7 +2597,7 @@ class LLMService:
 		)
 
 		# Use dynamic token limit for streaming
-		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens, depth=depth)
+		max_tokens = self._get_optimal_token_limit(question, self._settings.groq_max_tokens, depth=depth, user_tier=user_tier)
 		max_tokens_ceiling = (
 			self._settings.groq_max_tokens
 			or getattr(self._settings, "groq_max_tokens_complex", None)
