@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import secrets
 import httpx
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -37,18 +38,21 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 # ---------------------------------------------------------------------------
 _OAUTH_STATE_TTL = 600  # 10 minutes
 _oauth_states: dict[str, float] = {}
+_oauth_states_lock = threading.Lock()
 
 
 def _store_oauth_state(state: str) -> None:
     now = time.time()
-    # prune expired entries
-    for k in [k for k, v in _oauth_states.items() if v < now]:
-        _oauth_states.pop(k, None)
-    _oauth_states[state] = now + _OAUTH_STATE_TTL
+    with _oauth_states_lock:
+        # prune expired entries
+        for k in [k for k, v in _oauth_states.items() if v < now]:
+            _oauth_states.pop(k, None)
+        _oauth_states[state] = now + _OAUTH_STATE_TTL
 
 
 def _consume_oauth_state(state: str) -> bool:
-    expiry = _oauth_states.pop(state, None)
+    with _oauth_states_lock:
+        expiry = _oauth_states.pop(state, None)
     return expiry is not None and time.time() <= expiry
 
 

@@ -11,9 +11,17 @@ from app.utils.security import websocket_verify_api_key
 router = APIRouter()
 
 
+import asyncio as _asyncio
+
+_WS_RECEIVE_TIMEOUT = 60  # seconds — close idle WebSockets
+
+
 async def _iter_audio(websocket: WebSocket) -> AsyncIterator[bytes]:
 	while True:
-		msg = await websocket.receive()
+		try:
+			msg = await _asyncio.wait_for(websocket.receive(), timeout=_WS_RECEIVE_TIMEOUT)
+		except _asyncio.TimeoutError:
+			break
 		if "bytes" in msg and msg["bytes"] is not None:
 			yield msg["bytes"]
 		elif msg.get("text") == "__end__":

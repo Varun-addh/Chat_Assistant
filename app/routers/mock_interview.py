@@ -63,6 +63,42 @@ def _resolve_mock_api_key(
     return settings.groq_api_key or settings.gemini_api_key or ""
 
 
+def _resolve_demo_api_key(
+    http_request: Request,
+    x_api_key: Optional[str],
+    x_gemini_key: Optional[str],
+    authorization: Optional[str],
+) -> tuple:
+    """Resolve API key with demo-mode Groq enforcement.
+
+    Returns (user_type, api_key).
+    Raises HTTPException on missing key.
+    """
+    user_type, api_key, needs_key = resolve_effective_api_key(
+        http_request,
+        x_api_key=x_api_key,
+        x_gemini_key=x_gemini_key,
+        authorization=authorization,
+    )
+
+    if user_type == "demo":
+        if not api_key:
+            api_key = settings.groq_api_key
+        if not api_key:
+            raise HTTPException(
+                status_code=503,
+                detail="Demo is temporarily unavailable (Groq is not configured).",
+            )
+    else:
+        if needs_key:
+            raise HTTPException(
+                status_code=401,
+                detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
+            )
+
+    return user_type, api_key
+
+
 # Dependency to get the mock interview service
 def get_mock_service():
     """Dependency to ensure mock service is available"""
@@ -174,33 +210,9 @@ async def start_mock_interview(
     Start a new mock interview session
     """
     try:
-        # Resolve key + user type using the shared demo utilities.
-        # IMPORTANT: Demo traffic must use Groq (cost-capped) and should not
-        # accidentally pick up an invalid GEMINI_API_KEY in hosted environments.
-        user_type, api_key, needs_key = resolve_effective_api_key(
-            http_request,
-            x_api_key=x_api_key,
-            x_gemini_key=x_gemini_key,
-            authorization=authorization,
+        user_type, api_key = _resolve_demo_api_key(
+            http_request, x_api_key, x_gemini_key, authorization,
         )
-
-        from app.config import settings
-        if user_type == "demo":
-            # In demo, force Groq. If demo pool is disabled (local dev), fall back
-            # to GROQ_API_KEY. Never fall back to Gemini for demo.
-            if not api_key:
-                api_key = settings.groq_api_key
-            if not api_key:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Demo is temporarily unavailable (Groq is not configured).",
-                )
-        else:
-            if needs_key:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                )
 
         # Demo-mode clamp: mock interview demo is capped to 1 question.
         effective_num_questions = request.num_questions
@@ -276,28 +288,9 @@ async def submit_answer(
     - Next question (if available)
     """
     try:
-        user_type, api_key, needs_key = resolve_effective_api_key(
-            http_request,
-            x_api_key=x_api_key,
-            x_gemini_key=x_gemini_key,
-            authorization=authorization,
+        user_type, api_key = _resolve_demo_api_key(
+            http_request, x_api_key, x_gemini_key, authorization,
         )
-
-        from app.config import settings
-        if user_type == "demo":
-            if not api_key:
-                api_key = settings.groq_api_key
-            if not api_key:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Demo is temporarily unavailable (Groq is not configured).",
-                )
-        else:
-            if needs_key:
-                raise HTTPException(
-                    status_code=401,
-                    detail="No active API key. Please add your Groq or Gemini API key in Bridge Settings to continue.",
-                )
 
         # Create UserAnswer object
         answer = UserAnswer(
@@ -514,17 +507,9 @@ async def end_session(
     try:
         summary = await service.end_session(session_id)
 
-        # Provide both shapes:
-        # - Flat fields (what many UIs expect)
-        # - Nested `summary` (older clients / debugging)
-        flat: dict = {}
-        if isinstance(summary, dict):
-            flat.update(summary)
-
         return {
             "status": "completed",
-            **flat,
-            "summary": summary,
+            **(summary if isinstance(summary, dict) else {}),
         }
     
     except ValueError as e:
@@ -556,11 +541,8 @@ async def delete_session(
         if session_id not in service.active_sessions:
             raise HTTPException(status_code=404, detail="Session not found")
         
-        # Remove from active sessions
+        # Remove from active sessions (DB delete happens inside __delitem__)
         del service.active_sessions[session_id]
-        
-        # Save to persist the deletion
-        service._save_sessions()
         
         logger.info(f"Deleted session {session_id}")
         
@@ -602,9 +584,8 @@ async def delete_user_session(
                 detail="You don't have permission to delete this session"
             )
         
-        # Delete the session
+        # Delete the session (DB delete happens inside __delitem__)
         del service.active_sessions[session_id]
-        service._save_sessions()
         
         logger.info(f"User {user_id} deleted session {session_id}")
         
@@ -646,12 +627,9 @@ async def clear_user_history(
                 "deleted_count": 0
             }
         
-        # Delete all user sessions
+        # Delete all user sessions (DB delete happens inside __delitem__)
         for session_id in user_session_ids:
             del service.active_sessions[session_id]
-        
-        # Save changes
-        service._save_sessions()
         
         logger.info(f"Cleared {len(user_session_ids)} sessions for user {user_id}")
         
@@ -687,10 +665,10 @@ async def health_check():
                 "session_persistence": True
             }
         }
-    except Exception as e:
+    except Exception:
         return {
             "status": "error",
-            "error": str(e)
+            "error": "Health check failed"
         }
 
 
@@ -700,6 +678,7 @@ async def get_hint(
     hint_level: int = Query(default=1, ge=1, le=3, description="Hint level: 1=gentle, 2=specific, 3=detailed"),
     service = Depends(get_mock_service),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
     authorization: Optional[str] = Header(None)
 ):
     """
@@ -713,10 +692,7 @@ async def get_hint(
     **Note:** Hint usage is tracked and may affect final evaluation
     """
     try:
-        # Extract API key from headers
-        api_key = x_api_key
-        if not api_key and authorization and authorization.startswith("Bearer "):
-            api_key = authorization.removeprefix("Bearer ")
+        api_key = _resolve_mock_api_key(x_api_key, x_gemini_key, authorization)
             
         hint = await service.get_hint(session_id, hint_level, api_key=api_key)
         

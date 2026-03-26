@@ -138,10 +138,12 @@ async def get_current_user(
             detail="User account is inactive",
         )
     
-    # Update last login (best-effort; failures must not block the request)
+    # Update last login — throttle to once per 5 minutes to reduce DB writes
     try:
-        user.last_login = datetime.now(timezone.utc)
-        db.commit()
+        now = datetime.now(timezone.utc)
+        if user.last_login is None or (now - user.last_login).total_seconds() > 300:
+            user.last_login = now
+            db.commit()
     except Exception:
         db.rollback()
     
@@ -221,7 +223,7 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
     try:
         if not verify_password(password, user.hashed_password):
             return None
-    except Exception:
+    except (ValueError, TypeError):
         # Unrecognised hash (e.g. OAuth-only or guest stub) — treat as wrong password
         return None
     

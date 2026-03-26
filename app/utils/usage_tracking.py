@@ -101,6 +101,7 @@ def track_api_usage(
                 except Exception as e:
                     # If creating the stub user fails for any reason, log and continue; we will still
                     # attempt to insert the usage record and handle FK failures gracefully below.
+                    db.rollback()
                     logger.debug(f"Could not create stub guest user {user_id}: {e}")
         else:
             user_id = user.id

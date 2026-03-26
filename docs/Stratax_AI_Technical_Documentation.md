@@ -3,11 +3,11 @@
 
 ---
 
-**Version:** 2.1  
-**Date:** March 17, 2026  
+**Version:** 2.2  
+**Date:** March 25, 2026  
 **Organization:** Stratax AI Development Team  
 **Classification:** Technical Architecture Document  
-**Last verified against repository state:** March 17, 2026
+**Last verified against repository state:** March 25, 2026
 
 ---
 
@@ -134,14 +134,12 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 5. **Evaluation Pipeline** — Multi-stage assessment of answers and code submissions
 6. **Diagram Generation** — Architecture visualization from code analysis
 
-## Recent Updates (Verified Through March 17, 2026)
+## Recent Updates (Verified Through March 25, 2026)
 
-### Resume Parsing & Document Analysis (NEW)
+### Resume Parsing (NEW)
 
 - Added **resume parser** (`app/services/core/resume_parser.py`) with LLM-based structured extraction from PDF/DOCX/TXT uploads.
 - Parsed resumes feed claim-based probing: interview questions target stated project claims, skills, and achievements.
-- Added **document analyzer** (`app/services/core/document_analyzer.py`) with ATS scoring, skills-gap analysis, career trajectory insights, and industry benchmarking at four analysis depths (Quick → Expert).
-- Automatic document type detection via configurable keyword heuristics.
 
 ### Mirror Ontology, Progress Tracking & Dynamic Budget (NEW)
 
@@ -156,6 +154,7 @@ The Stratax AI backend serves as the central orchestration layer for all intervi
 - **Practice Progress & Learning** (`app/services/practice/practice_progress.py`, `practice_learning.py`) — cross-session progress tracking and learning-loop insights.
 - **Round Config Service** (`app/services/practice/round_config_service.py`) — centralized round selection logic.
 - **LangGraph Orchestration** (`app/services/practice/practice_mode_graph.py`) — optional graph-based practice flow (behind `ENABLE_LANGGRAPH_PRACTICE` flag).
+- **Session Strategy Agent** (`app/services/practice/session_strategy_agent.py`) — bounded planner that selects the next-step action per user turn (coaching style, follow-up depth, strategy decisions).
 
 ### Practice Proctoring, Progress Continuity & Auth Hardening (NEW)
 
@@ -234,6 +233,7 @@ The system is designed as a **monolithic FastAPI service** with optional modular
 - **Always Available:** Q&A engine, session management, health endpoints
 - **New:** Auth subsystem (JWT + optional Google OAuth) backed by the configured SQL DB (`DATABASE_URL`; SQLite or Postgres)
 - **New:** Tier-based rate limiting middleware (plus demo-mode quotas + debug headers)
+- **New:** Request size limiting middleware (`RequestSizeLimitMiddleware`) for upload safety
 - **Optional Components:**
   - Interview Intelligence (requires Qdrant and sentence-transformers)
   - Practice Mode (requires audio libraries and TTS/STT models)
@@ -285,7 +285,8 @@ FastAPI Application
 │   ├── Practice Learning (app/services/practice/practice_learning.py)
 │   ├── Round Config (app/services/practice/round_config_service.py)
 │   ├── LangGraph Orchestration (app/services/practice/practice_mode_graph.py) [optional]
-│   └── Learning Loops (app/services/practice/learning_loops.py)
+│   ├── Learning Loops (app/services/practice/learning_loops.py)
+│   └── Session Strategy Agent (app/services/practice/session_strategy_agent.py)
 │
 ├── Interview Intelligence (Optional)
 │   ├── Vector Store — Qdrant + embeddings (app/services/interview/interview_intelligence_service.py)
@@ -301,9 +302,8 @@ FastAPI Application
 │   ├── Progressive Hints
 │   └── LLM Evaluation
 │
-├── Resume & Document Intelligence
-│   ├── Resume Parser (app/services/core/resume_parser.py)
-│   └── Document Analyzer (app/services/core/document_analyzer.py)
+├── Resume Intelligence
+│   └── Resume Parser (app/services/core/resume_parser.py)
 │
 ├── Mirror Mode
 │   ├── Ontology Generator (app/services/chat/mirror_ontology.py)
@@ -341,12 +341,12 @@ graph TB
     Client["<b>Client Layer</b><br/>Web UI, Mobile App, API Consumers"]
     
     subgraph Gateway["API Gateway Layer - FastAPI + Middleware"]
-        MW["CORS | Auth | User ID Extraction | Rate Limiting | Audit"]
+        MW["CORS | Auth | User ID Extraction | Rate Limiting | Request Size Limiting | Audit"]
     end
     
     subgraph Core["Core Service Layer"]
         QA["<b>Q&A Core</b><br/>• SessionManager<br/>• LLM Service<br/>• History"]
-        PM["<b>Practice Mode</b><br/>• 5 Agents<br/>• STT/TTS"]
+        PM["<b>Practice Mode</b><br/>• 6 Agents<br/>• STT/TTS"]
         IE["<b>Intelligence Engine</b><br/>• Vector DB<br/>• LLM Generation"]
     end
     
@@ -469,6 +469,7 @@ The Practice Mode subsystem implements a multi-agent pattern:
 - **AdaptiveInterviewerAgent** — LLM-driven answer evaluation
 - **ConversationalAgent** — Profile inference from natural language
 - **EvaluationAgent** — End-of-interview coaching reports
+- **SessionStrategyAgent** — Bounded planner that chooses the next-step action per user turn
 
 ## Storage & Persistence
 
@@ -553,7 +554,8 @@ PracticeModeService (Orchestrator)
     ├─ InterviewerAgent → Question bank + micro-feedback
     ├─ AdaptiveInterviewerAgent → Answer evaluation (LLM)
     ├─ ConversationalAgent → Profile inference (LLM)
-    └─ EvaluationAgent → Final coaching report (LLM)
+    ├─ EvaluationAgent → Final coaching report (LLM)
+    └─ SessionStrategyAgent → Next-step action planner
 ```
 
 ### Workflow
@@ -644,8 +646,8 @@ Multi-question interview session simulator with progressive difficulty, hints, a
 - Final summary with scores and improvement recommendations
 
 ### Persistence Model
-- Active sessions: In-memory with periodic JSON persistence
-- History: Long-term storage per user in consolidated JSON file
+- Active sessions: SQL DB via `MockInterviewSessionRecord` (legacy JSON imported once if present)
+- History: Long-term storage per user in SQL DB
 
 ### Evaluation Flow
 ```
@@ -744,35 +746,7 @@ Claim-based follow-up questions
 
 ---
 
-## 8. Document Analysis (NEW)
-
-### Purpose
-Multi-dimensional document analysis engine surpassing basic keyword matching — supports resumes, job descriptions, cover letters, and LinkedIn profiles.
-
-### Key Responsibilities
-- **ATS compatibility scoring** (0-100) with specific recommendations
-- **Industry benchmarking** and competitive positioning analysis
-- **Skills gap identification** with learning paths
-- **Career trajectory analysis** from work history patterns
-- **Formatting quality and readability scoring**
-
-### Analysis Depths
-| Depth | Time | Description |
-|-------|------|-------------|
-| Quick | ~30s | Overview only |
-| Standard | 1-2 min | Comprehensive analysis |
-| Deep | 3-5 min | Exhaustive with recommendations |
-| Expert | 5+ min | Industry expert-level assessment |
-
-### Document Type Detection
-Uses configurable keyword heuristics (`document_jd_keywords`, `document_resume_keywords`, `document_cover_letter_keywords` in `app/config.py`) for automatic document classification.
-
-### Key File
-- `app/services/core/document_analyzer.py` (~658 lines)
-
----
-
-## 9. Mirror Ontology & Progress Tracking (NEW)
+## 8. Mirror Ontology & Progress Tracking (NEW)
 
 ### Purpose
 Powers the Mirror Mode comparison feature with LLM-driven ontology generation and cross-attempt progress tracking.
@@ -800,7 +774,7 @@ Uses a two-layer cache: in-memory TTL/LRU + optional Redis (via `app/services/co
 
 ---
 
-## 10. Dynamic Budget Engine (NEW)
+## 9. Dynamic Budget Engine (NEW)
 
 ### Purpose
 Adaptive token budget computation that replaces hardcoded token buckets. Controls LLM cost and response quality per-request.
@@ -824,7 +798,7 @@ Result is clamped to configured ceilings. Singleton: `dynamic_budget_engine`.
 
 ---
 
-## 11. Mock Interview Analytics (NEW)
+## 10. Mock Interview Analytics (NEW)
 
 ### Purpose
 Deterministic within-session trajectory computation for Mock Interview sessions.
@@ -973,6 +947,7 @@ Practice Mode implements a **composite agent pattern** where specialized agents 
 | **AdaptiveInterviewerAgent** | Answer evaluation (correctness, coverage) | Yes (JSON mode) |
 | **ConversationalAgent** | Profile inference from natural language | Yes |
 | **EvaluationAgent** | End-of-interview coaching report | Yes (JSON mode) |
+| **SessionStrategyAgent** | Bounded next-step action planner | Yes |
 
 ### Why Multi-Agent?
 
@@ -1665,7 +1640,7 @@ vectors_config = VectorParams(
 
 **Current State:**
 - User sessions: Per-user JSON files
-- Mock interview: Single JSON file for all sessions
+- Mock interview: SQL DB via `MockInterviewSessionRecord`
 - History: JSONL format
 - Vector DB: Qdrant local storage
 
@@ -1879,7 +1854,7 @@ curl http://localhost:7860/health
 
 1. **Run test suite:**
    ```bash
-   pytest -q                          # Full suite (~153 tests)
+   pytest -q                          # Full suite (~418 tests)
    pytest tests/test_structural_integrity_validator.py -v  # Validator tests
    pytest tests/evals/ -v             # Copilot contract evals
    ```
@@ -2035,6 +2010,26 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 - `PUT /api/session/{id}/title` — Update title
 - `GET /api/session/{id}/chat` — Get history
 
+### Auth Endpoints
+- `POST /auth/register` — Register new user
+- `POST /auth/login` — Login (returns JWT)
+- `GET /auth/me` — Get current user profile
+- `PUT /auth/me` — Update user profile
+- `POST /auth/change-password` — Change password
+- `GET /auth/quota` — Get tier quota info
+- `POST /auth/request-email-verification` — Request email verification
+- `GET /auth/verify-email` — Verify email via token
+- `POST /auth/forgot-password` — Request password reset
+- `POST /auth/reset-password` — Reset password via token
+- `GET /auth/google` — Google OAuth login
+- `GET /auth/google/callback` — Google OAuth callback
+
+### Health Endpoints
+- `GET /health` — Full application health check
+- `GET /health/ready` — Readiness probe
+- `GET /health/live` — Liveness probe
+- `GET /health/simple` — Lightweight legacy health endpoint
+
 ### Practice Mode Endpoints
 - `POST /api/practice/upload-resume` — Parse resume into structured practice context
 - `GET /api/practice/rounds/available` — List rounds
@@ -2080,6 +2075,7 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 - `POST /api/mock-interview/sessions/submit-answer` — Submit answer
 - `GET /api/mock-interview/sessions/{id}/summary` — Get summary
 - `POST /api/mock-interview/sessions/{id}/hint` — Request hint
+- `POST /api/mock-interview/upload-resume` — Upload resume for resume-based mock interview
 
 *Full endpoint documentation: 80+ total endpoints across 11 routers.*
 
@@ -2126,8 +2122,8 @@ For the complete, code-derived endpoint table (including History, WebSockets, an
 ## Appendix D: Test Coverage
 
 **Test Files:** 80+ across `tests/` directory and root  
-**Last verified:** March 17, 2026  
-**Current validation snapshot:** `pytest -q` → 224 passed, 12 skipped
+**Last verified:** March 25, 2026  
+**Current validation snapshot:** `pytest -q` → 418 passed, 12 skipped
 
 Key test areas:
 - `tests/test_structural_integrity_validator.py` — Structural integrity validator (fences, emphasis, Mermaid, size)

@@ -8,6 +8,10 @@ from sqlalchemy.exc import IntegrityError
 
 from app.models import ChatSession
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -57,6 +61,7 @@ class ChatSessionRepository:
                     }
                 )
             except Exception:
+                logger.warning("Skipping malformed QnA entry during mirror history extraction", exc_info=True)
                 continue
 
         return {
@@ -114,7 +119,11 @@ class ChatSessionRepository:
             row.last_update = state.get("last_update") or _utcnow()
             if row.created_at is None:
                 row.created_at = _utcnow()
-            db.commit()
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
 
     def delete(self, db: Session, *, user_id: str, session_id: str) -> bool:
         row = (
@@ -126,7 +135,11 @@ class ChatSessionRepository:
         if not row:
             return False
         db.delete(row)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         return True
 
     def list_summaries(self, db: Session, *, user_id: str) -> List[Dict[str, Any]]:

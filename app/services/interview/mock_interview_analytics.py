@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from app.services.interview.mock_interview_service import compute_criteria_averages
+
 
 _CRITERIA = (
     "correctness",
@@ -107,14 +109,18 @@ def build_mock_evaluation_trace(*, session: Any) -> dict[str, Any]:
     if avg_score <= 0.0:
         avg_score = sum(float(getattr(e, "overall_score", 0.0) or 0.0) for e in evals) / max(1, len(evals))
 
-    # Criterion averages
-    crit_totals = {k: 0.0 for k in _CRITERIA}
-    for e in evals:
-        cs = getattr(e, "criteria_scores", None)
-        for k in _CRITERIA:
-            crit_totals[k] += float(getattr(cs, k, 0.0) or 0.0) if cs is not None else 0.0
-
-    crit_avgs = {k: (v / max(1, len(evals))) for k, v in crit_totals.items()}
+    # Criterion averages  — delegate to shared helper when real EvaluationResult
+    # objects are available; fall back to getattr-based computation for duck-typed
+    # objects (e.g. tests that pass SimpleNamespace evaluations).
+    try:
+        crit_avgs = compute_criteria_averages(evals)
+    except (TypeError, AttributeError):
+        crit_totals = {k: 0.0 for k in _CRITERIA}
+        for e in evals:
+            cs = getattr(e, "criteria_scores", None)
+            for k in _CRITERIA:
+                crit_totals[k] += float(getattr(cs, k, 0.0) or 0.0) if cs is not None else 0.0
+        crit_avgs = {k: (v / max(1, len(evals))) for k, v in crit_totals.items()}
 
     strongest = max(crit_avgs.items(), key=lambda kv: kv[1])[0] if crit_avgs else None
     weakest = min(crit_avgs.items(), key=lambda kv: kv[1])[0] if crit_avgs else None

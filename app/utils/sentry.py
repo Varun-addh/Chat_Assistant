@@ -100,10 +100,12 @@ def _before_send(event, hint):
     if "request" in event:
         if "headers" in event["request"]:
             headers = event["request"]["headers"]
-            # Remove sensitive headers
+            # Remove sensitive headers (case-insensitive lookup)
+            headers_lower = {k.lower(): k for k in headers.keys()}
             for sensitive_header in ["authorization", "cookie", "x-api-key"]:
-                if sensitive_header in headers:
-                    headers[sensitive_header] = "[REDACTED]"
+                orig_key = headers_lower.get(sensitive_header)
+                if orig_key is not None:
+                    headers[orig_key] = "[REDACTED]"
     
     # Scrub API keys from error messages
     if "message" in event:

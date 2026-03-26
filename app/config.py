@@ -359,6 +359,10 @@ class Settings(BaseSettings):
 	analytics_store_raw_text: bool = False
 	analytics_text_preview_len: int = 120
 	enable_event_logging: bool = True
+	# Audit log retention: entries older than this many days are pruned when
+	# JsonlAuditor.prune() is called (e.g. via a scheduled task or on startup).
+	# Set to 0 to disable automatic pruning. Default: 90 days (GDPR/DPDP safe).
+	audit_log_retention_days: int = 90
 
 	# Feature Flags
 	enable_hybrid_search: bool = True

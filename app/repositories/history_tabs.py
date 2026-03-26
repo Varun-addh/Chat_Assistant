@@ -7,6 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.models import HistoryTabRecord
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -41,7 +45,11 @@ class HistoryTabRepository:
             created_at=created_at or _utcnow(),
         )
         db.add(row)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
     def update(self, db: Session, *, user_id: str, tab_id: str, query: Optional[str], questions: Optional[List[Dict[str, Any]]], metadata: Optional[Dict[str, Any]]) -> bool:
         row = self.get_tab(db, user_id=user_id, tab_id=tab_id)
@@ -55,7 +63,11 @@ class HistoryTabRepository:
             merged = dict(row.extra_data or {})
             merged.update(metadata)
             row.extra_data = merged
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         return True
 
     def delete(self, db: Session, *, user_id: str, tab_id: str) -> bool:
@@ -63,7 +75,11 @@ class HistoryTabRepository:
         if not row:
             return False
         db.delete(row)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         return True
 
     def delete_all(self, db: Session, *, user_id: str) -> int:
@@ -75,5 +91,9 @@ class HistoryTabRepository:
         count = len(rows)
         for r in rows:
             db.delete(r)
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         return count

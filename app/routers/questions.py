@@ -19,7 +19,8 @@ from app.schemas import (
 )
 from app.services.core.session_manager import get_session_manager, SessionManager, SessionState
 from app.services.chat.llm_service import get_llm_service
-from app.services.architecture.architecture_generator import get_architecture_generator, ArchitectureViewType
+from app.services.architecture.architecture_generator import get_architecture_generator
+from app.schemas import ArchitectureViewType
 from app.services.core.code_evaluation_service import evaluate_code
 from app.services.chat.mirror_compare import (
 	compute_mirror_progress,
@@ -33,6 +34,7 @@ from app.middleware.auth import get_user_id_from_request
 from fastapi import Request
 import asyncio
 import logging
+import re
 import uuid
 
 from app.utils.story_contract import extract_mermaid_first, enforce_story_contract, sanitize_mermaid_subset
@@ -101,7 +103,6 @@ def _validate_specificity(text: str, system_description: str) -> tuple[bool, lis
 	
 	Returns (is_specific, list_of_issues).
 	"""
-	import re
 	
 	issues = []
 	text_lower = text.lower()
@@ -175,7 +176,6 @@ def _sanitize_mermaid_from_llm(mermaid_code: str) -> str:
 
 async def _auto_evaluate_if_code(session_manager: SessionManager, session_id: str, question: str, answer: str, api_key: Optional[str] = None) -> None:
 	"""Auto-evaluate if the answer contains code blocks."""
-	import re
 	
 	# Look for code blocks in the answer
 	code_pattern = r'```(\w+)?\n(.*?)\n```'
@@ -476,7 +476,7 @@ async def submit_question(
 		except HTTPException:
 			raise
 		except Exception:
-			pass  # Never block on quota check failure
+			logger.warning("Copilot quota check failed; allowing request", exc_info=True)
 
 	# Resolve user tier for token budget allocation.
 	_user_tier = "standard"
@@ -993,7 +993,6 @@ async def submit_question(
 	# Pattern 2b: Only treat "design/build" as system-design when it targets a system-ish artifact.
 	# This avoids false positives like: "design a roadmap", "design a study plan", etc.
 	# (We intentionally keep this list small + generic, and use regex instead of endless keywords.)
-	import re
 	looks_like_system_design_phrase = bool(
 		re.search(r"\bdesign\s+(a|an|the)?\s*system\b", q_lower)
 		or re.search(r"\bdesign\s+(a|an|the)?\s*(platform|service|api|backend|architecture)\b", q_lower)
@@ -1088,7 +1087,6 @@ async def submit_question(
 					H1/H2 headings and removes stray 'Bottom line:' lines that often
 					show up inside sections.
 					"""
-					import re
 					if not text:
 						return ""
 					out_lines: list[str] = []
@@ -1135,7 +1133,8 @@ async def submit_question(
 					We use this when the LLM provider rate-limits or errors, so the
 					frontend still receives a complete 5-view package.
 					"""
-					err_msg = str(err).replace("\n", " ") if err else "Unknown error"
+					if err:
+						logger.error(f"Fallback triggered for {view_name}: {err}", exc_info=True)
 					mermaid = (
 						"flowchart TD\n"
 						"  Client[Client] --> API[API]\n"
@@ -1155,14 +1154,12 @@ async def submit_question(
 							"- Generation degraded due to an LLM/provider error (showing safe fallback).\n"
 							"- This view still shows the core building blocks and their primary links.\n"
 							"- Retry later if you want richer domain-specific details.\n"
-							"- Error: " + _safe_ascii(err_msg) + "\n"
 							"- The remaining views may also degrade if the provider is rate-limited.\n"
 							"Goal: Provide a stable multi-view package even under partial failures."
 						)
 					else:
 						explanation = (
-							"NOTE: LLM generation failed for this view; showing the canonical 5-layer template.\n"
-							"Error: " + _safe_ascii(err_msg) + "\n\n" + layer_scaffold
+							"NOTE: LLM generation failed for this view; showing the canonical 5-layer template.\n\n" + layer_scaffold
 						)
 
 					return mermaid, explanation
@@ -1304,9 +1301,8 @@ async def submit_question(
 				yield "event: end\n\n"
 				
 			except Exception as e:
-				logger.error(f"Architecture generation failed: {e}")
-				err_msg = str(e).replace(chr(10), " ")
-				yield f"data: ⚠️ **Generation failed:** {err_msg}\n\n"
+				logger.error(f"Architecture generation failed: {e}", exc_info=True)
+				yield f"data: ⚠️ **Generation failed.** Please try again.\n\n"
 				yield "event: end\n\n"
 
 		if payload.stream:

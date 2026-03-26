@@ -54,11 +54,7 @@ async def get_redis() -> Optional[_RedisType]:
     if not url or not _REDIS_IMPORT_OK:
         return None
 
-    if _redis is not None:
-        return _redis
-
     async with _redis_lock:
-        # Double-check after acquiring lock
         if _redis is not None:
             return _redis
         try:
@@ -78,5 +74,5 @@ async def close_redis() -> None:
     try:
         await _redis.close()
     except Exception:
-        pass
+        logger.warning("Redis close failed", exc_info=True)
     _redis = None

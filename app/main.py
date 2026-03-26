@@ -120,6 +120,16 @@ async def lifespan(app: FastAPI):
     # Start in-memory rate limiter cleanup loop
     from app.middleware.rate_limit import rate_limiter
     rate_limiter.start()
+
+    # Prune old audit log entries (GDPR/DPDP retention policy).
+    # Runs once at startup; does nothing if analytics_path is not configured.
+    retention_days = int(getattr(settings, "audit_log_retention_days", 90) or 0)
+    if retention_days > 0:
+        try:
+            from app.utils.audit import auditor as _auditor
+            await _auditor.prune(retain_days=retention_days)
+        except Exception as _prune_err:
+            logger.warning("Audit log pruning failed (non-fatal): %s", _prune_err)
     
     if INTERVIEW_INTELLIGENCE_AVAILABLE:
         try:

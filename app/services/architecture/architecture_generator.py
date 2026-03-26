@@ -4,82 +4,18 @@ from __future__ import annotations
 import logging
 from typing import List, Dict, Optional, Any
 from enum import Enum
-from datetime import datetime
 from pydantic import BaseModel, Field
-
-from app.utils.time import utcnow
 
 from app.config import settings
 from app.utils.architecture_layers import get_layer_model
 from app.utils.domain_profile import build_domain_profile, render_domain_hints
+from app.schemas import ArchitectureViewType, DiagramStyle
 
 logger = logging.getLogger(__name__)
 
 
 _LAYER_EXPLANATIONS_TOKEN = "<<LAYER_EXPLANATIONS>>"
 
-
-class ArchitectureViewType(str, Enum):
-    """Types of architecture views - each tells one story."""
-    
-    SYSTEM_OVERVIEW = "system_overview"
-    """High-level building blocks - what the system is made of"""
-    
-    REQUEST_FLOW = "request_flow"
-    """Critical business path - what happens during user action"""
-    
-    ASYNC_PROCESSING = "async_processing"
-    """Background & event handling - scalability & non-blocking behavior"""
-    
-    DATA_MODEL = "data_model"
-    """Storage & persistence - where data lives and why"""
-    
-    DEPLOYMENT = "deployment"
-    """Infrastructure & scaling - how it's deployed and scaled"""
-    
-    OBSERVABILITY = "observability"
-    """Monitoring & reliability - how we keep it healthy"""
-    
-    SECURITY = "security"
-    """Authentication, authorization, and protection"""
-
-
-class DiagramStyle(str, Enum):
-    """Visual style presets for diagrams."""
-    
-    MODERN = "modern"
-    """Clean, professional, enterprise-ready"""
-    
-    MINIMAL = "minimal"
-    """Simple, focused, no decorations"""
-    
-    DETAILED = "detailed"
-    """Rich annotations and explanations"""
-
-
-class ArchitectureView(BaseModel):
-    """A single architectural view with its diagram and metadata."""
-    
-    view_type: ArchitectureViewType
-    title: str = Field(..., description="Human-readable title")
-    description: str = Field(..., description="What this view explains")
-    mermaid_code: str = Field(..., description="Mermaid diagram code")
-    key_insights: List[str] = Field(default_factory=list, description="3-5 key takeaways")
-    complexity_level: str = Field(..., description="junior|mid|senior|architect")
-    estimated_explanation_time: str = Field(..., description="How long to explain (e.g., '2 min')")
-    
-
-class ArchitecturePackage(BaseModel):
-    """Complete architecture with multiple coordinated views."""
-    
-    system_name: str = Field(..., description="Name of the system being designed")
-    description: str = Field(..., description="Brief system description")
-    views: List[ArchitectureView] = Field(..., description="All architectural views")
-    view_order: List[ArchitectureViewType] = Field(..., description="Recommended viewing order")
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    generated_at: datetime = Field(default_factory=utcnow)
-    total_views: int = Field(..., description="Number of views generated")
-    
 
 class ViewGenerationPrompt(BaseModel):
     """Prompt configuration for generating a specific view."""

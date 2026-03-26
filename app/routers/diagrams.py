@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 import httpx
 import logging
 import os
+import re
+import time
+from collections import OrderedDict
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -26,6 +30,35 @@ from app.services.core.redis_client import get_redis, redis_enabled
 
 
 router = APIRouter()
+
+# Module-level Mermaid render cache (LRU)
+_mermaid_cache: OrderedDict = OrderedDict()
+_MERMAID_CACHE_MAX = 100
+
+# Per-IP rate limiter for the render endpoint
+_render_ip_hits: dict = {}
+_render_lock = asyncio.Lock()
+_RENDER_RATE_LIMIT = 60
+_RENDER_RATE_WINDOW = 60
+
+
+async def _rate_limit_render(request: Request):
+    """Lightweight per-IP burst limiter for the render endpoint."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    async with _render_lock:
+        hits = _render_ip_hits.get(client_ip, [])
+        hits = [t for t in hits if now - t < _RENDER_RATE_WINDOW]
+        if len(hits) >= _RENDER_RATE_LIMIT:
+            raise HTTPException(status_code=429, detail="Render rate limit exceeded")
+        hits.append(now)
+        _render_ip_hits[client_ip] = hits
+        # Evict all stale IPs when dict grows too large to prevent unbounded memory.
+        # Preserve only the current client's entry to avoid losing their rate state.
+        if len(_render_ip_hits) > 5000:
+            current_hits = _render_ip_hits[client_ip]
+            _render_ip_hits.clear()
+            _render_ip_hits[client_ip] = current_hits
 
 
 def _fix_duplicate_diagram_declarations(text: str) -> str:
@@ -54,19 +87,19 @@ def _ultra_simplify_mermaid(text: str) -> str:
 
 
 def _svg_placeholder(message: str) -> str:
-        """Return a tiny SVG placeholder indicating render failure.
-        Keeps UI consistent by always returning an SVG instead of a 5xx.
+    """Return a tiny SVG placeholder indicating render failure.
+    Keeps UI consistent by always returning an SVG instead of a 5xx.
+    """
+    safe_msg = (message or "Mermaid render failed").replace("<", "&lt;").replace(">", "&gt;")
+    return (
         """
-        safe_msg = (message or "Mermaid render failed").replace("<", "&lt;").replace(">", "&gt;")
-        return (
-                """
 <svg xmlns="http://www.w3.org/2000/svg" width="640" height="120" viewBox="0 0 640 120" role="img" aria-label="Mermaid render failed">
     <rect x="1" y="1" width="638" height="118" rx="8" ry="8" fill="#fff8e1" stroke="#f57f17"/>
     <text x="20" y="50" font-family="Inter, Arial, sans-serif" font-size="16" fill="#333">Mermaid render unavailable</text>
     <text x="20" y="80" font-family="Inter, Arial, sans-serif" font-size="13" fill="#555">""" + safe_msg + """</text>
 </svg>
-                """
-        ).strip()
+        """
+    ).strip()
 
 
 def _convert_layer_nodes_to_subgraphs(code: str) -> str:
@@ -86,6 +119,8 @@ def _convert_layer_nodes_to_subgraphs(code: str) -> str:
     """
     src = code
     if "subgraph" in src:
+        return src
+    if len(src) > 20_000:
         return src
 
     import re as _re
@@ -209,6 +244,9 @@ def _add_sequential_step_numbers(code: str, force: bool = False) -> str:
     """
     import re as _re
     
+    if len(code) > 20_000:
+        return code
+    
     # Check if edges already have step numbers (e.g., |1. or |2. or |1|)
     if not force and _re.search(r'\|\d+[\.\)\|]', code):
         logger.debug("[MERMAID] Edges already have step numbers, skipping auto-numbering")
@@ -273,7 +311,7 @@ def _add_sequential_step_numbers(code: str, force: bool = False) -> str:
 
 
 @router.post("/render_mermaid")
-async def render_mermaid(payload: dict):
+async def render_mermaid(payload: dict, _rl=Depends(_rate_limit_render)):
     """Render Mermaid code to SVG via Kroki backend.
 
     Expected payload: { "code": "flowchart LR...", "theme": "default|dark|forest|neutral", "addStepNumbers": true/false }
@@ -355,66 +393,6 @@ async def render_mermaid(payload: dict):
 
     theme = (payload.get("theme") or "").strip() or "default"
 
-    # Optional: style preset for modern elegant look without changing semantics
-    # DISABLED for reliability - style injection causes parse errors in Kroki
-    # Frontend should use Mermaid.js client-side rendering for styled diagrams
-    style = (payload.get("style") or "").strip().lower()
-    # Avoid adding heavy style blocks for very large diagrams
-    if False and style == "modern" and not code.lstrip().startswith("%%{init") and len(code) < 3000:
-        size = (payload.get("size") or "large").strip().lower()  # Changed default from "medium" to "large"
-        responsive = str(payload.get("responsive", "true")).strip().lower() == "true"
-        
-        if size == "compact":
-            font_size = "11px"; padding_val = 10; wrap_w = 280; node_sp = 40; rank_sp = 50; diag_pad = 10
-        elif size == "large":
-            font_size = "16px"; padding_val = 20; wrap_w = 450; node_sp = 80; rank_sp = 120; diag_pad = 24  # Increased all values
-        else:  # medium
-            font_size = "14px"; padding_val = 16; wrap_w = 350; node_sp = 60; rank_sp = 80; diag_pad = 16  # Increased all values
-
-        # Build init block with ACTUAL newlines (not escaped)
-        init = "%%{init: {\n"
-        init += "  'theme': 'neutral',\n"
-        init += "  'themeVariables': {\n"
-        init += f"    'fontSize':'{font_size}', 'fontFamily':'Inter, sans-serif',\n"
-        init += "    'lineColor':'#666', 'primaryColor':'#f8f9fa',\n"
-        init += f"    'edgeLabelBackground':'#ffffff', 'padding':{padding_val}, 'curve':'basis'\n"
-        init += "  },\n"
-        init += "  'flowchart': {\n"
-        init += "    'htmlLabels': true,\n"
-        init += f"    'useMaxWidth': {str(responsive).lower()},\n"
-        init += f"    'nodeSpacing': {node_sp},\n"
-        init += f"    'rankSpacing': {rank_sp},\n"
-        init += f"    'diagramPadding': {diag_pad}\n"
-        init += "  }\n"
-        init += "}}%%\n"
-        
-        # Only add classDefs if they don't already exist (avoid duplicates)
-        style_additions = ""
-        if "linkStyle" not in code:
-            style_additions += "\nlinkStyle default stroke:#666,stroke-width:1.3px;\n"
-        
-        # Only add default classDefs if user hasn't defined their own
-        if "classDef" not in code:
-            style_additions += (
-                "classDef client fill:#e3f2fd,stroke:#1976d2,color:#000\n"
-                "classDef network fill:#fff3e0,stroke:#e65100,color:#000\n"
-                "classDef service fill:#fff8e1,stroke:#f57f17,color:#000\n"
-                "classDef storage fill:#f1f8e9,stroke:#2e7d32,color:#000\n"
-                "classDef queue fill:#e0f7fa,stroke:#006064,color:#000\n"
-                "classDef cache fill:#f3e5f5,stroke:#6a1b9a,color:#000\n"
-            )
-        
-        code = init + code + style_additions
-
-    # NOTE: Do not apply additional edge-label transforms here.
-    # (Historically this double-applied numbering and produced invalid labels like
-    # `-->| (8) [Mobile Push]|`, which Kroki rejects.)
-
-    # Check in-memory cache (LRU OrderedDict)
-    from collections import OrderedDict
-    if not hasattr(render_mermaid, '_cache'):
-        render_mermaid._cache = OrderedDict()
-
     import base64
     
     # Use async httpx instead of blocking requests
@@ -461,15 +439,15 @@ async def render_mermaid(payload: dict):
         ck = _attempt_cache_key(label, attempt_code)
 
         # First-level cache: in-process LRU
-        if ck in render_mermaid._cache:
+        if ck in _mermaid_cache:
             # LRU: mark as recently used
             try:
-                render_mermaid._cache.move_to_end(ck)
+                _mermaid_cache.move_to_end(ck)
             except Exception:
                 pass
             logger.debug(f"✅ Cache hit (local) for diagram {ck[:8]} ({label})")
             return Response(
-                content=render_mermaid._cache[ck],
+                content=_mermaid_cache[ck],
                 media_type="image/svg+xml",
                 headers={"Cache-Control": "public, max-age=3600"}
             )
@@ -483,8 +461,8 @@ async def render_mermaid(payload: dict):
 
             if cached_svg:
                 try:
-                    render_mermaid._cache[ck] = cached_svg
-                    render_mermaid._cache.move_to_end(ck)
+                    _mermaid_cache[ck] = cached_svg
+                    _mermaid_cache.move_to_end(ck)
                 except Exception:
                     pass
                 logger.debug(f"✅ Cache hit (redis) for diagram {ck[:8]} ({label})")
@@ -588,10 +566,10 @@ async def render_mermaid(payload: dict):
         label_for_cache = (locals().get("used_label") or "base")
         code_for_cache = (locals().get("used_code") or code_base)
         cache_key = _attempt_cache_key(label_for_cache, code_for_cache)
-        render_mermaid._cache[cache_key] = svg
+        _mermaid_cache[cache_key] = svg
         # LRU: mark as recently used
         try:
-            render_mermaid._cache.move_to_end(cache_key)
+            _mermaid_cache.move_to_end(cache_key)
         except Exception:
             pass
 
@@ -607,17 +585,14 @@ async def render_mermaid(payload: dict):
         cache_key = "nocache"
     
     # Limit cache size to prevent memory issues (LRU eviction)
-    max_cache_items = 100
     try:
-        while len(render_mermaid._cache) > max_cache_items:
-            # pop least-recently-used
-            render_mermaid._cache.popitem(last=False)
+        while len(_mermaid_cache) > _MERMAID_CACHE_MAX:
+            _mermaid_cache.popitem(last=False)
     except Exception:
-        # Fall back to a simple trim if the cache isn't an OrderedDict for some reason
-        if len(render_mermaid._cache) > max_cache_items:
-            keys_to_remove = list(render_mermaid._cache.keys())[:20]
+        if len(_mermaid_cache) > _MERMAID_CACHE_MAX:
+            keys_to_remove = list(_mermaid_cache.keys())[:20]
             for k in keys_to_remove:
-                del render_mermaid._cache[k]
+                del _mermaid_cache[k]
     
     if cache_key != "nocache":
         logger.debug(f"✅ Successfully rendered diagram {cache_key[:8]}")
@@ -633,6 +608,7 @@ async def render_mermaid(payload: dict):
 async def render_mermaid_get(
     code: str = Query(default=""),
     theme: str = Query(default="default"),
+    _rl=Depends(_rate_limit_render),
 ):
     """GET variant for <img src> compatibility.
 
@@ -816,12 +792,12 @@ Format as a simple bullet list, one insight per line, no markdown formatting."""
         logger.error(f"❌ Architecture generation failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate architecture: {str(e)}"
+            detail="Architecture generation failed. Please try again."
         )
 
 
 @router.get("/architecture/available_views")
-async def get_available_views():
+async def get_available_views(_api_key: str = Depends(verify_api_key)):
     """
     📋 Get list of all available architecture view types with descriptions.
     
@@ -852,8 +828,9 @@ async def get_available_views():
 
 @router.post("/architecture/recommend_views")
 async def recommend_views(
-    system_description: str,
-    user_level: str = "mid"
+    system_description: str = Query(..., min_length=10, max_length=2000),
+    user_level: str = Query(default="mid", pattern=r"^(junior|mid|senior|architect)$"),
+    _api_key: str = Depends(verify_api_key),
 ):
     """
     🎯 Get recommended views for a system description.
@@ -913,7 +890,10 @@ def _get_recommendation_reason(view_type: ArchitectureViewType, system_desc: str
 
 
 @router.post("/architecture/export_markdown")
-async def export_architecture_markdown(package: ArchitecturePackageOut):
+async def export_architecture_markdown(
+    package: ArchitecturePackageOut,
+    _api_key: str = Depends(verify_api_key),
+):
     """
     📄 Export architecture package as formatted Markdown.
     
@@ -968,10 +948,12 @@ async def export_architecture_markdown(package: ArchitecturePackageOut):
     
     markdown_content = "\n".join(md_lines)
     
+    safe_name = re.sub(r'[^\w\s-]', '', package.system_name).strip().replace(' ', '_')[:100]
+    
     return Response(
         content=markdown_content,
         media_type="text/markdown",
         headers={
-            "Content-Disposition": f"attachment; filename=\"{package.system_name.replace(' ', '_')}_architecture.md\""
+            "Content-Disposition": f"attachment; filename=\"{safe_name}_architecture.md\""
         }
     )

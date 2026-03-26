@@ -136,6 +136,7 @@ def main() -> None:
 
     migrated_sessions = 0
     migrated_tabs = 0
+    files_to_delete: list[Path] = []
 
     with get_db_context() as db:
         for p in session_files:
@@ -148,10 +149,7 @@ def main() -> None:
             if ok:
                 migrated_sessions += 1
                 if delete_sources:
-                    try:
-                        p.unlink()
-                    except Exception:
-                        pass
+                    files_to_delete.append(p)
 
         for hp in history_files:
             # data/history/<user_id>_history.jsonl
@@ -161,12 +159,17 @@ def main() -> None:
             user_id = name[: -len("_history.jsonl")]
             migrated_tabs += _migrate_history_file(db, user_id=user_id, history_path=hp)
             if delete_sources:
-                try:
-                    hp.unlink()
-                except Exception:
-                    pass
+                files_to_delete.append(hp)
 
         db.commit()
+
+    # Delete source files only AFTER successful commit
+    if delete_sources:
+        for p in files_to_delete:
+            try:
+                p.unlink()
+            except Exception:
+                pass
 
     print(f"✅ Migration complete: sessions={migrated_sessions}, history_tabs={migrated_tabs}")
     if delete_sources:

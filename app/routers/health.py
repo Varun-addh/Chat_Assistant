@@ -19,25 +19,26 @@ router = APIRouter(tags=["Health"])
 
 async def check_database() -> Dict[str, Any]:
     """Check database connectivity and response time."""
+    db = None
     try:
         start = datetime.now()
         db = SessionLocal()
-        try:
-            db.execute(text("SELECT 1"))
-            db.commit()
-            latency_ms = (datetime.now() - start).total_seconds() * 1000
-            return {
-                "status": "healthy",
-                "latency_ms": round(latency_ms, 2)
-            }
-        finally:
-            db.close()
+        db.execute(text("SELECT 1"))
+        db.commit()
+        latency_ms = (datetime.now() - start).total_seconds() * 1000
+        return {
+            "status": "healthy",
+            "latency_ms": round(latency_ms, 2)
+        }
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
         return {
             "status": "unhealthy",
             "error": str(e)
         }
+    finally:
+        if db is not None:
+            db.close()
 
 
 async def check_llm_service() -> Dict[str, Any]:

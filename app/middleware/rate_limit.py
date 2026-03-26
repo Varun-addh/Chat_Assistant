@@ -341,7 +341,7 @@ class RedisRateLimiter:
                 eps = []
 
             if endpoint:
-                eps = [endpoint] if endpoint in eps else [endpoint]
+                eps = [endpoint] if endpoint in eps else []
 
             if not eps:
                 return {}

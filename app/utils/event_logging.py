@@ -22,6 +22,7 @@ from app.config import settings
 from app.models import EventRecord
 
 
+
 _WS_RE = re.compile(r"\s+")
 
 

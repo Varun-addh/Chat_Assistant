@@ -1,7 +1,7 @@
 from app.services.architecture.architecture_generator import (
     get_architecture_generator,
-    ArchitectureViewType,
 )
+from app.schemas import ArchitectureViewType
 
 
 def test_system_overview_always_clamped_tight():

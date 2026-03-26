@@ -12,7 +12,6 @@ Contract:
   - ended_early / questions_skipped metadata
   - evaluations[] each contain model_answer and user_answer
   - skipped_questions[] list unanswered questions
-  - summary object still present for backward compatibility
 """
 
 from __future__ import annotations
@@ -60,8 +59,6 @@ def test_end_session_flattens_summary_fields(monkeypatch):
     assert data["status"] == "completed"
     assert data["total_time_seconds"] == 148
     assert data["score_range"] == 0.0
-    assert isinstance(data.get("summary"), dict)
-    assert data["summary"]["total_time_seconds"] == 148
 
 
 def test_end_session_early_termination_metadata():
@@ -127,10 +124,6 @@ def test_end_session_early_termination_metadata():
     skipped = data["skipped_questions"]
     assert len(skipped) == 3
     assert skipped[0]["question"] == "Design a URL shortener."
-
-    # Summary nested for backward compat
-    assert isinstance(data["summary"], dict)
-    assert data["summary"]["ended_early"] is True
 
 
 def test_end_session_model_answer_in_evaluations():

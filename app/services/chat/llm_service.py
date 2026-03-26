@@ -665,116 +665,6 @@ class LLMService:
 		except Exception:
 			return []
 
-	def _process_thinking_tags(self, text: str) -> str:
-		return response_postprocess._process_thinking_tags(self, text)
-
-	def _fix_markdown_syntax(self, text: str) -> str:
-		return response_postprocess._fix_markdown_syntax(self, text)
-
-	def _split_runon_plus_bullets(self, text: str) -> str:
-		return response_postprocess._split_runon_plus_bullets(self, text)
-
-	def _wrap_loose_sql_blocks(self, text: str) -> str:
-		return response_postprocess._wrap_loose_sql_blocks(self, text)
-
-	def _drop_empty_example_code_blocks(self, text: str) -> str:
-		return response_postprocess._drop_empty_example_code_blocks(self, text)
-
-	def _is_internal_prompt_leak_line(self, line: str) -> bool:
-		return response_postprocess._is_internal_prompt_leak_line(self, line)
-
-	def _strip_internal_prompt_leakage(self, text: str) -> str:
-		return response_postprocess._strip_internal_prompt_leakage(self, text)
-
-	def _remove_forbidden_side_headings(self, text: str) -> str:
-		return response_postprocess._remove_forbidden_side_headings(self, text)
-
-	def _break_wall_of_text_paragraphs(self, text: str) -> str:
-		return response_postprocess._break_wall_of_text_paragraphs(self, text)
-
-	def _rewrite_onboarding_brochure_if_present(self, text: str) -> str:
-		return response_postprocess._rewrite_onboarding_brochure_if_present(self, text)
-
-	def _format_response(self, text: str) -> str:
-		return response_postprocess._format_response(self, text)
-
-
-	def _normalize_colon_label_lists(self, text: str) -> str:
-		return response_postprocess._normalize_colon_label_lists(self, text)
-
-
-	def _fix_unbalanced_markdown_emphasis(self, text: str) -> str:
-		return response_postprocess._fix_unbalanced_markdown_emphasis(self, text)
-
-
-	def _normalize_markdown_bullets(self, text: str) -> str:
-		return response_postprocess._normalize_markdown_bullets(self, text)
-
-
-	def _format_headings_bold(self, text: str) -> str:
-		return response_postprocess._format_headings_bold(self, text)
-
-	def _strip_latex_math(self, text: str) -> str:
-		return response_postprocess._strip_latex_math(self, text)
-
-	def _sanitize_mermaid_syntax(self, text: str) -> str:
-		return response_postprocess._sanitize_mermaid_syntax(self, text)
-
-	def _normalize_mermaid_blocks(self, text: str) -> str:
-		return response_postprocess._normalize_mermaid_blocks(self, text)
-
-	def _contains_mermaid(self, text: str) -> bool:
-		return response_postprocess._contains_mermaid(self, text)
-
-	def _strip_labeled_bullets_in_complete_answer(self, text: str) -> str:
-		return response_postprocess._strip_labeled_bullets_in_complete_answer(self, text)
-
-	def _strip_leading_bold_labels_globally(self, text: str) -> str:
-		return response_postprocess._strip_leading_bold_labels_globally(self, text)
-
-	def _deplaceholderize(self, text: str) -> str:
-		return response_postprocess._deplaceholderize(self, text)
-
-	# Note: We intentionally removed global bold stripping to allow bold for headings, side headings, and keywords.
-	
-	def _format_summary_sections(self, text: str) -> str:
-		return response_postprocess._format_summary_sections(self, text)
-	
-	def _clean_table_markdown_artifacts(self, text: str) -> str:
-		return response_postprocess._clean_table_markdown_artifacts(self, text)
-	
-	def _is_table_line(self, line: str) -> bool:
-		return response_postprocess._is_table_line(self, line)
-	
-	def _clean_table_line(self, line: str) -> str:
-		return response_postprocess._clean_table_line(self, line)
-	
-	def _format_tables(self, text: str) -> str:
-		return response_postprocess._format_tables(self, text)
-	
-	def _is_table_row(self, line: str) -> bool:
-		return response_postprocess._is_table_row(self, line)
-
-	def _looks_like_pipe_table(self, text: str) -> bool:
-		return response_postprocess._looks_like_pipe_table(self, text)
-	
-	def _create_markdown_table(self, table_lines: list[str]) -> str:
-		return response_postprocess._create_markdown_table(self, table_lines)
-
-	def _is_code_content(self, text: str) -> bool:
-		return response_postprocess._is_code_content(self, text)
-
-	def _is_explanation_content(self, text: str) -> bool:
-		return response_postprocess._is_explanation_content(self, text)
-
-	def _clean_code_formatting(self, text: str) -> str:
-		return response_postprocess._clean_code_formatting(self, text)
-
-	def _clean_explanation_formatting(self, text: str) -> str:
-		return response_postprocess._clean_explanation_formatting(self, text)
-
-	def _structural_integrity_check(self, text: str) -> str:
-		return response_postprocess._structural_integrity_check(self, text)
 
 	def _estimate_response_complexity(self, question: str) -> int:
 		"""Estimate response complexity and suggest token limit"""
@@ -2763,6 +2653,10 @@ class LLMService:
 				yield text_once
 
 
+
+# Attach all text post-processing functions from response_postprocess as methods
+# on LLMService so callers can use self._format_response(...) etc.
+response_postprocess.attach_text_postprocess_methods(LLMService)
 
 # Factory to get an LLMService for a specific provider (gemini/groq)
 _llm_service_instances = {}

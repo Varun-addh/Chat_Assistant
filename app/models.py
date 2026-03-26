@@ -98,7 +98,7 @@ class SessionRecord(Base):
     """Track user sessions for Q&A, interviews, etc."""
     __tablename__ = "session_records"
     
-    id = Column(String, primary_key=True)  # Use existing session IDs
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))  # Use existing session IDs
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     
     # Session type
@@ -131,7 +131,7 @@ class MockInterviewSessionRecord(Base):
 
     __tablename__ = "mock_interview_sessions"
 
-    session_id = Column(String, primary_key=True)
+    session_id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, nullable=False, index=True)
     status = Column(String, nullable=False, default="active", index=True)
     session_payload = Column(JSON, nullable=False)
@@ -209,7 +209,7 @@ class ChatSession(Base):
 
     __tablename__ = "chat_sessions"
 
-    id = Column(String, primary_key=True)  # session_id
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))  # session_id
     user_id = Column(String, nullable=False, index=True)
 
     # Session content/state
@@ -238,7 +238,7 @@ class HistoryTabRecord(Base):
 
     __tablename__ = "history_tabs"
 
-    tab_id = Column(String, primary_key=True)
+    tab_id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, nullable=False, index=True)
 
     query = Column(Text, nullable=False)
@@ -388,6 +388,7 @@ class PracticeSessionMedia(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String, nullable=False, index=True)
+    user_id = Column(String, nullable=True, index=True)
 
     # screen | camera | combined
     media_type = Column(String, nullable=False, index=True)
@@ -406,6 +407,7 @@ class PracticeProctoringEvent(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String, nullable=False, index=True)
+    user_id = Column(String, nullable=True, index=True)
 
     # e.g. SCREEN_STOPPED, CAMERA_STOPPED, TAB_SWITCH, WINDOW_MINIMIZED
     event_type = Column(String, nullable=False, index=True)

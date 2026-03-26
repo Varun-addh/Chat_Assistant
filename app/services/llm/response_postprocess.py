@@ -719,6 +719,18 @@ def _normalize_colon_label_lists(self, text: str) -> str:
 				if _is_list_or_heading(l):
 					break
 				if bold_label_re.match(s) or plain_label_re.match(s):
+					# Do not include known section-heading labels in the bullet run.
+					# These should remain as visual section headings, not list items.
+					_lbl_m = bold_label_re.match(s) or plain_label_re.match(s)
+					_lbl = _lbl_m.group(1).strip() if _lbl_m else ""
+					_HEADING_LABELS = re.compile(
+						r"^(time\s+complexity|space\s+complexity|complexity|approach|"
+						r"algorithm|solution|explanation|overview|summary|output|"
+						r"input|edge\s+cases?|trade.?offs?|implementation|example|examples?)$",
+						re.IGNORECASE,
+					)
+					if _HEADING_LABELS.match(_lbl):
+						break  # stop collecting — treat as heading, not list item
 					collected.append(l)
 					j += 1
 					continue
@@ -856,14 +868,20 @@ def _normalize_markdown_bullets(self, text: str) -> str:
 
 
 def _format_headings_bold(self, text: str) -> str:
-	"""Ensure all headings are properly bolded, but never touch fenced code blocks."""
+	"""Ensure all headings are properly bolded, never touch fenced code blocks.
+
+	Also promotes standalone **Bold** or **Bold:** lines that appear on their
+	own line (preceded by a blank line or at the top of the document) to proper
+	## headings, so coding/explanation section titles render as heading elements
+	in the UI rather than as inline bold spans.
+	"""
 	import re
 
 	lines = text.split("\n")
 	formatted_lines = []
 	in_code = False
 
-	for line in lines:
+	for i, line in enumerate(lines):
 		stripped = line.strip()
 		# Toggle code fence regions
 		if stripped.startswith("```"):
@@ -871,21 +889,38 @@ def _format_headings_bold(self, text: str) -> str:
 			formatted_lines.append(line)
 			continue
 
-		if not in_code and stripped.startswith(("##", "###", "####")):
-			# Extract the heading text (remove the ##, ###, etc.)
-			heading_match = re.match(r"^(#{2,4})\s*(.+)$", stripped)
+		if in_code:
+			formatted_lines.append(line)
+			continue
+
+		# ── Case 1: markdown heading syntax (# through ####) ──
+		if stripped.startswith("#"):
+			heading_match = re.match(r"^(#{1,4})\s*(.+)$", stripped)
 			if heading_match:
 				hashes, heading_text = heading_match.groups()
-				# Check if already bolded
-				if not heading_text.strip().startswith("**") or not heading_text.strip().endswith("**"):
-					formatted_line = f"{hashes} **{heading_text.strip()}**"
-					formatted_lines.append(formatted_line)
-				else:
-					formatted_lines.append(line)
+				ht = heading_text.strip()
+				# Unwrap any existing **..** so we never double-bold.
+				# Handles **Text**, **Text:** and partial wrappings.
+				ht_clean = re.sub(r"^\*\*(.*?)\*\*\s*:?\s*$", r"\1", ht).strip().rstrip(":")
+				if not ht_clean:
+					ht_clean = re.sub(r"\*\*", "", ht).strip().rstrip(":")
+				formatted_lines.append(f"{hashes} **{ht_clean}**")
 			else:
 				formatted_lines.append(line)
-		else:
-			formatted_lines.append(line)
+			continue
+
+		# ── Case 2: standalone **Bold** or **Bold:** line → promote to ## heading ──
+		# Only when the line is ENTIRELY a bold span (nothing else) and is
+		# preceded by a blank line (section boundary) or at the document start.
+		bold_only = re.match(r"^\*\*([A-Z][^*\n]{1,60}?)\*\*\s*:?\s*$", stripped)
+		if bold_only:
+			prev_is_blank = (i == 0) or (lines[i - 1].strip() == "")
+			if prev_is_blank:
+				heading_text = bold_only.group(1).strip().rstrip(":")
+				formatted_lines.append(f"## **{heading_text}**")
+				continue
+
+		formatted_lines.append(line)
 
 	return "\n".join(formatted_lines)
 
@@ -1806,11 +1841,14 @@ def _enforce_size_limit(text: str) -> str:
 def attach_text_postprocess_methods(cls) -> None:
 	"""Attach text-postprocess functions as methods on LLMService."""
 	cls._process_thinking_tags = _process_thinking_tags
+	cls._wrap_loose_sql_blocks = _wrap_loose_sql_blocks
+	cls._drop_empty_example_code_blocks = _drop_empty_example_code_blocks
 	cls._fix_markdown_syntax = _fix_markdown_syntax
 	cls._split_runon_plus_bullets = _split_runon_plus_bullets
 	cls._is_internal_prompt_leak_line = _is_internal_prompt_leak_line
 	cls._strip_internal_prompt_leakage = _strip_internal_prompt_leakage
 	cls._remove_forbidden_side_headings = _remove_forbidden_side_headings
+	cls._break_wall_of_text_paragraphs = _break_wall_of_text_paragraphs
 	cls._rewrite_onboarding_brochure_if_present = _rewrite_onboarding_brochure_if_present
 	cls._format_response = _format_response
 	cls._normalize_colon_label_lists = _normalize_colon_label_lists

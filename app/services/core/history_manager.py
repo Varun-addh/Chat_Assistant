@@ -249,12 +249,14 @@ class HistoryManager:
                     async with aiofiles.open(self.backup_file, 'w', encoding='utf-8') as dst:
                         await dst.write(content)
             
-            # Write new history atomicaly (write to temp file then rename is better, 
-            # but for now we just use a lock + backup)
-            async with aiofiles.open(self.history_file, 'w', encoding='utf-8') as f:
+            # Atomic write: write to temp file then os.replace() to avoid
+            # partial writes corrupting the history on crash/power loss.
+            tmp_path = self.history_file.with_suffix(".tmp")
+            async with aiofiles.open(tmp_path, 'w', encoding='utf-8') as f:
                 for tab in self._tabs.values():
                     line = json.dumps(tab.to_dict(), ensure_ascii=False)
                     await f.write(line + '\n')
+            os.replace(str(tmp_path), str(self.history_file))
             
             logger.debug(f"✅ Saved {len(self._tabs)} tabs to disk for {self.user_id}")
             

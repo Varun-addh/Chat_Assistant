@@ -9,6 +9,7 @@ We never log SMTP credentials.
 
 from __future__ import annotations
 
+import asyncio
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -79,4 +80,19 @@ def send_email_best_effort(*, to_email: str, subject: str, body_text: str) -> bo
     except Exception as e:
         # Do not print body_text (may contain reset links).
         logger.warning("Email send failed (best effort): %s", e)
+        return False
+
+
+async def send_email_async(*, to_email: str, subject: str, body_text: str) -> None:
+    """Async wrapper: runs blocking SMTP send in a thread to avoid freezing the event loop."""
+    await asyncio.to_thread(send_email, to_email=to_email, subject=subject, body_text=body_text)
+
+
+async def send_email_best_effort_async(*, to_email: str, subject: str, body_text: str) -> bool:
+    """Async best-effort email wrapper."""
+    try:
+        await send_email_async(to_email=to_email, subject=subject, body_text=body_text)
+        return True
+    except Exception as e:
+        logger.warning("Async email send failed (best effort): %s", e)
         return False

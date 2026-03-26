@@ -42,10 +42,10 @@ class EvaluationCriteria(BaseModel):
 
 class UserAnswer(BaseModel):
     """User's answer to interview question"""
-    answer_text: str
+    answer_text: str = Field(max_length=50_000)
     time_taken_seconds: Optional[int] = None
     input_method: str = "text"  # text or voice
-    code_solution: Optional[str] = None
+    code_solution: Optional[str] = Field(default=None, max_length=50_000)
     language: Optional[str] = None
 
 
@@ -116,6 +116,20 @@ class EvaluationResult(BaseModel):
     # ENHANCED: Learning resources
     recommended_resources: List[str] = Field(default_factory=list, description="Links/topics to study")
     key_takeaways: List[str] = Field(default_factory=list, description="3-5 main points to remember")
+
+
+_CRITERIA_NAMES = ("correctness", "completeness", "clarity", "confidence", "technical_depth")
+
+
+def compute_criteria_averages(evaluations: List[EvaluationResult]) -> Dict[str, float]:
+    """Compute per-criterion averages across evaluations."""
+    if not evaluations:
+        return {k: 0.0 for k in _CRITERIA_NAMES}
+    n = len(evaluations)
+    return {
+        k: sum(getattr(e.criteria_scores, k) for e in evaluations) / n
+        for k in _CRITERIA_NAMES
+    }
 
 
 class InterviewSession(BaseModel):
@@ -202,6 +216,7 @@ class MockInterviewService:
         self.llm_service = llm_service
         self.interview_service = interview_intelligence_service
         self._session_cache: Dict[str, InterviewSession] = {}
+        self._cache_max_size: int = 500
         self.active_sessions = MockInterviewSessionStore(self)
 
         # One-time import path for legacy JSON sessions.
@@ -224,6 +239,7 @@ class MockInterviewService:
                 rows = (
                     db.query(MockInterviewSessionRecord)
                     .order_by(MockInterviewSessionRecord.updated_at.desc())
+                    .limit(500)
                     .all()
                 )
 
@@ -260,7 +276,11 @@ class MockInterviewService:
                 return None
 
             session = self._deserialize_session(row.session_payload or {})
-            self._session_cache[session_id] = session
+            self._session_cache[session.session_id] = session
+            # Evict oldest entries when cache is full
+            if len(self._session_cache) > self._cache_max_size:
+                oldest = next(iter(self._session_cache))
+                self._session_cache.pop(oldest, None)
             return session
         except Exception as e:
             logger.error("Failed to load mock interview session %s: %s", session_id, e, exc_info=True)
@@ -290,6 +310,10 @@ class MockInterviewService:
                 db.commit()
 
             self._session_cache[session.session_id] = session
+            # Evict oldest entries when cache is full
+            if len(self._session_cache) > self._cache_max_size:
+                oldest = next(iter(self._session_cache))
+                self._session_cache.pop(oldest, None)
         except Exception as e:
             logger.error("Failed to persist mock interview session %s: %s", session.session_id, e, exc_info=True)
 
@@ -719,39 +743,41 @@ CRITICAL RULES:
                 text = text[start:end+1]
         
         # Step 2: Escape control characters (newlines, tabs in string values)
-        # Simple approach: directly replace control chars in the entire text
-        # Then we'll restore structural newlines
+        # Use UUID-tagged markers that cannot appear in LLM output.
+        _NL = '\x00NL\x00'
+        _CR = '\x00CR\x00'
+        _TAB = '\x00TB\x00'
+        _BS = '\x00BS\x00'
+        _FF = '\x00FF\x00'
         
-        # First, escape all control characters
         control_char_map = {
-            '\n': '<<NEWLINE>>',
-            '\r': '<<RETURN>>',
-            '\t': '<<TAB>>',
-            '\b': '<<BACKSPACE>>',
-            '\f': '<<FORMFEED>>'
+            '\n': _NL,
+            '\r': _CR,
+            '\t': _TAB,
+            '\b': _BS,
+            '\f': _FF,
         }
         
         # Replace control chars with placeholders
         for char, placeholder in control_char_map.items():
             text = text.replace(char, placeholder)
         
-        # Now restore structural JSON formatting (newlines between top-level elements)
-        # These are safe and needed for readability
-        text = text.replace('<<NEWLINE>>  ', '\n  ')  # Indentation
-        text = text.replace('<<NEWLINE>>}', '\n}')    # Closing braces
-        text = text.replace('<<NEWLINE>>{', '\n{')    # Opening braces
-        text = text.replace('{<<NEWLINE>>', '{\n')    # After opening brace
-        text = text.replace(',<<NEWLINE>>', ',\n')    # After commas
-        text = text.replace('[<<NEWLINE>>', '[\n')    # After opening bracket
-        text = text.replace('<<NEWLINE>>]', '\n]')    # Before closing bracket
-        text = text.replace(': <<NEWLINE>>', ': \n')  # After colons
+        # Now restore structural JSON formatting
+        text = text.replace(f'{_NL}  ', '\n  ')
+        text = text.replace(f'{_NL}}}', '\n}}')
+        text = text.replace(f'{_NL}{{', '\n{{')
+        text = text.replace(f'{{{_NL}', '{{\n')
+        text = text.replace(f',{_NL}', ',\n')
+        text = text.replace(f'[{_NL}', '[\n')
+        text = text.replace(f'{_NL}]', '\n]')
+        text = text.replace(f': {_NL}', ': \n')
         
-        # Convert remaining placeholders to escaped versions (these are inside strings)
-        text = text.replace('<<NEWLINE>>', '\\n')
-        text = text.replace('<<RETURN>>', '\\r')
-        text = text.replace('<<TAB>>', '\\t')
-        text = text.replace('<<BACKSPACE>>', '\\b')
-        text = text.replace('<<FORMFEED>>', '\\f')
+        # Convert remaining placeholders to escaped versions
+        text = text.replace(_NL, '\\n')
+        text = text.replace(_CR, '\\r')
+        text = text.replace(_TAB, '\\t')
+        text = text.replace(_BS, '\\b')
+        text = text.replace(_FF, '\\f')
 
         
         # Step 3: Fix trailing backslash-quote pattern: "text\" -> "text"
@@ -962,19 +988,26 @@ CRITICAL RULES:
                 technical_depth=float(data.get("technical_depth", 5.0))
             )
             
-            # Calculate overall score (average of criteria)
-            overall_score = (
+            # Use LLM-provided overall_score if present; fall back to criteria average.
+            criteria_avg = (
                 criteria.correctness +
                 criteria.completeness +
                 criteria.clarity +
                 criteria.confidence +
                 criteria.technical_depth
             ) / 5.0
+            raw_overall = data.get("overall_score")
+            if raw_overall is not None:
+                try:
+                    overall_score = max(0.0, min(10.0, float(raw_overall)))
+                except (TypeError, ValueError):
+                    overall_score = criteria_avg
+            else:
+                overall_score = criteria_avg
             
             # Parse enhanced feedback fields
             detailed_strengths = []
             if "detailed_strengths" in data and isinstance(data["detailed_strengths"], list):
-                from app.services.interview.mock_interview_service import DetailedFeedbackItem
                 for item in data["detailed_strengths"]:
                     if isinstance(item, dict):
                         try:
@@ -984,7 +1017,6 @@ CRITICAL RULES:
             
             detailed_weaknesses = []
             if "detailed_weaknesses" in data and isinstance(data["detailed_weaknesses"], list):
-                from app.services.interview.mock_interview_service import DetailedFeedbackItem
                 for item in data["detailed_weaknesses"]:
                     if isinstance(item, dict):
                         try:
@@ -994,7 +1026,6 @@ CRITICAL RULES:
             
             answer_comparisons = []
             if "answer_comparisons" in data and isinstance(data["answer_comparisons"], list):
-                from app.services.interview.mock_interview_service import AnswerComparison
                 for item in data["answer_comparisons"]:
                     if isinstance(item, dict):
                         try:
@@ -1064,10 +1095,23 @@ CRITICAL RULES:
                 else:
                     data[field] = []
             
-            # Extract nested objects (simplified - just get first if exists)
-            data['detailed_strengths'] = []
-            data['detailed_weaknesses'] = []
-            data['answer_comparisons'] = []
+            # Extract nested objects (simplified - get items if available)
+            for nested_field in ('detailed_strengths', 'detailed_weaknesses', 'answer_comparisons'):
+                pattern = rf'["\']?{nested_field}["\']?\s*:\s*\[(.*?)\]'
+                match = re.search(pattern, text, re.DOTALL)
+                if match:
+                    # Try to parse individual objects from the array
+                    obj_pattern = r'\{([^{}]+)\}'
+                    objects = []
+                    for obj_match in re.finditer(obj_pattern, match.group(1)):
+                        obj_text = '{' + obj_match.group(1) + '}'
+                        try:
+                            objects.append(json.loads(obj_text))
+                        except Exception:
+                            pass
+                    data[nested_field] = objects
+                else:
+                    data[nested_field] = []
             
             logger.info(f"Regex extraction recovered {len(data)} fields")
             return data
@@ -1081,67 +1125,70 @@ CRITICAL RULES:
         question: InterviewQuestion,
         answer: UserAnswer
     ) -> EvaluationResult:
-        """Fallback evaluation when LLM fails"""
-        
+        """Fallback evaluation when LLM fails.
+
+        Uses keyword-overlap with expected points for a more meaningful score
+        than pure word-count, while still being cheap and deterministic.
+        """
         logger.info("Using basic evaluation fallback")
-        
-        # Simple heuristic based on answer length
-        answer_length = len(answer.answer_text.split())
+
+        answer_words = set(answer.answer_text.lower().split())
         has_code = bool(answer.code_solution)
-        
-        # Score based on length and code presence
-        base_score = min(10, max(3, answer_length / 20))
+
+        # Keyword overlap with expected points gives a rough relevance signal.
+        expected = question.expected_points or []
+        if expected:
+            hits = sum(
+                1 for pt in expected
+                if any(w in answer_words for w in pt.lower().split())
+            )
+            relevance_ratio = hits / len(expected)
+        else:
+            # No expected points — fall back to modest length heuristic.
+            relevance_ratio = min(1.0, len(answer_words) / 80)
+
+        base_score = round(3.0 + relevance_ratio * 5.0, 1)  # range 3-8
         if has_code:
-            base_score = min(10, base_score + 2)
-        
+            base_score = min(10.0, base_score + 1.0)
+
         criteria = EvaluationCriteria(
             correctness=base_score,
-            completeness=base_score - 0.5,
+            completeness=max(1.0, base_score - 0.5),
             clarity=base_score,
-            confidence=base_score - 1,
-            technical_depth=base_score - 1.5
+            confidence=max(1.0, base_score - 0.5),
+            technical_depth=max(1.0, base_score - 1.0),
         )
-        
-        # Generate detailed feedback based on answer characteristics
+
         performance_summary = (
-            f"Your answer contains approximately {answer_length} words"
-            f"{' and includes code implementation' if has_code else ''}. "
-            f"This evaluation is based on automatic analysis. "
-            f"For more detailed AI-powered feedback on technical accuracy, completeness, "
-            f"and depth, please ensure the evaluation service is properly configured."
+            "This evaluation was generated by an automatic fallback because the "
+            "AI evaluation service was temporarily unavailable. Scores are approximate."
         )
-        
+
         detailed_feedback = (
-            f"Based on automatic analysis of your response to the {question.difficulty} level "
-            f"{question.interview_type} question about {question.topic}, your answer demonstrates "
-            f"{'good engagement with' if answer_length > 50 else 'basic coverage of'} the topic. "
-            f"{'Your code solution shows practical application. ' if has_code else ''}"
-            f"To receive comprehensive feedback including assessment of technical correctness, "
-            f"identification of missing key points, specific improvement suggestions, and follow-up "
-            f"questions, the AI evaluation service needs to be available. "
-            f"{'Consider elaborating more on your approach and reasoning.' if answer_length < 50 else ''}"
+            f"Your response to this {question.difficulty.value} {question.interview_type.value} "
+            f"question about {question.topic} matched {int(relevance_ratio * 100)}% of the "
+            f"expected key points. For comprehensive AI-powered feedback, please retry "
+            f"when the evaluation service is available."
         )
-        
-        result = EvaluationResult(
+
+        return EvaluationResult(
             overall_score=round(base_score, 1),
             criteria_scores=criteria,
-            strengths=["Provided a response to the question", "Engaged with the interview process"],
-            weaknesses=["Detailed AI evaluation currently unavailable", "Manual review recommended for accuracy"],
-            missing_points=["Comprehensive technical analysis pending"],
+            strengths=["Provided a response to the question"],
+            weaknesses=["Detailed AI evaluation currently unavailable"],
+            missing_points=[
+                pt for pt in expected
+                if not any(w in answer_words for w in pt.lower().split())
+            ][:5],
             improvement_suggestions=[
                 "Retry submission to get AI-powered detailed feedback",
                 "Ensure response covers key aspects of the question",
-                "Include examples or code where applicable"
             ],
             performance_summary=performance_summary,
             detailed_feedback=detailed_feedback,
             rating_category="Fair",
-            follow_up_questions=[]
+            follow_up_questions=[],
         )
-        
-        logger.info(f"Basic evaluation result: score={result.overall_score}, category={result.rating_category}")
-        
-        return result
     
     async def _generate_session_questions(
         self,
@@ -1287,6 +1334,11 @@ CRITICAL RULES:
                 "Tell me about a time you faced a difficult challenge at work",
                 "Describe a situation where you had to work with a difficult team member",
                 "Give an example of when you showed leadership"
+            ],
+            InterviewType.SYSTEM_DESIGN: [
+                "Design a URL shortener service like bit.ly",
+                "Design a notification system for a social media platform",
+                "Design a distributed cache like Redis"
             ],
             InterviewType.TECHNICAL: [
                 "Explain the difference between processes and threads",
@@ -1510,30 +1562,14 @@ JSON:"""
         """Identify the strongest performance criterion"""
         if not session.evaluations:
             return "N/A"
-        
-        criteria_avgs = {
-            "correctness": sum(e.criteria_scores.correctness for e in session.evaluations) / len(session.evaluations),
-            "completeness": sum(e.criteria_scores.completeness for e in session.evaluations) / len(session.evaluations),
-            "clarity": sum(e.criteria_scores.clarity for e in session.evaluations) / len(session.evaluations),
-            "confidence": sum(e.criteria_scores.confidence for e in session.evaluations) / len(session.evaluations),
-            "technical_depth": sum(e.criteria_scores.technical_depth for e in session.evaluations) / len(session.evaluations)
-        }
-        
+        criteria_avgs = compute_criteria_averages(session.evaluations)
         return max(criteria_avgs, key=criteria_avgs.get)
     
     def _get_weakest_criterion(self, session: InterviewSession) -> str:
         """Identify the weakest performance criterion"""
         if not session.evaluations:
             return "N/A"
-        
-        criteria_avgs = {
-            "correctness": sum(e.criteria_scores.correctness for e in session.evaluations) / len(session.evaluations),
-            "completeness": sum(e.criteria_scores.completeness for e in session.evaluations) / len(session.evaluations),
-            "clarity": sum(e.criteria_scores.clarity for e in session.evaluations) / len(session.evaluations),
-            "confidence": sum(e.criteria_scores.confidence for e in session.evaluations) / len(session.evaluations),
-            "technical_depth": sum(e.criteria_scores.technical_depth for e in session.evaluations) / len(session.evaluations)
-        }
-        
+        criteria_avgs = compute_criteria_averages(session.evaluations)
         return min(criteria_avgs, key=criteria_avgs.get)
     
     def _calculate_consistency(self, session: InterviewSession) -> str:

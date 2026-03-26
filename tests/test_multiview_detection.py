@@ -1,47 +1,65 @@
 """
-Test script to verify multi-view architecture detection in questions.py
+Proper pytest tests for multi-view architecture detection logic from questions.py
 """
+import re
+import pytest
+from app.config import settings
 
-# Test system design question detection
-test_questions = [
-    # Should trigger architecture
+
+def _detect_architecture(question: str) -> bool:
+    """Replicate the detection logic from questions.py for unit testing."""
+    q_lower = question.lower()
+
+    has_explicit = any(kw in q_lower for kw in settings.architecture_detection_explicit_keywords)
+
+    has_design_verb = any(kw in q_lower for kw in settings.architecture_detection_design_verbs)
+    looks_like_system_design_phrase = bool(
+        re.search(r"\bdesign\s+(a|an|the)?\s*system\b", q_lower)
+        or re.search(r"\bdesign\s+(a|an|the)?\s*(platform|service|api|backend|architecture)\b", q_lower)
+        or re.search(r"\bbuild\s+(a|an|the)?\s*(platform|service|api|backend)\b", q_lower)
+    )
+
+    has_system_concepts = (
+        sum([
+            any(kw in q_lower for kw in settings.architecture_detection_system_concepts_scale),
+            any(kw in q_lower for kw in settings.architecture_detection_system_concepts_data),
+            any(kw in q_lower for kw in settings.architecture_detection_system_concepts_infra),
+        ])
+        >= 2
+    )
+
+    is_code_problem = any(kw in q_lower for kw in settings.architecture_detection_code_problem_keywords)
+
+    return (
+        has_explicit
+        or has_system_concepts
+        or (has_design_verb and looks_like_system_design_phrase)
+    ) and not is_code_problem
+
+
+# --- Positive cases: should be detected as system design ---
+
+@pytest.mark.parametrize("question", [
     "Design a system for video streaming like Netflix",
     "System design: Design YouTube",
     "How would you design an architecture for Uber?",
     "Design a high level design for WhatsApp",
     "Create architecture for a distributed cache",
-    
-    # Should NOT trigger architecture (coding questions)
+    "Design a platform for food delivery",
+    "Build a backend for a social media application",
+])
+def test_architecture_positive_detection(question):
+    assert _detect_architecture(question) is True, f"Should detect as architecture: {question}"
+
+
+# --- Negative cases: should NOT be detected as system design ---
+
+@pytest.mark.parametrize("question", [
     "Write a function to reverse a string",
+    "Implement a sorting algorithm",
     "Design a class for a binary tree",
-    "Implement a sorting algorithm"
-]
-
-def is_architecture_question(question: str) -> bool:
-    """Replicate the detection logic from questions.py"""
-    q_lower = question.lower()
-    arch_triggers = [
-        "system design", "architecture", "design a system", "design the system",
-        "high level design", "hld", "design a platform", "design an app",
-        "design uber", "design facebook", "design netflix", "design youtube",
-        "design twitter", "design whatsapp", "design instagram", "design amazon", 
-        "design google", "design a service", "design a microservice"
-    ]
-    is_arch = any(t in q_lower for t in arch_triggers) and "function" not in q_lower and "class" not in q_lower
-    return is_arch
-
-
-print("🧪 Testing Multi-View Architecture Detection\n")
-print("=" * 60)
-
-for i, question in enumerate(test_questions, 1):
-    result = is_architecture_question(question)
-    status = "✅ SYSTEM DESIGN" if result else "❌ Regular Question"
-    print(f"\n{i}. {question}")
-    print(f"   → {status}")
-
-print("\n" + "=" * 60)
-print("\n✅ All detection tests completed!")
-print("\n📝 Summary:")
-print("   - Questions 1-5 should be detected as system design (multi-view)")
-print("   - Questions 6-8 should be regular coding questions")
+    "How do I use Python decorators?",
+    "Explain the time complexity of quicksort",
+])
+def test_architecture_negative_detection(question):
+    assert _detect_architecture(question) is False, f"Should NOT detect as architecture: {question}"

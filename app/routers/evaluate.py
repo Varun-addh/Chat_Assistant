@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import hashlib
 from typing import Dict, Optional
+import logging
 
 from app.utils.time import utcnow
 
@@ -15,17 +16,50 @@ from app.services.core.code_evaluation_service import evaluate_code
 from app.utils.audit import auditor
 from app.services.chat.llm_service import get_llm_service
 from app.middleware.auth import get_user_id_from_request
+from app.services.core.redis_client import get_redis
+from app.config import settings
 
 from app.database import get_db_context
 from app.utils.usage_tracking import track_api_usage
+
+logger = logging.getLogger(__name__)
 
 # Use intelligent provider selection with "copilot" feature flag for evaluation
 llm_service = get_llm_service(feature="copilot")
 
 router = APIRouter()
 
-# In-memory cache for evaluations
+_EVAL_CACHE_PREFIX = "stratax:eval_cache:"
+_EVAL_CACHE_TTL = getattr(settings, "redis_cache_ttl_seconds", 3600)
+
+# In-memory fallback cache (used when Redis is unavailable)
 _evaluation_cache: Dict[str, EvaluationOut] = {}
+
+
+async def _cache_get(key: str) -> Optional[EvaluationOut]:
+	"""Read evaluation result from Redis, falling back to in-memory cache."""
+	try:
+		redis = await get_redis()
+		if redis is not None:
+			raw = await redis.get(_EVAL_CACHE_PREFIX + key)
+			if raw:
+				return EvaluationOut.model_validate_json(raw)
+			return None
+	except Exception as e:
+		logger.debug("Redis eval cache read error (using in-memory fallback): %s", e)
+	return _evaluation_cache.get(key)
+
+
+async def _cache_set(key: str, value: EvaluationOut) -> None:
+	"""Write evaluation result to Redis (with TTL) and in-memory fallback."""
+	try:
+		redis = await get_redis()
+		if redis is not None:
+			await redis.setex(_EVAL_CACHE_PREFIX + key, _EVAL_CACHE_TTL, value.model_dump_json())
+			return
+	except Exception as e:
+		logger.debug("Redis eval cache write error (using in-memory fallback): %s", e)
+	_evaluation_cache[key] = value
 
 
 async def _classify_evaluation_allowed(session_state, problem: Optional[str], code: Optional[str] = None, api_key: Optional[str] = None) -> tuple[bool, str]:
@@ -201,8 +235,8 @@ async def evaluate(
 	).hexdigest()
 
 	# Check cache first
-	if cache_key in _evaluation_cache:
-		cached_result = _evaluation_cache[cache_key]
+	cached_result = await _cache_get(cache_key)
+	if cached_result is not None:
 		# Update session_id to match current request
 		cached_result.session_id = payload.session_id
 
@@ -253,6 +287,16 @@ async def evaluate(
 			end = json_part.find("}")
 			if start != -1 and end != -1 and end > start:
 				blob = json_part[start:end+1]
+				import json as _json
+				parsed = _json.loads(blob)
+				if isinstance(parsed, dict):
+					for k, v in parsed.items():
+						key = k.lower().strip()
+						if key in scores_dict:
+							try:
+								scores_dict[key] = float(v)
+							except (ValueError, TypeError):
+								pass
 	except Exception:
 		pass
 	
@@ -396,7 +440,7 @@ async def evaluate(
     # Diagrammatic evaluation disabled temporarily per user request.
 
 	# Cache the result for future requests
-	_evaluation_cache[cache_key] = resp
+	await _cache_set(cache_key, resp)
 
 	# Usage tracking (Phase 2 billing/analytics)
 	with get_db_context() as db:

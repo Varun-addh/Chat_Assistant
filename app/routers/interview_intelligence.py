@@ -34,11 +34,17 @@ def _ensure_intelligence_services_loaded() -> None:
         or enhanced_interview_service is None
         or ultra_production_service is None
     ):
-        from app.services.interview.interview_intelligence_service import (
-            interview_intelligence_service as _interview_intelligence_service,
-            enhanced_interview_service as _enhanced_interview_service,
-            ultra_production_service as _ultra_production_service,
-        )
+        try:
+            from app.services.interview.interview_intelligence_service import (
+                interview_intelligence_service as _interview_intelligence_service,
+                enhanced_interview_service as _enhanced_interview_service,
+                ultra_production_service as _ultra_production_service,
+            )
+        except ImportError as e:
+            raise HTTPException(
+                status_code=503,
+                detail="Interview Intelligence is not available (missing dependencies).",
+            ) from e
         interview_intelligence_service = _interview_intelligence_service
         enhanced_interview_service = _enhanced_interview_service
         ultra_production_service = _ultra_production_service
