@@ -328,6 +328,87 @@ class ModernInterviewIntelligenceService:
 
         return text
 
+    @staticmethod
+    def _fix_unescaped_inner_quotes(text: str) -> str:
+        """Escape double-quotes that appear *inside* JSON string values.
+
+        LLMs frequently produce JSON like:
+            {"answer": "the function "wraps" the original"}
+        where the quotes around "wraps" are unescaped and break json.loads().
+
+        Strategy: walk character-by-character through the text.  When we are
+        inside a JSON string (opened by a structural quote) and encounter a
+        quote that is clearly *not* structural (i.e. the surrounding context
+        shows it's mid-value text), replace it with an escaped quote.
+
+        A quote is considered *structural* if what follows (ignoring
+        whitespace) is one of:  , } ] :  or end-of-string — i.e. it closes
+        a JSON value.  If it is followed by a word-character or by content
+        that cannot start a new JSON token it is an inner quote.
+        """
+        if '"' not in text:
+            return text
+
+        out: list[str] = []
+        i = 0
+        n = len(text)
+        in_string = False
+        # Track last structural opener so we know when a string starts
+        # after a colon (value) vs after a comma/[ (next element).
+
+        while i < n:
+            ch = text[i]
+
+            # Handle escape sequences — pass through verbatim
+            if in_string and ch == '\\':
+                out.append(ch)
+                if i + 1 < n:
+                    out.append(text[i + 1])
+                    i += 2
+                else:
+                    i += 1
+                continue
+
+            if ch == '"':
+                if not in_string:
+                    # Opening a string
+                    in_string = True
+                    out.append(ch)
+                    i += 1
+                    continue
+
+                # We are in a string and hit a quote — is it the real end?
+                # Peek ahead past optional whitespace to see what follows.
+                j = i + 1
+                while j < n and text[j] in ' \t\r\n':
+                    j += 1
+                next_ch = text[j] if j < n else ''
+
+                # Structural closers that indicate the quote is a real end-of-string
+                if next_ch in ('', ',', '}', ']', ':'):
+                    # Real end of string
+                    in_string = False
+                    out.append(ch)
+                    i += 1
+                    continue
+
+                # Another quote immediately after (e.g. "": or "", ) — real end
+                if next_ch == '"':
+                    in_string = False
+                    out.append(ch)
+                    i += 1
+                    continue
+
+                # Otherwise this is an inner quote — escape it
+                out.append('\\"')
+                i += 1
+                continue
+
+            out.append(ch)
+            i += 1
+
+        return ''.join(out)
+
     async def _generate_code_solution(
         self,
         question_text: str,
@@ -1104,6 +1185,7 @@ CRITICAL FORMAT RULES:
             try:
                 # Apply escape fixes
                 fixed_json = self._fix_json_escapes(quick)
+                fixed_json = self._fix_unescaped_inner_quotes(fixed_json)
                 data = json.loads(fixed_json)
                 
                 # Normalize to list
@@ -1247,7 +1329,8 @@ CRITICAL FORMAT RULES:
                 candidate = re.sub(r"(\{|\s|,)(\s*)([A-Za-z_][A-Za-z0-9_\-]*)(\s*):", r"\1\2\"\3\"\4:", candidate)
                 
                 # Now apply escape fixes
-                return self._fix_json_escapes(candidate)
+                candidate = self._fix_json_escapes(candidate)
+                return self._fix_unescaped_inner_quotes(candidate)
             
             candidate = _sanitize_json_aggressive(llm_response)
             if not candidate:
@@ -1365,8 +1448,9 @@ CRITICAL FORMAT RULES:
         questions: List[InterviewQuestion] = []
         for obj_str in object_strings:
             try:
-                # Try to parse this individual object
-                item = json.loads(obj_str)
+                # Try to parse this individual object with inner-quote fix
+                fixed_obj = self._fix_unescaped_inner_quotes(obj_str)
+                item = json.loads(fixed_obj)
                 
                 if not isinstance(item, dict):
                     continue

@@ -233,3 +233,73 @@ def identity_overrides(settings) -> str:
 		"- If asked about ChatGPT/OpenAI/Google: clarify those are separate companies/products; do not claim affiliation.\n"
 		f"- If needed, include configured attribution verbatim: {attribution or 'Refer to official documentation.'}\n"
 	)
+
+
+def is_system_probing_question(question: str, settings=None) -> bool:
+	"""Detect questions that attempt to extract internal system details.
+
+	Fully config-driven: all keyword lists and regex patterns are read from
+	``settings`` (populated from env vars / config). No hardcoded keyword lists
+	in this function — add new terms in config.py or via environment variables
+	and they take effect immediately.
+
+	Detection strategy:
+	  1. **Regex patterns** (high confidence) — prompt-injection / direct extraction
+	     attempts matched from ``llm_system_probing_injection_patterns``.
+	  2. **Structural heuristic** — self-referential word + operational-detail word
+	     AND NOT in a technical-interview context.  This catches novel phrasings
+	     as long as the vocabulary is configured.
+	"""
+	if settings is None:
+		from app.config import settings as _settings
+		settings = _settings
+
+	q = (question or "").strip().lower()
+	if not q:
+		return False
+	q_clean = re.sub(r"[^\w\s]", " ", q)
+	q_clean = " ".join(q_clean.split())
+
+	# ── Tier 1: regex injection patterns (always blocked) ──
+	injection_patterns = list(
+		getattr(settings, "llm_system_probing_injection_patterns", None) or []
+	)
+	for pat in injection_patterns:
+		try:
+			if re.search(pat, q_clean):
+				return True
+		except re.error:
+			continue
+
+	# ── Tier 2: structural heuristic ──
+	# If the question is in a technical-interview context, it's legitimate.
+	interview_context = list(
+		getattr(settings, "llm_system_probing_interview_context", None) or []
+	)
+	if any(w in q_clean for w in interview_context):
+		return False
+
+	# Self-referential + operational-detail combo
+	operational_keywords = list(
+		getattr(settings, "llm_system_probing_operational_keywords", None) or []
+	)
+	self_ref_keywords = list(
+		getattr(settings, "llm_system_probing_self_ref_keywords", None) or []
+	)
+	has_operational = any(w in q_clean for w in operational_keywords)
+	has_self_ref = any(w in q_clean for w in self_ref_keywords)
+	if has_operational and has_self_ref:
+		return True
+
+	return False
+
+
+def system_probing_response(settings, question: str) -> str:
+	"""Return a safe, deterministic answer for system-probing questions."""
+	app_name = (getattr(settings, "app_name", "") or "Stratax AI").strip()
+	return (
+		f"I'm {app_name}, focused on helping you prepare for interviews. "
+		"I can't share internal implementation details like token limits, rate-limiting "
+		"configuration, API keys, or model specifics — those are kept private for security. "
+		"Is there an interview topic I can help you with?"
+	)

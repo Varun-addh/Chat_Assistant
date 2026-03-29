@@ -41,9 +41,11 @@ from app.services.llm import (
 	identity_response_text,
 	is_identity_question,
 	is_system_design_question,
+	is_system_probing_question,
 	off_topic_overrides,
 	persona_overrides,
 	system_design_overrides,
+	system_probing_response,
 	technical_strategy_overrides,
 	ui_design_overrides,
 )
@@ -140,6 +142,12 @@ class LLMService:
 
 	def _identity_overrides(self) -> str:
 		return identity_overrides(self._settings)
+
+	def _is_system_probing(self, question: str) -> bool:
+		return is_system_probing_question(question, self._settings)
+
+	def _system_probing_response(self, question: str) -> str:
+		return system_probing_response(self._settings, question)
 
 	async def generate_text(
 		self, 
@@ -1912,6 +1920,11 @@ class LLMService:
 			logger.info("🪪 [IDENTITY] generate_answer short-circuit: %s", (question or "")[:200])
 			return (self._identity_response_text(question), False)
 
+		# Deterministic system-probing answers (prevent internal detail leakage)
+		if self._is_system_probing(question):
+			logger.info("🛡️ [SYSTEM_PROBING] generate_answer short-circuit: %s", (question or "")[:200])
+			return (self._system_probing_response(question), False)
+
 		# Only consider demo key pool when it's explicitly enabled in settings.
 		if settings.is_demo_key_pool_enabled():
 			pool_keys = set(demo_key_pool.keys())
@@ -2463,6 +2476,12 @@ class LLMService:
 		if self._is_identity_question(question):
 			logger.info("🪪 [IDENTITY] stream_answer short-circuit: %s", (question or "")[:200])
 			yield self._identity_response_text(question)
+			return
+
+		# Deterministic system-probing answers (prevent internal detail leakage)
+		if self._is_system_probing(question):
+			logger.info("🛡️ [SYSTEM_PROBING] stream_answer short-circuit: %s", (question or "")[:200])
+			yield self._system_probing_response(question)
 			return
 
 		client, provider = self._ensure_client(api_key)

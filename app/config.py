@@ -272,6 +272,48 @@ class Settings(BaseSettings):
 		"what's happening", "what's new", "how's your day", "tell me about yourself personally", "what do you think about",
 		"do you know about", "have you heard about", "what's your opinion",
 	]
+
+	# ── System-probing guard (config-driven, no hardcoding in detection logic) ──
+	# Operational-detail keywords: if these appear WITH a self-referential word,
+	# the question is likely probing for internal config, not asking an interview question.
+	llm_system_probing_operational_keywords: List[str] = [
+		"token", "tokens", "rate limit", "rate limiting", "ratelimit",
+		"api key", "secret key", "model name", "system prompt",
+		"max tokens", "temperature", "top p", "top_p", "context window",
+		"token budget", "token cap", "token usage", "cost per token",
+		"pricing", "api quota", "request limit", "throttle config",
+	]
+	# Self-referential words: signals the user is asking about THIS system, not a concept.
+	llm_system_probing_self_ref_keywords: List[str] = [
+		"you", "your", "this app", "this system", "this application",
+		"stratax", "copilot", "the assistant", "the bot",
+	]
+	# Technical-interview context: if these appear, the question is likely about
+	# a concept (e.g. "design a rate limiter") not about THIS system's internals.
+	llm_system_probing_interview_context: List[str] = [
+		"design", "implement", "build", "architect", "distributed",
+		"system design", "interview", "explain how", "work in",
+		"in production", "at scale", "for a service", "microservice",
+	]
+	# Prompt-injection / direct-extraction patterns (regex, always blocked).
+	llm_system_probing_injection_patterns: List[str] = [
+		r"\bhow\s+many\s+tokens?\b",
+		r"\b(token|context)\s*(limit|count|budget|usage|cap|window)\b",
+		r"\bmax\s*tokens?\b",
+		r"\b(what|how)\s+(is|are)\s+your\s+rate\s*limit",
+		r"\brate\s*limit(ing|s)?\s*(config|setting|threshold|detail|info)",
+		r"\b(what|which)\s+(api|llm|ai)\s*(key|token|secret)\b",
+		r"\b(show|reveal|print|dump|display|give)\s+(me\s+)?(your\s+)?(system\s*prompt|instructions|rules|policies|config)",
+		r"\b(what|which)\s+(model|llm|language\s*model)(\s+\w+)?\s+(are\s+you|do\s+you)\s+us",
+		r"\bwhat\s+model\s+(are|is)\s+(you|this)\b",
+		r"\b(your|the)\s+(api|secret)\s*key",
+		r"\b(what|how\s+much)\s+(does?\s+)?(it|this|you)\s+cost\s+per\b",
+		r"\binfrastructure\s+(detail|stack|setup)\b",
+		r"\b(show|reveal|leak|expose)\s+(your\s+)?(prompt|system|internal|config)\b",
+		r"\bignore\s+(previous|above|all)\s+(instructions?|rules?|prompts?)\b",
+		r"\brepeat\s+(the\s+)?(system|above|previous)\s+(prompt|instructions?|message)\b",
+	]
+
 	llm_ambiguous_patterns: List[str] = ["how do you", "what about", "tell me about", "explain", "what is", "how does", "why", "when", "where"]
 	llm_ambiguous_technical_terms: List[str] = [
 		"algorithm", "data structure", "database", "api", "framework", "language", "coding", "programming", "system", "design",

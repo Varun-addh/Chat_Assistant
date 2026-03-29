@@ -11,6 +11,8 @@ from .identity import (
 	identity_overrides,
 	identity_response_text,
 	is_identity_question,
+	is_system_probing_question,
+	system_probing_response,
 )
 from .groq_models import groq_models_to_try
 from .intent_overrides import (
@@ -35,6 +37,8 @@ __all__ = [
 	"identity_response_text",
 	"is_identity_question",
 	"identity_overrides",
+	"is_system_probing_question",
+	"system_probing_response",
 	"groq_models_to_try",
 	"greeting_overrides",
 	"off_topic_overrides",

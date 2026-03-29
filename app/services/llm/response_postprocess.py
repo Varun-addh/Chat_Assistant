@@ -23,6 +23,21 @@ _INTERNAL_LEAK_MARKERS = (
 	"code quality standards",
 	"analyze before responding",
 	"response length guidelines",
+	"depth budget",
+	"prompt-injection resistance",
+	"output hygiene",
+	"output guards",
+	"response contract",
+	"policy module",
+	"system instructions (copilot",
+	"max_tokens",
+	"groq_max_tokens",
+	"token limit is",
+	"rate-limit threshold",
+	"rate limit configuration",
+	"api key is",
+	"temperature setting",
+	"top_p setting",
 )
 
 
