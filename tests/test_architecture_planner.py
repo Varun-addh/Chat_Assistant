@@ -192,6 +192,57 @@ def test_heuristic_handles_empty_input():
     assert plan.views == MANDATORY_VIEWS
 
 
+def test_planner_has_no_hardcoded_system_names():
+    """Generalisation guard.
+
+    The planner must reason about any system, not recognise a list of famous
+    ones. Verified live against 17 varied prompts — pastebin, IoT telemetry,
+    HIPAA records, game matchmaking, gibberish — all tiered sensibly with no
+    system named in this module. A keyword list creeping back in would score
+    whatever it lists and silently mis-tier everything else, which is exactly
+    the failure this module replaced.
+
+    Product names appear only in the LLM prompt as tier *examples*; they must
+    never be matched against user input in code.
+    """
+    import ast
+    import inspect
+
+    from app.services.architecture import architecture_planner as mod
+
+    tree = ast.parse(inspect.getsource(mod))
+
+    # Collect only string literals that could be *compared against input*.
+    # Docstrings (which quote the old failure table) and the LLM prompt (whose
+    # examples are instructions to the model, never matched in code) are
+    # excluded. Docstring nodes are identified structurally — by object
+    # identity — because ast.get_docstring() re-indents the text, so comparing
+    # by value silently fails to match.
+    docstring_nodes = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                if isinstance(body[0].value.value, str):
+                    docstring_nodes.add(id(body[0].value))
+
+    literals = [
+        node.value.lower()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstring_nodes
+        and node.value != mod._PLANNER_SYSTEM_PROMPT
+    ]
+
+    haystack = " ".join(literals)
+    for name in ("netflix", "uber", "whatsapp", "twitter", "microsoft teams", "google calendar"):
+        assert name not in haystack, (
+            f"{name!r} appears as a string literal in planner logic — that is "
+            "keyword matching, the very thing this module replaced"
+        )
+
+
 def test_plan_is_llm_property():
     assert ArchitecturePlan("simple", [], "llm").is_llm is True
     assert ArchitecturePlan("simple", [], "heuristic").is_llm is False

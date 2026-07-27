@@ -111,6 +111,41 @@ def test_degenerate_inputs_report_nothing(caplog, code):
     assert _warnings(caplog, code) == []
 
 
+# --- generalisation across Mermaid syntax -----------------------------------
+# The two production diagrams that exposed the bug are only two shapes. These
+# pin the detector against the wider syntax the LLM actually emits, so a future
+# fix tuned to one diagram cannot regress the rest.
+
+CONNECTED_SHAPES = [
+    ("flowchart LR + quoted title", 'flowchart LR\nsubgraph S["Edge & CDN"]\n  a[A] --> b[B]\nend'),
+    ("graph keyword", "graph TD\nsubgraph Tier One\n  x[X] --> y[Y]\nend"),
+    ("round/diamond/nested shapes", "flowchart TD\nsubgraph S\n  a(Round) --> b{Diamond}\n  b --> c[[Sub]]\nend"),
+    ("dotted and thick edges", "flowchart TD\nsubgraph S\n  a -.-> b\n  b ==> c\nend"),
+    ("edge label with punctuation", 'flowchart TD\nsubgraph S\n  a[A] -->|"HTTP/2, gRPC"| b[B]\nend'),
+    ("bracketed id with cylinder node", "flowchart LR\nsubgraph AWS[AWS Region]\n  api[API] --> db[(DB)]\nend"),
+    ("multiple connected subgraphs", "flowchart TD\nsubgraph One\n a[A] --> b[B]\nend\nsubgraph Two\n b --> c[C]\nend"),
+]
+
+
+@pytest.mark.parametrize("name,code", CONNECTED_SHAPES, ids=[c[0] for c in CONNECTED_SHAPES])
+def test_connected_diagrams_never_warn(caplog, name, code):
+    assert _warnings(caplog, code) == [], f"false positive on {name}"
+
+
+ORPHAN_SHAPES = [
+    ("isolated tier", "flowchart TD\n a[A] --> b[B]\nsubgraph Backup Vault\n  z[Glacier]\nend", "Backup Vault"),
+    ("one of two subgraphs", "flowchart TD\nsubgraph Live\n a[A] --> b[B]\nend\nsubgraph Dead Letter Queue\n q[Q]\nend", "Dead Letter Queue"),
+    ('quoted title', 'flowchart TD\n a[A] --> b[B]\nsubgraph X["Cold Path"]\n  z[Z]\nend', "X"),
+]
+
+
+@pytest.mark.parametrize("name,code,expected", ORPHAN_SHAPES, ids=[c[0] for c in ORPHAN_SHAPES])
+def test_orphans_are_caught_across_shapes(caplog, name, code, expected):
+    found = _warnings(caplog, code)
+    assert found, f"missed orphan in {name}"
+    assert expected in found[0], f"{name}: expected {expected!r} in {found[0]!r}"
+
+
 def test_bracketed_subgraph_id_uses_the_id(caplog):
     """`subgraph Azure[Azure Layer]` — connected, so nothing to report."""
     code = """flowchart LR
