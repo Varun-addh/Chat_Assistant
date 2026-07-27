@@ -67,9 +67,12 @@ class EvaluationAgent:
             
             # Calculate aggregated metrics
             metrics_summary = self._calculate_metrics_summary(answers)
+            # avg_confidence is a 0-1 value; log it on the scale it actually
+            # uses. It was previously printed as "{value}/10", so a maximum
+            # score of 1.0 read as "1.0/10" — i.e. 10% instead of 100%.
             logger.info(f"Metrics: {metrics_summary.total_fillers} fillers, "
                        f"{metrics_summary.avg_wpm} WPM, "
-                       f"{metrics_summary.avg_confidence}/10 confidence")
+                       f"{metrics_summary.avg_confidence:.2f}/1.0 confidence")
             
             # Prepare data for Gemini
             prompt = self._build_evaluation_prompt(answers, metrics_summary, questions=questions)

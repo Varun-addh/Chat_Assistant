@@ -78,7 +78,10 @@ class SpeechAnalyticsAgent:
                 filler_count=filler_count,
                 wpm=round(wpm, 1),
                 longest_silence=round(longest_silence, 2),
-                confidence_score=round(confidence_score, 1),
+                # 2 decimals: confidence is a 0-1 value whose most populated
+                # band spans only 0.9-1.0, so rounding to 1 decimal collapsed
+                # every natural speaker into {0.9, 1.0}.
+                confidence_score=round(confidence_score, 2),
                 overtalked=overtalked,
                 duration=round(duration, 2),
                 filler_words=filler_words,
@@ -329,6 +332,34 @@ class SpeechAnalyticsAgent:
             logger.warning(f"Error detecting silences: {e}")
             return 0.0, 0
     
+    @staticmethod
+    def confidence_from_pitch_variance(pitch_variance: float) -> float:
+        """Map raw pitch variance to a 0-1 confidence score.
+
+        Most human speech pitch variance falls between 800 and 6000:
+          - < 800        Monotone/robotic       -> 0.70 - 0.95
+          - 800 - 3500   Natural, confident     -> 0.90 - 1.00  (sweet spot)
+          - 3500 - 7000  Hesitant/wavering      -> 0.50 - 0.90
+          - > 7000       Very shaky             -> 0.00 - 0.50
+
+        Pure function of the variance, separated from audio handling so the
+        curve can be tested directly rather than through a duplicated copy.
+
+        The sweet spot interpolates across its ACTUAL width (2700). It was
+        previously ``0.9 + min(0.1, (pitch_variance - 800) / 10000)``, where the
+        min() saturated at any variance >= 1800 — 63% of the band, and where
+        essentially all real speech lands. Every speaker scored exactly 1.0,
+        making the metric non-discriminating and pinning the delivery dimension
+        (25% of the overall practice score) to a constant 100.
+        """
+        if pitch_variance < 800:
+            return 0.7 + (pitch_variance / 800) * 0.25
+        if pitch_variance <= 3500:
+            return 0.9 + ((pitch_variance - 800) / 2700) * 0.1
+        if pitch_variance <= 7000:
+            return 0.9 - ((pitch_variance - 3500) / 3500) * 0.4
+        return max(0.0, 0.5 - ((pitch_variance - 7000) / 5000))
+
     def _calculate_confidence(self, audio: np.ndarray, sr: int, transcript: str = "") -> Tuple[float, float]:
         """
         Calculate confidence score based on pitch variance.
@@ -387,19 +418,8 @@ class SpeechAnalyticsAgent:
             # - High (3500-6000): Some hesitation or wavering (Moderate score)
             # - Extreme (> 7000): Very shaky or uncertain (Low score)
             
-            if pitch_variance < 800:
-                # Monotone - range 0.7 to 0.95
-                confidence_score = 0.7 + (pitch_variance / 800) * 0.25
-            elif 800 <= pitch_variance <= 3500:
-                # SWEET SPOT - range 0.9 to 1.0 (Most natural speakers are here)
-                confidence_score = 0.9 + min(0.1, (pitch_variance - 800) / 10000)
-            elif 3500 < pitch_variance <= 7000:
-                # Wavering - range 0.5 to 0.9
-                confidence_score = 0.9 - ((pitch_variance - 3500) / 3500) * 0.4
-            else:
-                # Shaky - range 0.0 to 0.5
-                confidence_score = max(0.0, 0.5 - ((pitch_variance - 7000) / 5000))
-                
+            confidence_score = self.confidence_from_pitch_variance(pitch_variance)
+
             return float(confidence_score), pitch_variance
             
         except Exception as e:

@@ -117,8 +117,8 @@ def score_answer(*, answer: AnswerSubmission) -> PracticeAnswerScoreResult:
     # confidence_score may arrive on a 0-1 or 0-10 scale depending on
     # the speech provider.  Normalise to 0-1 before converting to 0-100.
     has_speech_metrics = conf > 0.0 or wpm > 0.0
+    conf_norm = conf / 10.0 if conf > 1.0 else conf
     if has_speech_metrics:
-        conf_norm = conf / 10.0 if conf > 1.0 else conf
         delivery = conf_norm * 100.0
     else:
         # No speech data — assume average-good delivery (70/100)
@@ -154,7 +154,7 @@ def score_answer(*, answer: AnswerSubmission) -> PracticeAnswerScoreResult:
 
     why = [
         f"Correctness: {dims['correctness']:.0f}/100",
-        f"Delivery: {dims['delivery']:.0f}/100 (confidence={conf:.1f}/10, fillers={fillers}, overtalked={int(overtalked)})",
+        f"Delivery: {dims['delivery']:.0f}/100 (confidence={conf_norm:.2f}/1.0, fillers={fillers}, overtalked={int(overtalked)})",
         f"Clarity: {dims['clarity']:.0f}/100 (wpm={wpm:.0f})",
         f"Structure: {dims['structure']:.0f}/100",
     ]
