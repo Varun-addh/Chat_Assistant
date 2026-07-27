@@ -28,7 +28,6 @@ Usage (from the repo root, with your .env configured)::
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
@@ -52,12 +51,11 @@ except ModuleNotFoundError:
 # These match the STRUCTURE ("<subject> uses <thing> for/to", "role of <thing> in
 # <subject>", "how does <thing> enable/use ...") rather than a hardcoded skill
 # list, so they generalise to any technology the resume happened to contain.
-_FORMULAIC_PATTERNS = [
-    re.compile(r"\b(uses?|leverages?|utili[sz]es?|employs?)\s+[\w.+#]+\s+(for|to|in)\b", re.I),
-    re.compile(r"\b(is|are)\s+used\s+(in|for|to|by)\s+[\w.+#]+", re.I),
-    re.compile(r"\brole of\s+[\w.+#]+(\s+\w+){0,2}\s+in\b", re.I),
-    re.compile(r"\bhow does\s+[\w.+#]+\s+(enable|use|leverage|power|drive)\b", re.I),
-]
+#
+# The patterns live in app.utils.question_quality because the same definition
+# gates cache WRITES in _store_in_vector_db. Evicting a shape here without also
+# blocking it there would just let it be regenerated on the next search.
+from app.utils.question_quality import is_formulaic as _is_formulaic  # noqa: E402
 
 
 def _connect() -> QdrantClient:
@@ -77,8 +75,6 @@ def _connect() -> QdrantClient:
     return QdrantClient(path=local_path)
 
 
-def _is_formulaic(question: str) -> bool:
-    return any(p.search(question or "") for p in _FORMULAIC_PATTERNS)
 
 
 def main() -> int:

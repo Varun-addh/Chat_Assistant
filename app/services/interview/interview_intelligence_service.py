@@ -1876,14 +1876,36 @@ CRITICAL FORMAT RULES:
         return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
     
     async def _store_in_vector_db(self, questions: List[InterviewQuestion]):
-        """Store generated questions in vector DB for future retrieval"""
+        """Store generated questions in vector DB for future retrieval.
+
+        Applies a quality gate first. The cache has no expiry, so anything
+        written here is served indefinitely — a bad generation would outlive
+        the prompt that produced it. Rejected questions are still returned to
+        the caller for this request; they are only barred from the cache.
+        """
         if not self.vector_client:
             return
-        
+
+        from app.utils.question_quality import filter_low_quality, rejection_reason
+
+        questions, rejected = filter_low_quality(questions)
+        if rejected:
+            logger.info(
+                "Quality gate rejected %d/%d generated question(s) from cache: %s",
+                len(rejected),
+                len(rejected) + len(questions),
+                "; ".join(
+                    f"{rejection_reason(q.question)}: {(q.question or '')[:60]}"
+                    for q in rejected[:5]
+                ),
+            )
+        if not questions:
+            return
+
         try:
             import uuid
             points = []
-            
+
             for q in questions:
                 # Create embedding
                 text = f"{q.question} {' '.join(q.key_concepts)}"
