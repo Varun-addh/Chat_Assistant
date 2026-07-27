@@ -260,13 +260,33 @@ app.add_middleware(
     practice_media_limit_bytes=settings.max_practice_media_upload_bytes,
 )
 
-# User Authentication Middleware (for personalized history)
-from app.middleware.auth import user_auth_middleware
-app.middleware("http")(user_auth_middleware)
+# ORDER IS LOAD-BEARING — do not swap these two.
+#
+# Starlette builds the middleware stack so the LAST registered runs FIRST
+# (it is the outermost wrapper). Rate limiting reads request.state.user, which
+# only the auth middleware sets, so auth must be registered last in order to
+# run first.
+#
+# Previously auth was registered first and rate limiting second, which made
+# rate limiting the outer layer. It therefore read request.state.user before
+# anything had set it and saw None on every request, classifying every
+# logged-in user as "demo":
+#
+#   [DEMO_MODE] path=/api/question user_type=demo auth=False user_key_header=False
+#   Using environment GEMINI_API_KEY     <- the router's *registered* branch
+#
+# ...for a request carrying a valid JWT. Registered users were metered against
+# demo quota (30-minute window) instead of their tier, while the router served
+# them as registered — the two disagreed on every authenticated request.
 
-# Rate Limiting Middleware (protects API costs)
+# Rate Limiting Middleware (protects API costs) — registered first => inner.
 from app.middleware.rate_limit import rate_limit_middleware
 app.middleware("http")(rate_limit_middleware)
+
+# User Authentication Middleware — registered last => outermost => runs first,
+# so request.state.user is populated before rate limiting inspects it.
+from app.middleware.auth import user_auth_middleware
+app.middleware("http")(user_auth_middleware)
 
 
 @app.get("/health/simple")
