@@ -20,6 +20,7 @@ from app.schemas import (
 from app.services.core.session_manager import get_session_manager, SessionManager, SessionState
 from app.services.chat.llm_service import get_llm_service
 from app.services.architecture.architecture_generator import get_architecture_generator
+from app.services.architecture.architecture_planner import plan_architecture
 from app.schemas import ArchitectureViewType
 from app.services.core.code_evaluation_service import evaluate_code
 from app.services.chat.mirror_compare import (
@@ -1118,14 +1119,26 @@ async def submit_question(
 						text = text.replace(k, v)
 					return text
 
-				# 2. Select views: keep multi-view deterministic (the product promise is 5 views).
-				views_to_gen = [
-					ArchitectureViewType.SYSTEM_OVERVIEW,
-					ArchitectureViewType.REQUEST_FLOW,
-					ArchitectureViewType.DATA_MODEL,
-					ArchitectureViewType.DEPLOYMENT,
-					ArchitectureViewType.OBSERVABILITY,
-				]
+				# 2. Select views by planned complexity.
+				#
+				# This was hardcoded to all 5 views for every request, so "design a
+				# URL shortener" cost the same 5-10 sequential LLM calls as "design
+				# Microsoft Teams" — which is what exhausted the Groq TPM budget and
+				# turned one request into 68s of 429 backoff. The frontend renders
+				# whatever markdown arrives and has no dependency on the view count,
+				# so the fixed 5 bought nothing.
+				#
+				# The planner degrades to the old keyword heuristic on any failure,
+				# and SYSTEM_OVERVIEW + REQUEST_FLOW are always included.
+				_plan = await plan_architecture(payload.question, llm_service=llm_service, api_key=api_key)
+				_view_by_name = {v.name: v for v in ArchitectureViewType}
+				views_to_gen = [_view_by_name[n] for n in _plan.views if n in _view_by_name]
+				if not views_to_gen:  # defensive: never emit an empty package
+					views_to_gen = [ArchitectureViewType.SYSTEM_OVERVIEW, ArchitectureViewType.REQUEST_FLOW]
+				logger.info(
+					"🏗️ Multi-view plan: tier=%s source=%s views=%s",
+					_plan.tier, _plan.source, [v.name for v in views_to_gen],
+				)
 				
 				def _fallback_view(view_name: str, view_type: ArchitectureViewType, err: Exception | None = None) -> tuple[str, str]:
 					"""Return (mermaid_code, explanation) placeholders for a view.
@@ -1177,7 +1190,7 @@ async def submit_question(
 					# Send title
 					yield f"data: ## {title}\n\n"
 					
-					prompt_data = arch_gen.get_view_prompt(view_type, payload.question)
+					prompt_data = arch_gen.get_view_prompt(view_type, payload.question, tier=_plan.tier)
 					# prompt_data['system_prompt'] already contains a strict output contract.
 					base_prompt = f"{prompt_data['user_prompt']}"
 					combined_prompt = base_prompt

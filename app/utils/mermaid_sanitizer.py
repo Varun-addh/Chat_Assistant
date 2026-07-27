@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -506,41 +506,88 @@ class MermaidSanitizer:
             return pattern.sub(fix_brace, text)
 
         def find_and_warn_orphaned_subgraphs(text: str) -> str:
-            subgraph_pattern = re.compile(r"subgraph\s+(\w+)", re.IGNORECASE)
-            subgraphs = set(subgraph_pattern.findall(text))
-            if not subgraphs:
+            """Warn when a subgraph's nodes take part in no edges.
+
+            Previously this produced false positives on perfectly valid diagrams
+            and would have missed genuine orphans, because of two bugs that
+            conspired:
+
+            1. ``subgraph\\s+(\\w+)`` stopped at the first non-word character, so
+               ``subgraph Global Edge & Routing`` was recorded as "Global".
+            2. Node collection only matched lines *starting* with ``id[``, so in
+               ``a[A] --> b[B]`` only ``a`` was collected, while the edge scan
+               missed ``a`` because the ``]`` sat between it and the arrow. The
+               single collected node was therefore the one node the edge scan
+               could not see, and the subgraph looked orphaned.
+
+            Now: nodes are collected from anywhere on a line, edges are found by
+            splitting on arrows (which is what Mermaid actually does), and the
+            subgraph title is captured whole.
+            """
+            # Subgraph id: `subgraph id[Title]`, `subgraph id["Title"]`, or
+            # `subgraph Bare Title Words`. Capture the id when bracketed,
+            # otherwise the whole trailing title.
+            subgraph_header = re.compile(
+                r"^\s*subgraph\s+(?:([A-Za-z0-9_.+#-]+)\s*[\[\(\{]|(.+?)\s*$)",
+                re.IGNORECASE,
+            )
+            if not subgraph_header.search(text) and "subgraph" not in text.lower():
                 return text
 
-            edge_pattern = re.compile(r"(\w+)\s*[-=~]+[>\|]|[>\|][-=~]*\s*(\w+)")
-            nodes_in_edges = set()
-            for match in edge_pattern.finditer(text):
-                if match.group(1):
-                    nodes_in_edges.add(match.group(1))
-                if match.group(2):
-                    nodes_in_edges.add(match.group(2))
+            # An edge line is any line containing a Mermaid connector. Split on
+            # connectors and take the identifier adjacent to each side; strip
+            # labels (`|text|`) and node shapes first so `a[A] --> b[B]` yields
+            # both `a` and `b`.
+            connector = re.compile(r"[-=.]{1,}[->]|[-=.]+[ox>]|~~~")
+            ident = re.compile(r"([A-Za-z0-9_.+#-]+)")
 
-            subgraph_nodes = {}
-            current_subgraph: Optional[str] = None
-            node_def_pattern = re.compile(r"^\s*(\w+)[\[\(\{]")
+            def identifiers_on(line: str) -> List[str]:
+                # Drop edge labels and node label text; they are prose, not ids.
+                cleaned = re.sub(r"\|[^|]*\|", " ", line)
+                cleaned = re.sub(r"[\[\(\{][^\]\)\}]*[\]\)\}]", " ", cleaned)
+                return ident.findall(cleaned)
+
+            nodes_in_edges = set()
+            for line in text.split("\n"):
+                if not connector.search(line):
+                    continue
+                for part in connector.split(line):
+                    ids = identifiers_on(part)
+                    if ids:
+                        # Endpoints of a connector are the last id before it and
+                        # the first id after it.
+                        nodes_in_edges.add(ids[0])
+                        nodes_in_edges.add(ids[-1])
+
+            subgraph_nodes: Dict[str, List[str]] = {}
+            stack: List[str] = []
 
             for line in text.split("\n"):
-                stripped = line.strip().lower()
-                subgraph_match = re.match(r"subgraph\s+(\w+)", line, re.IGNORECASE)
-                if subgraph_match:
-                    current_subgraph = subgraph_match.group(1)
-                    subgraph_nodes[current_subgraph] = []
-                elif stripped == "end":
-                    current_subgraph = None
-                elif current_subgraph:
-                    node_match = node_def_pattern.match(line.strip())
-                    if node_match:
-                        subgraph_nodes[current_subgraph].append(node_match.group(1))
+                stripped = line.strip()
+                header = subgraph_header.match(line)
+                if header:
+                    name = (header.group(1) or header.group(2) or "").strip()
+                    stack.append(name)
+                    subgraph_nodes.setdefault(name, [])
+                    continue
+                if stripped.lower() == "end":
+                    if stack:
+                        stack.pop()
+                    continue
+                if not stack or stripped.lower().startswith("direction "):
+                    continue
+                # Collect every identifier that carries a node shape anywhere on
+                # the line, plus bare identifiers on connector lines.
+                for node_id in re.findall(r"([A-Za-z0-9_.+#-]+)\s*[\[\(\{]", stripped):
+                    subgraph_nodes[stack[-1]].append(node_id)
+                if connector.search(stripped):
+                    subgraph_nodes[stack[-1]].extend(identifiers_on(stripped))
 
-            orphaned = []
-            for sg, nodes in subgraph_nodes.items():
-                has_connection = any(node in nodes_in_edges for node in nodes)
-                if not has_connection and nodes:
-                    orphaned.append(sg)
+            orphaned = [
+                sg
+                for sg, nodes in subgraph_nodes.items()
+                if nodes and not any(n in nodes_in_edges for n in nodes)
+            ]
 
             if orphaned:
                 logger.warning(f"[MERMAID] Orphaned subgraphs detected (no connections): {orphaned}")

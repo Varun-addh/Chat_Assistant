@@ -118,11 +118,19 @@ class ArchitectureGeneratorService:
             return score, "medium"
         return score, "simple"
 
-    def _dynamic_limits(self, view_type: ArchitectureViewType, system_description: str) -> tuple[int, int]:
+    def _dynamic_limits(
+        self,
+        view_type: ArchitectureViewType,
+        system_description: str,
+        tier: Optional[str] = None,
+    ) -> tuple[int, int]:
         """Compute adaptive (max_nodes, max_edges) based on requirements complexity.
 
         The goal is *not* to explode diagram size, but to allow slightly more detail
         when the question clearly demands it.
+
+        ``tier`` lets a caller supply a planned complexity tier and bypass the
+        keyword estimator, which scores prompt wording rather than the system.
         """
         prompt_config = self.view_prompts.get(view_type)
         if not prompt_config:
@@ -131,7 +139,10 @@ class ArchitectureGeneratorService:
         base_nodes = int(prompt_config.max_nodes)
         base_edges = int(prompt_config.max_edges)
 
-        score, tier = self._estimate_problem_complexity(system_description)
+        if tier in ("simple", "medium", "complex"):
+            score = f"planned:{tier}"
+        else:
+            score, tier = self._estimate_problem_complexity(system_description)
         if tier == "simple":
             mult = 0.9
         elif tier == "medium":
@@ -494,14 +505,24 @@ Output ONLY the Mermaid code, starting with 'flowchart TD'.""",
         
         return views
     
-    def get_view_prompt(self, view_type: ArchitectureViewType, system_description: str) -> Dict[str, str]:
+    def get_view_prompt(
+        self,
+        view_type: ArchitectureViewType,
+        system_description: str,
+        tier: Optional[str] = None,
+    ) -> Dict[str, str]:
         """
         Get the system and user prompts for a specific view.
-        
+
         Args:
             view_type: Type of view to generate
             system_description: Description of the system
-            
+            tier: Planned complexity tier (simple|medium|complex). When given,
+                it overrides the keyword estimator for diagram sizing. The
+                estimator scores the prompt wording rather than the system, so
+                "design netflix" scored 0 and got the same 7-node budget as a
+                URL shortener.
+
         Returns:
             Dict with 'system_prompt' and 'user_prompt'
         """
@@ -519,7 +540,7 @@ Output ONLY the Mermaid code, starting with 'flowchart TD'.""",
         view_name = getattr(view_type, "name", str(view_type))
         user_prompt = user_prompt.rstrip() + "\n\n" + render_domain_hints(profile, view_name)
         
-        max_nodes, max_edges = self._dynamic_limits(view_type, system_description)
+        max_nodes, max_edges = self._dynamic_limits(view_type, system_description, tier=tier)
 
         # Build system prompt with injected layer scaffold (for views that use it).
         base_system_prompt = (prompt_config.system_prompt or "")
