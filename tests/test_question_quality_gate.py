@@ -27,6 +27,11 @@ REAL_BAD_QUESTIONS = [
 
 # Questions a real interviewer would ask — these must survive the gate.
 GOOD_QUESTIONS = [
+    # Regression: rejected in production on 2026-07-27 as formulaic_template.
+    # Shares the "role of X in Y" template with the HTML junk below, but X is a
+    # concept intrinsic to the topic, not an unrelated named technology.
+    "Discuss the role of explainability in Agentic AI systems, especially in regulated domains",
+    "Discuss the role of caching in a read-heavy architecture",
     "How do you handle race conditions in Go?",
     "You need to scale a write-heavy service to 50k QPS. Walk me through your approach.",
     "When would you choose a message queue over a direct RPC call?",

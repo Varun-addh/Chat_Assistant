@@ -35,8 +35,27 @@ FORMULAIC_PATTERNS = [
     re.compile(r"\b(uses?|leverages?|utili[sz]es?|employs?)\s+[\w.+#]+\s+(for|to|in)\b", re.I),
     # "...is used in/for/to/by X"
     re.compile(r"\b(is|are)\s+used\s+(in|for|to|by)\s+[\w.+#]+", re.I),
-    # "...role of X in ..."
-    re.compile(r"\brole of\s+[\w.+#]+(\s+\w+){0,2}\s+in\b", re.I),
+    # "...role of <NamedTechnology> in ..."
+    #
+    # Case-SENSITIVE by design. The failure mode is dragging a named,
+    # unrelated technology into an unrelated topic:
+    #
+    #   "Explain the role of HTML in Agentic AI applications"   <- reject
+    #   "Discuss the role of explainability in Agentic AI"      <- keep
+    #
+    # Both share the template, so the template alone cannot separate them.
+    # Named technologies are capitalised (HTML, Python, React, .NET); the
+    # concepts a real interviewer probes are lowercase common nouns
+    # (explainability, scalability, caching). Matching only the capitalised
+    # form keeps the conceptual questions, which a case-insensitive pattern
+    # rejected in production.
+    #
+    # Known cost: "the role of Redis in a caching layer" is a fair question
+    # and still gets blocked. That is the accepted side of the trade-off —
+    # this gate only bars a question from the CACHE, never from the response,
+    # so a false positive costs one regeneration while a false negative
+    # serves junk indefinitely.
+    re.compile(r"\brole of\s+[A-Z][\w.+#]*(\s+\w+){0,2}\s+in\b"),
     # "How does X enable/use/leverage/power/drive ..."
     re.compile(r"\bhow does\s+[\w.+#]+\s+(enable|use|leverage|power|drive)\b", re.I),
 ]
