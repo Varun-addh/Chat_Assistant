@@ -925,12 +925,34 @@ def _format_headings_bold(self, text: str) -> str:
 			continue
 
 		# ── Case 2: standalone **Bold** or **Bold:** line → promote to ## heading ──
-		# Only when the line is ENTIRELY a bold span (nothing else) and is
-		# preceded by a blank line (section boundary) or at the document start.
+		# Only when the line is ENTIRELY a bold span (nothing else) and sits at a
+		# section boundary.
+		#
+		# A section boundary is the document start, a blank line, OR the line
+		# immediately after a closing code fence. That last case matters: models
+		# routinely emit
+		#
+		#     ```python
+		#     ...
+		#     ```
+		#     **Explanation:**
+		#
+		# with no blank line after the fence. Requiring a blank line meant
+		# "Explanation:" and "Key Points" stayed inline bold while their peers
+		# ("Example Code", "Output") became <h2>, so one answer rendered peer
+		# sections at two different heading levels. Section hierarchy was
+		# effectively decided by whether the model happened to emit a blank line.
 		bold_only = re.match(r"^\*\*([A-Z][^*\n]{1,60}?)\*\*\s*:?\s*$", stripped)
 		if bold_only:
-			prev_is_blank = (i == 0) or (lines[i - 1].strip() == "")
-			if prev_is_blank:
+			prev_stripped = lines[i - 1].strip() if i > 0 else ""
+			at_boundary = (
+				i == 0
+				or prev_stripped == ""
+				# `in_code` is already False here, so a fence on the previous
+				# line was a closing fence.
+				or prev_stripped.startswith("```")
+			)
+			if at_boundary:
 				heading_text = bold_only.group(1).strip().rstrip(":")
 				formatted_lines.append(f"## **{heading_text}**")
 				continue
