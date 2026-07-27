@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#
+# Rejects commit messages that carry no information.
+#
+# Why: 25 consecutive commits in this repo are titled "updated" or "updated
+# files". Reconstructing what changed in March-June 2026 required reading
+# diffs and captured JSON output, because the log said nothing. This hook is
+# the cheap fix — it costs one sentence at commit time.
+#
+# Enable with:  git config core.hooksPath .githooks
+# Bypass (rarely, deliberately):  git commit --no-verify
+
+set -u
+
+msg_file="$1"
+
+# First non-comment, non-empty line = the subject.
+subject=$(grep -vE '^\s*#' "$msg_file" | grep -vE '^\s*$' | head -n1)
+
+if [ -z "$subject" ]; then
+    echo "ERROR: empty commit message." >&2
+    exit 1
+fi
+
+# Merge, revert and fixup commits have machine-generated subjects — leave them.
+case "$subject" in
+    Merge\ *|Revert\ *|fixup!\ *|squash!\ *) exit 0 ;;
+esac
+
+# Subjects that describe nothing.
+low_information='^(updated?|update files?|updated files?|changes?|fix|fixes|fixed|wip|test|tests|misc|stuff|minor|cleanup|refactor|final|done|asdf|temp|tmp|\.+)$'
+
+shopt -s nocasematch 2>/dev/null || true
+if [[ "$subject" =~ $low_information ]]; then
+    cat >&2 <<MSG
+
+ERROR: commit subject carries no information: "$subject"
+
+Say what changed and why. Compare:
+
+    updated
+    fix: guard empty LLM responses so eval no longer fabricates a 5.0 score
+
+The second one is what someone reading the log in four months needs.
+
+To bypass deliberately: git commit --no-verify
+
+MSG
+    exit 1
+fi
+
+if [ "${#subject}" -lt 15 ]; then
+    echo "" >&2
+    echo "ERROR: commit subject is too short (${#subject} chars): \"$subject\"" >&2
+    echo "Aim for a short sentence describing the change." >&2
+    echo "" >&2
+    exit 1
+fi
+
+exit 0

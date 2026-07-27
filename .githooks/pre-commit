@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Blocks secrets and captured user data from entering version control.
+# Enable with:  git config core.hooksPath .githooks
+
+set -u
+
+staged=$(git diff --cached --name-only)
+
+# --- .env files -------------------------------------------------------------
+if echo "$staged" | grep -qE '^\.env$'; then
+    cat >&2 <<'MSG'
+
+ERROR: attempting to commit .env
+
+API keys and secrets must not be committed. Use .env.example for templates.
+To unstage but keep the file locally:
+
+    git rm --cached .env
+
+MSG
+    exit 1
+fi
+
+# --- captured user data -----------------------------------------------------
+# captured_failures/ holds verbatim user interview answers and session ids.
+# It is gitignored, so this only fires on an explicit `git add -f`.
+if echo "$staged" | grep -qE '^captured_failures/'; then
+    cat >&2 <<'MSG'
+
+ERROR: attempting to commit captured_failures/
+
+These records contain verbatim user answers and session ids. They are
+diagnostic output, not source. To unstage:
+
+    git rm --cached -r captured_failures/
+
+MSG
+    exit 1
+fi
+
+# --- local databases --------------------------------------------------------
+if echo "$staged" | grep -qE '\.(db|sqlite3?)$'; then
+    echo "" >&2
+    echo "ERROR: attempting to commit a database file. These are runtime data." >&2
+    echo "" >&2
+    exit 1
+fi
+
+exit 0
