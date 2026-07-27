@@ -16,6 +16,53 @@ from app.utils.time import utcnow
 logger = logging.getLogger(__name__)
 
 
+# Topic-relevance gating for session question selection.
+# Short, common words that carry no topic signal and would cause false matches.
+_TOPIC_STOPWORDS = frozenset({
+    "a", "an", "and", "the", "of", "for", "to", "in", "on", "with", "is", "are",
+    "how", "what", "why", "when", "which", "explain", "describe", "design",
+    "system", "interview", "question", "questions", "coding", "technical",
+    "behavioral", "general", "concept", "concepts", "basics", "fundamentals",
+})
+
+_TOPIC_TOKEN_RE = re.compile(r"[a-z0-9+#.]+")
+
+
+def _tokenize_topic(text: str) -> set[str]:
+    """Lowercase alphanumeric tokens (keeps c++, c#, .net intact), minus stopwords."""
+    if not text:
+        return set()
+    tokens = _TOPIC_TOKEN_RE.findall(text.lower())
+    return {t for t in tokens if len(t) >= 2 and t not in _TOPIC_STOPWORDS}
+
+
+def _result_matches_topic(result: Dict[str, Any], topic_tokens: set[str]) -> bool:
+    """True if a search result is on-topic.
+
+    A result matches when any significant topic token appears in the question
+    text, the result's own topic label, or its key concepts/tags. This is a
+    precision gate: semantic search returns nearest neighbours even when the
+    corpus is thin for a topic, so without this check off-topic questions slip
+    through when a topic is selected.
+    """
+    if not topic_tokens:
+        return True  # No topic selected -> nothing to gate on.
+
+    haystack_parts: List[str] = [
+        str(result.get("question") or ""),
+        str(result.get("topic") or ""),
+    ]
+    for field in ("key_concepts", "tags"):
+        value = result.get(field)
+        if isinstance(value, (list, tuple)):
+            haystack_parts.extend(str(v) for v in value)
+        elif value:
+            haystack_parts.append(str(value))
+
+    haystack_tokens = _tokenize_topic(" ".join(haystack_parts))
+    return bool(topic_tokens & haystack_tokens)
+
+
 class InterviewType(str, Enum):
     """Types of interview questions"""
     CODING = "coding"
@@ -564,7 +611,7 @@ Keep it under 100 words."""
         # Store answer and evaluation
         session.answers.append(answer)
         session.evaluations.append(evaluation)
-        
+
         # Move to next question
         session.current_question_index += 1
         
@@ -575,9 +622,9 @@ Keep it under 100 words."""
         self._persist_session(session)
         
         logger.info(f"Evaluated answer for session {session_id}, score: {evaluation.overall_score}")
-        
+
         return evaluation
-    
+
     async def _evaluate_answer(
         self,
         question: InterviewQuestion,
@@ -604,7 +651,9 @@ Keep it under 100 words."""
                 prompt,
                 api_key=api_key,
                 json_mode=True,
-                temperature=0.2,
+                # Slightly higher temperature so the model scores the actual answer
+                # instead of anchoring on / copying the example scores in the prompt.
+                temperature=0.45,
                 max_tokens=4000,
             )
 
@@ -645,13 +694,20 @@ EVALUATION GOALS:
 5. Include a MODEL ANSWER to learn from
 6. Suggest resources to study
 
-JSON STRUCTURE - RETURN EXACTLY THIS:
+SCORING DISCIPLINE (read carefully):
+- The numbers in the example below are ILLUSTRATIVE PLACEHOLDERS, not target scores.
+- Score each of the five dimensions from 0-10 based STRICTLY on the candidate's
+  actual answer above. A weak/empty answer must score low (0-3); an excellent
+  answer scores high (8-10). Most real answers are mixed — use the full range.
+- Do NOT copy the example numbers. Different answers MUST receive different scores.
+
+JSON STRUCTURE - fill every field based on the candidate's actual answer:
 {{
-  "correctness": 8.5,
-  "completeness": 7.0,
-  "clarity": 9.0,
-  "confidence": 8.0,
-  "technical_depth": 7.5,
+  "correctness": <0-10 for factual/technical accuracy>,
+  "completeness": <0-10 for coverage of expected points>,
+  "clarity": <0-10 for communication quality>,
+  "confidence": <0-10 for delivery confidence>,
+  "technical_depth": <0-10 for depth of reasoning>,
   
   "strengths": ["Mentioned API Gateway", "Clear explanation"],
   "weaknesses": ["No capacity math", "Missing observability"],
@@ -846,6 +902,17 @@ CRITICAL RULES:
     ) -> EvaluationResult:
         """Parse LLM response into EvaluationResult with ultra-robust error handling"""
 
+        # If the provider returned nothing (rate limit / auth error / outage),
+        # generate_text yields "". Do NOT run the regex fallback on an empty
+        # string — it would fabricate a misleading score from all-default
+        # values (every criterion -> 5.0). Fall back to the honest keyword-based
+        # basic evaluation instead.
+        if not response or not str(response).strip():
+            logger.warning(
+                "Empty LLM evaluation response (provider error/rate limit); using basic evaluation"
+            )
+            return self._basic_evaluation(question, answer)
+
         def _extract_json_object(text: str) -> str:
             if not text:
                 return text
@@ -860,9 +927,25 @@ CRITICAL RULES:
             if not (text or "").strip():
                 return None
 
-            candidate = _extract_json_object(text.strip())
+            stripped = text.strip()
 
-            # 1) Strict JSON
+            # 1) Strict JSON, tolerating trailing data after the object.
+            # Providers (and json_mode) frequently emit a valid object followed
+            # by a stray newline/second object, which `json.loads` rejects with
+            # "Extra data". `raw_decode` parses the first complete object and
+            # ignores the rest, so we don't fall through to lossy fallbacks.
+            brace_start = stripped.find("{")
+            if brace_start != -1:
+                try:
+                    parsed, _ = json.JSONDecoder().raw_decode(stripped[brace_start:])
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+
+            candidate = _extract_json_object(stripped)
+
+            # 1b) Strict JSON on the brace-trimmed candidate.
             try:
                 parsed = json.loads(candidate)
                 return parsed if isinstance(parsed, dict) else None
@@ -912,15 +995,24 @@ CRITICAL RULES:
             response = response.split("```", 1)[1].split("```", 1)[0]
         
         response = response.strip()
-        
-        # ===== BULLETPROOF JSON REPAIR SYSTEM =====
-        response = self._repair_malformed_json(response)
 
         # Always initialize so we never hit UnboundLocalError on malformed output.
         data: Optional[Dict] = None
-        
-        # Try parsing the repaired JSON (strict/loose)
+
+        # ===== PARSE FIRST, REPAIR ONLY IF NEEDED =====
+        # The response usually arrives as valid JSON (json_mode=True). The repair
+        # pass below does aggressive structural surgery — including naive brace
+        # counting and "} {" -> "}, {" rewrites — that CORRUPTS otherwise-valid
+        # JSON whenever a feedback/model_answer string contains code braces
+        # (common for Python/JS/CSS answers). So we try the untouched response
+        # first and only fall back to repair when real parsing fails.
         data = _try_parse_jsonish(response)
+        if isinstance(data, dict) and data:
+            logger.debug("Parsed LLM JSON without repair")
+        else:
+            response = self._repair_malformed_json(response)
+            data = _try_parse_jsonish(response)
+
         if isinstance(data, dict) and data:
             logger.debug("Successfully parsed JSON (strict/loose)")
         else:
@@ -1063,13 +1155,15 @@ CRITICAL RULES:
         
         try:
             data = {}
-            
+            real_matches = 0  # how many fields were actually found (vs defaulted)
+
             # Extract numeric scores
             for field in ['correctness', 'completeness', 'clarity', 'confidence', 'technical_depth']:
                 pattern = rf'["\']?{field}["\']?\s*:\s*([0-9.]+)'
                 match = re.search(pattern, text)
                 if match:
                     data[field] = float(match.group(1))
+                    real_matches += 1
                 else:
                     data[field] = 5.0  # Default
             
@@ -1079,6 +1173,7 @@ CRITICAL RULES:
                 match = re.search(pattern, text)
                 if match:
                     data[field] = match.group(1).replace('\\n', '\n')
+                    real_matches += 1
                 else:
                     # Prefer empty string over placeholders to keep UI clean.
                     data[field] = "" if field != "rating_category" else "Fair"
@@ -1113,9 +1208,18 @@ CRITICAL RULES:
                 else:
                     data[nested_field] = []
             
-            logger.info(f"Regex extraction recovered {len(data)} fields")
+            # Guard against fabricating a result from nothing: if not a single
+            # real field matched (e.g. the response was empty or non-JSON garbage
+            # from a failed/rate-limited call), the "data" dict is entirely
+            # defaults — returning it would invent a fake ~5.0 score. Signal
+            # failure instead so the caller uses the honest basic evaluation.
+            if real_matches == 0:
+                logger.warning("Regex extraction matched no real fields; refusing to fabricate a score")
+                return None
+
+            logger.info(f"Regex extraction recovered {real_matches} real fields")
             return data
-            
+
         except Exception as e:
             logger.error(f"Regex extraction failed: {e}")
             return None
@@ -1201,26 +1305,26 @@ CRITICAL RULES:
     ) -> List[InterviewQuestion]:
         """Generate questions for interview session"""
         
-        # Build search query based on interview type
+        # Build search query based on interview type.
+        #
+        # IMPORTANT: this query doubles as the *generation topic* downstream
+        # (the intelligence service feeds it into the LLM as `Topic: {query}`).
+        # So keep it tightly focused on the actual subject. Do NOT stuff it with
+        # resume skills — doing so makes the model cross-product the topic with
+        # each skill and emit shallow "How does {topic} use {skill}?" questions
+        # (e.g. "How does Agentic AI use Tailwind CSS?"). Resume-specific probing
+        # is handled separately by `_generate_resume_questions` below.
         if interview_type == InterviewType.CODING:
-            # For coding, explicitly request coding questions
-            query = f"{topic or 'coding'} algorithm coding questions with solutions"
+            query = f"{topic or 'coding'} coding interview problems"
         elif interview_type == InterviewType.TECHNICAL:
-            # For technical, explicitly exclude coding and request conceptual questions
-            query = f"{topic or 'technical'} conceptual interview questions explain how why when"
+            query = f"{topic or 'technical'} technical interview questions"
         elif interview_type == InterviewType.BEHAVIORAL:
-            query = f"behavioral interview questions STAR method {topic or ''}"
+            query = f"behavioral interview questions STAR method {topic or ''}".strip()
+        elif interview_type == InterviewType.SYSTEM_DESIGN:
+            query = f"{topic or 'system design'} system design interview questions"
         else:
-            query = f"{interview_type.value} interview questions"
-            if topic:
-                query = f"{topic} {query}"
+            query = f"{topic + ' ' if topic else ''}{interview_type.value} interview questions"
 
-        # Enrich query with resume skills if available
-        if resume_context and isinstance(resume_context, dict):
-            resume_skills = resume_context.get("skills", [])[:5]
-            if resume_skills:
-                query += f" {' '.join(resume_skills)}"
-        
         # Get questions from interview intelligence service
         try:
             results = await self.interview_service.search_questions(
@@ -1229,13 +1333,19 @@ CRITICAL RULES:
                 force_refresh=False,
                 api_key=api_key
             )
-            
-            # Randomize the pool to ensure variety on every new session
+
             import random
-            random.shuffle(results)
-            
-            # Convert to InterviewQuestion objects
-            questions = []
+
+            # Precompute topic tokens once for the relevance gate.
+            topic_tokens = _tokenize_topic(topic) if topic else set()
+
+            # Walk results in the engine's relevance order (do NOT shuffle the raw
+            # pool — that discards ranking and lets weak matches in). Split the
+            # filter-passing survivors into an on-topic band and an off-topic
+            # remainder so we can prefer on-topic questions and only fall back to
+            # the rest when there aren't enough.
+            on_topic: List[InterviewQuestion] = []
+            off_topic: List[InterviewQuestion] = []
             for idx, result in enumerate(results):
                 # CRITICAL FIX: Filter out coding questions from technical interviews
                 is_coding_flag = result.get("is_coding_question", False)
@@ -1255,17 +1365,17 @@ CRITICAL RULES:
                     has_real_code_solution = len(code_solution) > 0
 
                 is_coding_question = is_coding_flag_bool or question_type == "coding" or has_real_code_solution
-                
+
                 # Skip coding questions if this is a technical (non-coding) interview
                 if interview_type == InterviewType.TECHNICAL and is_coding_question:
                     logger.debug(f"Skipping coding question in technical interview: {result.get('question', '')[:50]}")
                     continue
-                
+
                 # Skip non-coding questions if this is a coding interview
                 if interview_type == InterviewType.CODING and not is_coding_question:
                     logger.debug(f"Skipping non-coding question in coding interview: {result.get('question', '')[:50]}")
                     continue
-                
+
                 question = InterviewQuestion(
                     question_id=f"q_{idx}_{uuid.uuid4().hex[:8]}",
                     question_text=result.get("question", ""),
@@ -1275,18 +1385,40 @@ CRITICAL RULES:
                     expected_points=result.get("key_concepts", []),
                     sample_answer=result.get("answer")
                 )
-                questions.append(question)
-                
-                # Stop when we have enough questions
-                if len(questions) >= num_questions:
-                    break
-            
-            logger.info(f"Generated {len(questions)} {interview_type.value} questions (filtered from {len(results)} total)")
-            
-            # If we didn't get enough questions, use fallback
+
+                if topic_tokens and _result_matches_topic(result, topic_tokens):
+                    on_topic.append(question)
+                elif not topic_tokens:
+                    on_topic.append(question)  # No topic gate -> everything qualifies.
+                else:
+                    off_topic.append(question)
+
+            # Variety on every new session WITHOUT sacrificing relevance: shuffle
+            # only within each band, so the on-topic questions we pick still vary
+            # but are always on-topic.
+            random.shuffle(on_topic)
+            random.shuffle(off_topic)
+
+            questions = on_topic[:num_questions]
+            if len(questions) < num_questions and off_topic:
+                if topic_tokens:
+                    logger.info(
+                        "Only %d on-topic questions for topic '%s'; backfilling %d from related results",
+                        len(questions), topic, min(len(off_topic), num_questions - len(questions)),
+                    )
+                questions.extend(off_topic[:num_questions - len(questions)])
+
+            logger.info(
+                f"Generated {len(questions)} {interview_type.value} questions "
+                f"({len(on_topic)} on-topic, {len(off_topic)} related, filtered from {len(results)} total)"
+            )
+
+            # If we didn't get enough questions, use a topic-aware fallback.
             if len(questions) < num_questions:
                 logger.warning(f"Only got {len(questions)} questions, padding with samples")
-                fallback = self._get_sample_questions(interview_type, difficulty, num_questions - len(questions))
+                fallback = self._get_sample_questions(
+                    interview_type, difficulty, num_questions - len(questions), topic=topic
+                )
                 questions.extend(fallback)
 
             # ── Resume-based question injection ───────────────────────────
@@ -1320,10 +1452,54 @@ CRITICAL RULES:
         self,
         interview_type: InterviewType,
         difficulty: DifficultyLevel,
-        num_questions: int
+        num_questions: int,
+        topic: Optional[str] = None,
     ) -> List[InterviewQuestion]:
-        """Fallback sample questions"""
-        
+        """Fallback sample questions.
+
+        When a topic is selected, generate topic-oriented questions so padding
+        never injects clearly off-topic questions (the previous behaviour padded
+        with hardcoded generic questions unrelated to the chosen topic).
+        """
+
+        clean_topic = (topic or "").strip()
+        if clean_topic:
+            topic_templates = {
+                InterviewType.CODING: [
+                    f"Implement a common algorithm or data structure used in {clean_topic}.",
+                    f"Write a function that solves a typical {clean_topic} problem and explain its complexity.",
+                    f"Given a real-world {clean_topic} scenario, code a solution and walk through edge cases.",
+                ],
+                InterviewType.BEHAVIORAL: [
+                    f"Tell me about a project where you worked with {clean_topic}.",
+                    f"Describe a challenge you faced while learning or applying {clean_topic} and how you handled it.",
+                    f"Give an example of a decision you made involving {clean_topic} and its trade-offs.",
+                ],
+                InterviewType.SYSTEM_DESIGN: [
+                    f"Design a system that relies heavily on {clean_topic}. Walk through the architecture.",
+                    f"How would you scale a {clean_topic}-based component to handle high load?",
+                    f"Discuss the trade-offs of different {clean_topic} approaches in a large system.",
+                ],
+                InterviewType.TECHNICAL: [
+                    f"Explain the core concepts behind {clean_topic} and when you would use it.",
+                    f"What are common pitfalls or misconceptions when working with {clean_topic}?",
+                    f"Compare {clean_topic} with an alternative approach and explain the trade-offs.",
+                ],
+            }
+            texts = topic_templates.get(interview_type, topic_templates[InterviewType.TECHNICAL])
+            questions: List[InterviewQuestion] = []
+            for idx, text in enumerate(texts[:num_questions]):
+                questions.append(InterviewQuestion(
+                    question_id=f"sample_topic_{idx}_{uuid.uuid4().hex[:6]}",
+                    question_text=text,
+                    interview_type=interview_type,
+                    difficulty=difficulty,
+                    topic=clean_topic,
+                    expected_points=[]
+                ))
+            if questions:
+                return questions
+
         samples = {
             InterviewType.CODING: [
                 "Implement a function to reverse a string",
@@ -1393,6 +1569,22 @@ CRITICAL RULES:
         if achievements:
             achievements_block = "Achievements:\n" + "\n".join(f"  • {a}" for a in achievements[:8])
 
+        # Rotate the probing angle each session so the same resume does not always
+        # yield the same questions. Shuffle so multiple questions cover different angles.
+        import random
+        focus_angles = [
+            "the technical trade-offs and design decisions behind a project",
+            "a specific quantitative metric or achievement and how it was measured",
+            "why a particular tool, framework, or technology was chosen over alternatives",
+            "a challenge, failure, or debugging story and how it was resolved",
+            "scaling, performance, or reliability decisions in their work",
+            "their individual contribution versus the team's on a project",
+        ]
+        random.shuffle(focus_angles)
+        angles_block = "FOCUS ANGLES (use a different angle for each question):\n" + "\n".join(
+            f"  {i + 1}. Probe {angle}" for i, angle in enumerate(focus_angles[:max(1, count)])
+        )
+
         prompt = f"""Generate exactly {count} interview questions that probe specific claims from this candidate's resume.
 
 Resume Summary: {summary}
@@ -1402,6 +1594,8 @@ Skills: {', '.join(skills[:15])}
 
 Interview Type: {interview_type.value}
 Difficulty: {difficulty.value}
+
+{angles_block}
 
 RULES:
 1. Each question MUST reference a specific claim, project, or achievement from the resume.

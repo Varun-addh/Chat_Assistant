@@ -867,6 +867,11 @@ class PracticeModeService:
             # Get session
             session = self.sessions.get(session_id)
             if not session:
+                available_ids = list(self.sessions.keys())
+                logger.warning(
+                    f"Session {session_id} not found. Available sessions: "
+                    f"{available_ids[:5]}{'...' if len(available_ids) > 5 else ''}"
+                )
                 raise ValueError(f"Session not found: {session_id}")
             
             # Validate the acknowledged question matches current state

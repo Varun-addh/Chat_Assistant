@@ -41,6 +41,10 @@ pip-wheel-metadata/
 # Application data (runtime-generated)
 data/
 
+# Captured evaluation failures (CAUSA analysis).
+# Contains verbatim user answers and session ids — never commit.
+captured_failures/
+
 # Documentation & generated files (PDFs, HTML exports, etc.)
 docs/
 

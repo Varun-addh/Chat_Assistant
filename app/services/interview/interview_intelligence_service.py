@@ -1060,7 +1060,19 @@ CRITICAL FORMAT RULES:
                 **VARIETY & DYNAMISM HINT:**
                 Current Generation Timestamp: {datetime.now().isoformat()}
                 Ensure these questions are unique and varied. Avoid the most common questions and focus on diverse aspects of {request.query}.
-                
+
+                **QUESTION STYLE — WRITE LIKE A REAL INTERVIEWER (critical):**
+                - Each question must dig into the SUBSTANCE of "{request.query}" itself — its core
+                  concepts, architecture, trade-offs, failure modes, and real decisions an engineer makes.
+                - Vary the FORM across questions: scenario/situational ("You need to... how would you..."),
+                  trade-off comparisons ("When would you choose X over Y?"), debugging/failure analysis,
+                  design decisions, and "walk me through how ... works under the hood".
+                - Sound like a human interviewer probing for depth, NOT a textbook glossary.
+                - BANNED shallow templates — do NOT produce questions shaped like:
+                  "Explain the role of <tool> in {request.query}", "How does {request.query} use <language>",
+                  or "What is <X>?" one-liners. These feel generic and fake.
+                - Do NOT drag in unrelated tools/languages just because they exist. Stay on the actual subject.
+
                 For EVERY question, provide a DETAILED yet FOCUSED answer that includes:
                 
                 1. CONCEPT (2-3 sentences): 

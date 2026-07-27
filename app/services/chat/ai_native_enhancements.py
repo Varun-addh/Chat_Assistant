@@ -879,13 +879,49 @@ class RealTimeSearchStream:
 
 class UserFeedbackSystem:
     """
-    Track user feedback to improve question quality over time
-    Implements RLHF (Reinforcement Learning from Human Feedback)
+    Track user feedback to improve question quality over time.
+
+    Votes and reports are persisted as structured rows in the existing
+    ``event_records`` table (see :class:`app.models.EventRecord`). Counts are
+    computed by aggregating those rows, with one effective vote per user per
+    question (latest vote wins) so repeat voting cannot inflate credibility.
     """
-    
-    def __init__(self, db_client):
+
+    VOTE_EVENT = "question_vote"
+    REPORT_EVENT = "question_report"
+    REVIEW_EVENT = "question_flagged_for_review"
+    REPORT_REVIEW_THRESHOLD = 3
+
+    def __init__(self, db_client=None):
+        # ``db_client`` is accepted for backwards compatibility but no longer
+        # required: persistence uses the app-wide SQLAlchemy session factory so
+        # the feedback signal survives restarts and is shared across workers.
         self.db = db_client
-    
+
+    @staticmethod
+    def _write_event(event_type: str, question_id: str, user_id: str, extra: Dict[str, Any]) -> bool:
+        """Append an immutable feedback event. Never raises into request flows."""
+        try:
+            from app.database import get_db_context
+            from app.models import EventRecord
+
+            with get_db_context() as db:
+                rec = EventRecord(
+                    user_id=user_id or "unknown",
+                    session_id=None,
+                    event_type=event_type,
+                    question_id=question_id,
+                    content_hash=None,
+                    extra_data=extra,
+                    timestamp=utcnow(),
+                )
+                db.add(rec)
+                db.commit()
+            return True
+        except Exception:
+            logger.warning("Failed to persist feedback event %s for %s", event_type, question_id, exc_info=True)
+            return False
+
     async def record_vote(
         self,
         question_id: str,
@@ -893,82 +929,132 @@ class UserFeedbackSystem:
         vote: int,  # +1 or -1
         feedback_text: Optional[str] = None
     ):
-        """Record user vote on question quality"""
-        
-        vote_data = {
-            'question_id': question_id,
-            'user_id': user_id,
-            'vote': vote,
-            'feedback': feedback_text,
-            'timestamp': utcnow().isoformat()
-        }
-        
-        # Store in database
-        # TODO: Implement actual DB storage
-        logger.info(f"Recorded vote: {vote_data}")
-        
-        # Update question credibility score
-        await self._update_credibility_score(question_id, vote)
-    
-    async def _update_credibility_score(self, question_id: str, vote: int):
-        """Update question credibility based on votes"""
-        
-        # Get current votes
-        total_votes = await self._get_vote_count(question_id)
-        upvotes = await self._get_upvote_count(question_id)
-        
-        if total_votes > 0:
-            # Calculate new credibility (0.0 - 1.0)
-            vote_ratio = upvotes / total_votes
-            
-            # Blend with original credibility
-            # More votes = more weight to user feedback
-            vote_weight = min(total_votes / 100, 0.7)  # Max 70% weight
-            original_weight = 1.0 - vote_weight
-            
-            # TODO: Update in vector DB
-            new_credibility = (vote_ratio * vote_weight) + (0.5 * original_weight)
-            
-            logger.info(f"Updated credibility for {question_id}: {new_credibility:.2f}")
-    
+        """Record user vote on question quality."""
+        normalized_vote = 1 if vote > 0 else -1
+        persisted = await asyncio.to_thread(
+            self._write_event,
+            self.VOTE_EVENT,
+            question_id,
+            user_id,
+            {"vote": normalized_vote, "feedback": feedback_text},
+        )
+        if persisted:
+            await self._update_credibility_score(question_id)
+        return persisted
+
+    def _latest_votes(self, question_id: str) -> Dict[str, int]:
+        """Return {user_id: latest_vote} for a question (empty on any failure)."""
+        try:
+            from app.database import get_db_context
+            from app.models import EventRecord
+
+            with get_db_context() as db:
+                rows = (
+                    db.query(EventRecord)
+                    .filter(
+                        EventRecord.event_type == self.VOTE_EVENT,
+                        EventRecord.question_id == question_id,
+                    )
+                    .order_by(EventRecord.timestamp.asc())
+                    .all()
+                )
+            latest: Dict[str, int] = {}
+            for row in rows:
+                data = row.extra_data or {}
+                try:
+                    latest[row.user_id] = int(data.get("vote", 0))
+                except (TypeError, ValueError):
+                    continue
+            return latest
+        except Exception:
+            logger.warning("Failed to load votes for %s", question_id, exc_info=True)
+            return {}
+
+    async def _update_credibility_score(self, question_id: str):
+        """Recompute and log question credibility based on persisted votes."""
+        votes = await asyncio.to_thread(self._latest_votes, question_id)
+        total_votes = len(votes)
+        if total_votes <= 0:
+            return None
+
+        upvotes = sum(1 for v in votes.values() if v > 0)
+        vote_ratio = upvotes / total_votes
+
+        # More votes = more weight to user feedback (capped at 70%).
+        vote_weight = min(total_votes / 100, 0.7)
+        original_weight = 1.0 - vote_weight
+        new_credibility = (vote_ratio * vote_weight) + (0.5 * original_weight)
+
+        logger.info(
+            "Updated credibility for %s: %.2f (%d/%d upvotes)",
+            question_id, new_credibility, upvotes, total_votes,
+        )
+        return new_credibility
+
     async def _get_vote_count(self, question_id: str) -> int:
-        # TODO: Implement actual DB query
-        return 10
-    
+        votes = await asyncio.to_thread(self._latest_votes, question_id)
+        return len(votes)
+
     async def _get_upvote_count(self, question_id: str) -> int:
-        # TODO: Implement actual DB query
-        return 7
-    
+        votes = await asyncio.to_thread(self._latest_votes, question_id)
+        return sum(1 for v in votes.values() if v > 0)
+
     async def report_incorrect(
         self,
         question_id: str,
         user_id: str,
         reason: str
     ):
-        """Report incorrect or outdated question"""
-        
-        report = {
-            'question_id': question_id,
-            'user_id': user_id,
-            'reason': reason,
-            'timestamp': utcnow().isoformat()
-        }
-        
-        # Store report
-        # TODO: Implement actual DB storage
-        logger.warning(f"Question reported: {report}")
-        
-        # If multiple reports, mark for review
+        """Report incorrect or outdated question."""
+        persisted = await asyncio.to_thread(
+            self._write_event,
+            self.REPORT_EVENT,
+            question_id,
+            user_id,
+            {"reason": reason},
+        )
+        if not persisted:
+            return False
+
+        # If multiple distinct users have reported it, mark for review.
         report_count = await self._get_report_count(question_id)
-        if report_count >= 3:
+        if report_count >= self.REPORT_REVIEW_THRESHOLD:
             await self._mark_for_review(question_id)
-    
+        return True
+
+    def _count_reporters(self, question_id: str) -> int:
+        """Number of distinct users who reported a question (0 on failure)."""
+        try:
+            from app.database import get_db_context
+            from app.models import EventRecord
+
+            with get_db_context() as db:
+                rows = (
+                    db.query(EventRecord.user_id)
+                    .filter(
+                        EventRecord.event_type == self.REPORT_EVENT,
+                        EventRecord.question_id == question_id,
+                    )
+                    .distinct()
+                    .all()
+                )
+            return len(rows)
+        except Exception:
+            logger.warning("Failed to count reports for %s", question_id, exc_info=True)
+            return 0
+
     async def _get_report_count(self, question_id: str) -> int:
-        # TODO: Implement actual DB query
-        return 1
-    
+        return await asyncio.to_thread(self._count_reporters, question_id)
+
     async def _mark_for_review(self, question_id: str):
-        """Mark question for manual review"""
+        """Mark question for manual review (recorded as an event)."""
+        await asyncio.to_thread(
+            self._write_event,
+            self.REVIEW_EVENT,
+            question_id,
+            "system",
+            {"reason": "multiple_reports"},
+        )
         logger.warning(f"Question {question_id} marked for review (multiple reports)")
 
 
